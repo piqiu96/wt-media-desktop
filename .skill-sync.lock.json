@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "repository": "wt-media-desktop",
+  "skills_revision": "2026.07.14.bootstrap",
+  "status": "scaffold-only",
+  "included_skill_groups": [
+    "common",
+    "desktop"
+  ]
+}

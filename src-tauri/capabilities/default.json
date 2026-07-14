@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default scaffold capability. Tighten permissions before enabling real commands.",
+  "windows": [
+    "main"
+  ],
+  "permissions": []
+}
