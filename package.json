@@ -6,12 +6,13 @@
   "scripts": {
     "bootstrap": "echo \"Install dependencies after scaffold approval\"",
     "dev": "echo \"Desktop dev server is not wired in scaffold phase\"",
-    "test": "echo \"No desktop tests yet\"",
+    "test": "npm run verify",
     "lint": "echo \"No desktop lint configured yet\"",
     "generate": "echo \"No generated clients yet\"",
     "build": "echo \"Desktop build is not wired in scaffold phase\"",
     "package": "echo \"Desktop packaging is not wired in scaffold phase\"",
-    "verify": "echo \"Desktop verification is not wired in scaffold phase\""
+    "verify": "node scripts/health-check.mjs",
+    "health": "node scripts/health-check.mjs"
   },
   "dependencies": {},
   "devDependencies": {}
