@@ -20,3 +20,11 @@ This repository is scaffolded as a Tauri 2 + Vue 3 shell. Node, Rust, and Tauri 
 - `src-tauri/binaries`: future sidecar component placeholders.
 - `src-tauri/capabilities`: Tauri permissions.
 - `contracts.lock.json`: consumed contract versions.
+
+## M0 Verification
+
+From this repository:
+
+```text
+npm run verify
+```
