@@ -2,8 +2,8 @@
   "schema_version": 1,
   "contract_revision": "m2-user-account-runtime-acceptance-20260714.9",
   "consumes": {
-    "cloud_agent_api": "v1@2026.07.14.6",
-    "local_agent_api": "v1@2026.07.14.6",
+    "cloud_agent_api": "v1@2026.07.14.7",
+    "local_agent_api": "v1@2026.07.14.7",
     "local_event_schemas": "profile-guard@2026.07.14.8",
     "local_status_enums": "status@2026.07.14.8"
   }
