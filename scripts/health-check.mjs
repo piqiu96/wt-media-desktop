@@ -19,6 +19,7 @@ const requiredFiles = [
 ];
 
 const mainSource = readText("src/main.ts");
+const nativeBridgeSource = readText("src-tauri/src/local_agent/mod.rs");
 
 const checks = [
   ["package name", pkg.name === "wt-media-desktop"],
@@ -30,6 +31,8 @@ const checks = [
   ["local event schema lock", lock.consumes?.local_event_schemas === "profile-guard@2026.07.14.8"],
   ["cloud agent api lock", lock.consumes?.cloud_agent_api === "v1@2026.07.14.6"],
   ["binding command declared", readText("src/services/local-agent.js").includes("local_agent_bind_session")],
+  ["native binding transport declared", nativeBridgeSource.includes("consume_binding_ticket")],
+  ["native binding result excludes credentials", nativeBridgeSource.includes("BoundNodeFacts") && !nativeBridgeSource.includes("node_credential")],
 ];
 
 const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
