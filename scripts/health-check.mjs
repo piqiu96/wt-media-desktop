@@ -26,8 +26,10 @@ const checks = [
   ["tauri window", Array.isArray(tauri.app?.windows) && tauri.app.windows.length > 0],
   ["local agent files", requiredFiles.every((path) => existsSync(path))],
   ["main uses local agent status page", mainSource.includes("createLocalAgentStatusPage")],
-  ["local agent api lock", lock.consumes?.local_agent_api === "v1@2026.07.14.5"],
-  ["local event schema lock", lock.consumes?.local_event_schemas === "status@2026.07.14.5"],
+  ["local agent api lock", lock.consumes?.local_agent_api === "v1@2026.07.14.6"],
+  ["local event schema lock", lock.consumes?.local_event_schemas === "profile-guard@2026.07.14.8"],
+  ["cloud agent api lock", lock.consumes?.cloud_agent_api === "v1@2026.07.14.6"],
+  ["binding command declared", readText("src/services/local-agent.js").includes("local_agent_bind_session")],
 ];
 
 const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
@@ -68,6 +70,20 @@ const behaviorChecks = [
   ["stop action", stopResult.status === "stopped"],
   ["no direct local agent url", !requiredFiles.some((path) => /127\\.0\\.0\\.1|localhost|local_token/i.test(readText(path)))],
 ];
+
+const invokeCalls = [];
+const nativeService = (await import("../src/services/local-agent.js")).createLocalAgentService({
+  async invoke(command, payload) {
+    invokeCalls.push({ command, payload });
+    return { id: "node-1", agent_id: "local-agent-dev", user_id: "user-1", status: "online" };
+  },
+});
+const boundNode = await nativeService.bindSession("one-use-ticket");
+behaviorChecks.push(
+  ["binding ticket passed once", invokeCalls.length === 1 && invokeCalls[0].payload?.bindingTicket === "one-use-ticket"],
+  ["binding returns no credential", boundNode.id === "node-1" && !("node_credential" in boundNode)],
+  ["binding ticket not persisted in service", !/localStorage|sessionStorage|writeFile|console\.(?:log|info).*binding/i.test(readText("src/services/local-agent.js"))],
+);
 
 const behaviorFailed = behaviorChecks.filter(([, ok]) => !ok).map(([name]) => name);
 

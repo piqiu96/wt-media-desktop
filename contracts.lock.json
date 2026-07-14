@@ -1,8 +1,10 @@
 {
   "schema_version": 1,
-  "contract_revision": "m1-desktop-local-agent-20260714.6",
+  "contract_revision": "m2-user-account-runtime-acceptance-20260714.9",
   "consumes": {
-    "local_agent_api": "v1@2026.07.14.5",
-    "local_event_schemas": "status@2026.07.14.5"
+    "cloud_agent_api": "v1@2026.07.14.6",
+    "local_agent_api": "v1@2026.07.14.6",
+    "local_event_schemas": "profile-guard@2026.07.14.8",
+    "local_status_enums": "status@2026.07.14.8"
   }
 }

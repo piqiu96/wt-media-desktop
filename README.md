@@ -23,9 +23,11 @@ This repository is scaffolded as a Tauri 2 + Vue 3 shell. Node, Rust, and Tauri 
 
 ## M1 Local Agent Control
 
-The M1 Desktop scaffold consumes Local Agent API `v1@2026.07.14.5` and Local event schema `status@2026.07.14.5`.
+The M2 Desktop boundary consumes Cloud-Agent API `v1@2026.07.14.6`, Local Agent API `v1@2026.07.14.6`, and Profile guard events `2026.07.14.8`.
 
 Desktop page code uses a Desktop-owned service and store boundary. It does not directly access Local Agent dynamic ports, tokens, or storage.
+
+The `local_agent_bind_session` native command accepts a short-lived one-use Cloud ticket. The Vue service passes it only as an invoke argument and normalizes the response so node/permit credentials are retained by the native/Agent boundary rather than application state.
 
 ## Verification
 
