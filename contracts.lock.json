@@ -1,5 +1,8 @@
 {
   "schema_version": 1,
-  "contract_revision": "m0-placeholder",
-  "consumes": {}
+  "contract_revision": "m1-desktop-local-agent-20260714.6",
+  "consumes": {
+    "local_agent_api": "v1@2026.07.14.5",
+    "local_event_schemas": "status@2026.07.14.5"
+  }
 }
