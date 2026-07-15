@@ -11,7 +11,16 @@ Tauri desktop shell skeleton for the modular social media operations platform.
 
 ## Bootstrap
 
-This repository is scaffolded as a Tauri 2 + Vue 3 shell. Node, Rust, and Tauri dependencies are not installed yet.
+This repository is a runnable Tauri 2 + Vue 3 shell. Use Node/npm plus Rust/Cargo from the local toolchain.
+
+```bash
+scripts/bootstrap.sh
+scripts/test.sh
+scripts/build.sh
+scripts/start.sh
+scripts/health.sh
+scripts/stop.sh
+```
 
 ## Key Directories
 
@@ -21,9 +30,9 @@ This repository is scaffolded as a Tauri 2 + Vue 3 shell. Node, Rust, and Tauri 
 - `src-tauri/capabilities`: Tauri permissions.
 - `contracts.lock.json`: consumed contract versions.
 
-## M1 Local Agent Control
+## Local Agent Control Boundary
 
-The M2 Desktop boundary consumes Cloud-Agent API `v1@2026.07.14.6`, Local Agent API `v1@2026.07.14.6`, and Profile guard events `2026.07.14.8`.
+The Desktop boundary consumes Cloud-Agent API `v1@2026.07.14.7`, Local Agent API `v1@2026.07.14.7`, and Profile guard events `profile-guard@2026.07.14.8`.
 
 Desktop page code uses a Desktop-owned service and store boundary. It does not directly access Local Agent dynamic ports, tokens, or storage.
 
@@ -35,4 +44,15 @@ From this repository:
 
 ```text
 npm run verify
+```
+
+For the full M0 desktop readiness gate:
+
+```text
+npm run lint
+npm test
+npm run build
+scripts/start.sh
+scripts/health.sh
+scripts/stop.sh
 ```

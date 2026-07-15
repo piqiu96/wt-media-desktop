@@ -5,9 +5,9 @@
   "identifier": "com.wtmedia.desktop",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "devUrl": "http://127.0.0.1:5174",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run web:build"
   },
   "app": {
     "windows": [

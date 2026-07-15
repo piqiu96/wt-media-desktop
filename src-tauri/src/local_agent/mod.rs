@@ -1,12 +1,14 @@
 //! Local Agent lifecycle and observation command boundary.
 
+use serde::Serialize;
+
 pub const STATUS_COMMAND: &str = "local_agent_status";
 pub const START_COMMAND: &str = "local_agent_start";
 pub const STOP_COMMAND: &str = "local_agent_stop";
 pub const NEXT_STATUS_EVENT_COMMAND: &str = "local_agent_next_status_event";
 pub const BIND_SESSION_COMMAND: &str = "local_agent_bind_session";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BoundNodeFacts {
     pub id: String,
     pub agent_id: String,
