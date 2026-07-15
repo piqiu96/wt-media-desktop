@@ -22,16 +22,17 @@ function createHttpLocalAgentService() {
 
   return {
     async status() {
-      // Local Agent /api/v1/status returns the status object directly (no {data:...} wrapper).
+      // Agent returns {data: {agent_id, status, ...}} or flat {agent_id, status, ...}.
       let body = await fetchJson("/api/v1/status");
-      if (body) {
+      const src = body?.data ?? body;
+      if (src) {
         return {
-          agent_id: String(body.agent_id ?? DEFAULT.agent_id),
-          status: String(body.status ?? DEFAULT.status),
-          current_task_id: body.current_task_id ?? null,
-          current_task_progress: body.current_task_progress ?? null,
-          current_task_status: body.current_task_status ?? null,
-          pending_result_count: Number(body.pending_result_count ?? 0),
+          agent_id: String(src.agent_id ?? DEFAULT.agent_id),
+          status: String(src.status ?? DEFAULT.status),
+          current_task_id: src.current_task_id ?? null,
+          current_task_progress: src.current_task_progress ?? null,
+          current_task_status: src.current_task_status ?? null,
+          pending_result_count: Number(src.pending_result_count ?? 0),
         };
       }
       return { ...DEFAULT };
