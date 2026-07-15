@@ -1,3 +1,5 @@
+import { createApp } from "vue";
+import App from "./App.vue";
 import { createLocalAgentStatusPage } from "./local-pages/local-agent-status.js";
 import { createMockLocalAgentService } from "./services/local-agent.js";
 import { createLocalAgentStore } from "./stores/local-agent-store.js";
@@ -9,6 +11,4 @@ export async function createDesktopStatusPreview() {
   return createLocalAgentStatusPage(store.snapshot());
 }
 
-createDesktopStatusPreview().then((page) => {
-  console.info(`wt-media-desktop local agent: ${page.primaryStatus}`);
-});
+createApp(App).mount("#app");
