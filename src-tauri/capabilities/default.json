@@ -1,9 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default scaffold capability. Tighten permissions before enabling real commands.",
-  "windows": [
-    "main"
-  ],
-  "permissions": []
+  "description": "M1 capabilities for local agent HTTP bridge and shell sidecar.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:default",
+    "shell:allow-open",
+    "shell:allow-spawn",
+    "shell:allow-execute"
+  ]
 }

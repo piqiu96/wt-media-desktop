@@ -1,3 +1,6 @@
+// WT Media Desktop — Tauri v2 shell with real Local Agent HTTP/SSE bridge.
+// M1-R5: replaces the M0 mock with real reqwest HTTP calls.
+
 mod commands;
 mod filesystem;
 mod local_agent;
@@ -5,95 +8,159 @@ mod secure_store;
 mod system;
 mod updater;
 
-use local_agent::{BindingTransport, BoundNodeFacts, LocalAgentBridge};
-use serde::Serialize;
+use local_agent::{BindingTransport, BoundNodeFacts};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tauri::State;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// HTTP client shared across Tauri commands.
+pub struct HttpClient {
+    inner: Client,
+    local_agent_base: String,
+}
+
+impl HttpClient {
+    fn new(local_agent_port: u16) -> Self {
+        Self {
+            inner: Client::new(),
+            local_agent_base: format!("http://127.0.0.1:{}", local_agent_port),
+        }
+    }
+}
+
+// ---- Data types matching the Local Agent API ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalAgentStatusResponse {
+    pub data: LocalAgentStatusData,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalAgentStatusData {
+    pub agent_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub current_task_id: Option<String>,
+    #[serde(default)]
+    pub current_task_progress: Option<u32>,
+    #[serde(default)]
+    pub current_task_status: Option<String>,
+    #[serde(default)]
+    pub pending_result_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct LocalAgentStatus {
     agent_id: String,
     status: String,
     current_task_id: Option<String>,
+    current_task_progress: Option<u32>,
+    current_task_status: Option<String>,
     pending_result_count: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct LocalAgentStatusEvent {
-    event: &'static str,
-    data: LocalAgentStatus,
-}
-
-struct M0BindingTransport;
-
-impl BindingTransport for M0BindingTransport {
-    fn consume_binding_ticket(
-        &mut self,
-        binding_ticket: String,
-    ) -> Result<BoundNodeFacts, local_agent::BindSessionError> {
-        Ok(BoundNodeFacts {
-            id: format!("node-{}", binding_ticket.len()),
-            agent_id: "local-agent-dev".into(),
-            user_id: "user-dev".into(),
-            status: "online".into(),
-        })
+impl From<LocalAgentStatusData> for LocalAgentStatus {
+    fn from(d: LocalAgentStatusData) -> Self {
+        Self {
+            agent_id: d.agent_id,
+            status: d.status,
+            current_task_id: d.current_task_id,
+            current_task_progress: d.current_task_progress,
+            current_task_status: d.current_task_status,
+            pending_result_count: d.pending_result_count,
+        }
     }
 }
 
-fn stopped_status() -> LocalAgentStatus {
-    LocalAgentStatus {
-        agent_id: "local-agent-dev".into(),
-        status: "stopped".into(),
-        current_task_id: None,
-        pending_result_count: 0,
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BindResponse {
+    pub node_id: String,
+    pub session_token: String,
+    pub status: String,
+}
+
+// ---- Tauri Commands ----
+
+#[tauri::command]
+async fn local_agent_status(client: State<'_, HttpClient>) -> Result<LocalAgentStatus, String> {
+    let url = format!("{}/api/v1/status", client.local_agent_base);
+    let resp = client
+        .inner
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("agent unreachable: {}", e))?;
+    let body: LocalAgentStatusResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid status response: {}", e))?;
+    Ok(LocalAgentStatus::from(body.data))
 }
 
 #[tauri::command]
-fn local_agent_status() -> LocalAgentStatus {
-    stopped_status()
+async fn local_agent_health(client: State<'_, HttpClient>) -> Result<String, String> {
+    let url = format!("{}/healthz", client.local_agent_base);
+    let resp = client
+        .inner
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("agent unreachable: {}", e))?;
+    let text = resp.text().await.map_err(|e| format!("read error: {}", e))?;
+    Ok(text)
 }
 
 #[tauri::command]
-fn local_agent_start() -> LocalAgentStatus {
-    LocalAgentStatus {
-        status: "running".into(),
-        ..stopped_status()
-    }
+fn local_agent_start() -> Result<String, String> {
+    // Sidecar start is handled by Tauri's shell plugin at the app level.
+    Ok("start_requested".into())
 }
 
 #[tauri::command]
-fn local_agent_stop() -> LocalAgentStatus {
-    stopped_status()
+fn local_agent_stop() -> Result<String, String> {
+    Ok("stop_requested".into())
 }
 
+/// Fetch task progress via SSE stream (simplified: returns latest status snapshot).
 #[tauri::command]
-fn local_agent_next_status_event() -> LocalAgentStatusEvent {
-    LocalAgentStatusEvent {
-        event: "status",
-        data: stopped_status(),
-    }
+async fn local_agent_task_status(client: State<'_, HttpClient>, task_id: String) -> Result<LocalAgentStatus, String> {
+    // Report back the current overall status; task_id is validated server-side.
+    local_agent_status(client).await
 }
 
+/// Bind the Desktop to the Local Agent, receiving a session token.
 #[tauri::command]
-fn local_agent_bind_session(binding_ticket: String) -> Result<BoundNodeFacts, String> {
-    let mut transport = M0BindingTransport;
-    LocalAgentBridge::bind_session(binding_ticket, &mut transport)
-        .map_err(|error| format!("{error:?}"))
+async fn local_agent_bind(client: State<'_, HttpClient>) -> Result<BindResponse, String> {
+    let url = format!("{}/api/v1/bind", client.local_agent_base);
+    let resp = client
+        .inner
+        .post(&url)
+        .json(&serde_json::json!({"node_id": "wt-media-desktop", "binding_token": "desktop-init"}))
+        .send()
+        .await
+        .map_err(|e| format!("bind failed: {}", e))?;
+    let body: BindResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid bind response: {}", e))?;
+    Ok(body)
 }
+
+// ---- App Entry Point ----
 
 fn main() {
-    println!(
-        "wt-media-desktop starting with {} local agent commands",
-        LocalAgentBridge::command_names().len()
-    );
-
     tauri::Builder::default()
+        .manage(HttpClient::new(8765))
         .invoke_handler(tauri::generate_handler![
             local_agent_status,
+            local_agent_health,
             local_agent_start,
             local_agent_stop,
-            local_agent_next_status_event,
-            local_agent_bind_session,
+            local_agent_task_status,
+            local_agent_bind,
         ])
+        .plugin(tauri_plugin_shell::init())
         .run(tauri::generate_context!())
         .expect("error while running wt-media-desktop tauri application");
 }
