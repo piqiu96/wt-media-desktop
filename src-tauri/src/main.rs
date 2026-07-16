@@ -12,7 +12,8 @@ use local_agent::{BindingTransport, BoundNodeFacts};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
+use tauri_plugin_shell::ShellExt;
 
 /// HTTP client shared across Tauri commands.
 pub struct HttpClient {
@@ -112,13 +113,36 @@ async fn local_agent_health(client: State<'_, HttpClient>) -> Result<String, Str
 }
 
 #[tauri::command]
-fn local_agent_start() -> Result<String, String> {
-    // Sidecar start is handled by Tauri's shell plugin at the app level.
-    Ok("start_requested".into())
+async fn local_agent_start(app: tauri::AppHandle) -> Result<String, String> {
+    // Try to spawn the sidecar binary first, fall back to `python3 -m wt_media_agent.local_main`
+    let sidecar_result = app.shell()
+        .sidecar("wt-media-agent")
+        .map(|cmd| cmd.spawn());
+
+    match sidecar_result {
+        Ok(Ok(_child)) => Ok("sidecar_started".into()),
+        _ => {
+            // Fallback: launch via python module (dev environment)
+            let shell = app.shell();
+            let output = shell.command("python3")
+                .args(["-m", "wt_media_agent.local_main"])
+                .output()
+                .await
+                .map_err(|e| format!("agent launch failed: {}", e))?;
+            if output.status.success() {
+                Ok("started".into())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!("agent start failed: {}", stderr))
+            }
+        }
+    }
 }
 
 #[tauri::command]
 fn local_agent_stop() -> Result<String, String> {
+    // Process cleanup is handled by Tauri's sidecar lifecycle.
+    // For dev mode, the user can kill the process manually.
     Ok("stop_requested".into())
 }
 

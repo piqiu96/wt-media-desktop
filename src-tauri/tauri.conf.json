@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.wtmedia.desktop",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../.generated/frontend",
     "devUrl": "http://127.0.0.1:5174",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run web:build"
+    "beforeDevCommand": "cd ../../wt-media-cloud/web && npm run dev:desktop",
+    "beforeBuildCommand": "../../wt-media-workspace/scripts/build-desktop.sh"
   },
   "app": {
     "windows": [
