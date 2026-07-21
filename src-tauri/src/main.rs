@@ -13,6 +13,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{Manager, State};
+use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 /// HTTP client shared across Tauri commands.
@@ -20,6 +21,12 @@ pub struct HttpClient {
     inner: Client,
     local_agent_base: String,
 }
+
+/// Owns the Local Agent child for the lifetime of the Desktop session.
+/// Keeping the handle here makes start/stop deterministic in both packaged
+/// sidecar mode and the Python fallback used by development builds.
+#[derive(Default)]
+pub struct AgentProcess(Mutex<Option<CommandChild>>);
 
 impl HttpClient {
     fn new(local_agent_port: u16) -> Self {
@@ -108,47 +115,78 @@ async fn local_agent_health(client: State<'_, HttpClient>) -> Result<String, Str
         .send()
         .await
         .map_err(|e| format!("agent unreachable: {}", e))?;
-    let text = resp.text().await.map_err(|e| format!("read error: {}", e))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("read error: {}", e))?;
     Ok(text)
 }
 
 #[tauri::command]
-async fn local_agent_start(app: tauri::AppHandle) -> Result<String, String> {
+async fn local_agent_start(
+    app: tauri::AppHandle,
+    process: State<'_, AgentProcess>,
+) -> Result<String, String> {
+    if process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .is_some()
+    {
+        return Ok("already_running".into());
+    }
     // Try to spawn the sidecar binary first, fall back to `python3 -m wt_media_agent.local_main`
-    let sidecar_result = app.shell()
-        .sidecar("wt-media-agent")
-        .map(|cmd| cmd.spawn());
+    let sidecar_result = app.shell().sidecar("wt-media-agent").map(|cmd| cmd.spawn());
 
     match sidecar_result {
-        Ok(Ok(_child)) => Ok("sidecar_started".into()),
+        Ok(Ok((_events, child))) => {
+            process
+                .0
+                .lock()
+                .map_err(|_| "agent process lock poisoned")?
+                .replace(child);
+            Ok("sidecar_started".into())
+        }
         _ => {
             // Fallback: launch via python module (dev environment)
             let shell = app.shell();
-            let output = shell.command("python3")
+            let (_events, child) = shell
+                .command("python3")
                 .args(["-m", "wt_media_agent.local_main"])
-                .output()
-                .await
+                .spawn()
                 .map_err(|e| format!("agent launch failed: {}", e))?;
-            if output.status.success() {
-                Ok("started".into())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("agent start failed: {}", stderr))
-            }
+            process
+                .0
+                .lock()
+                .map_err(|_| "agent process lock poisoned")?
+                .replace(child);
+            Ok("started".into())
         }
     }
 }
 
 #[tauri::command]
-fn local_agent_stop() -> Result<String, String> {
-    // Process cleanup is handled by Tauri's sidecar lifecycle.
-    // For dev mode, the user can kill the process manually.
-    Ok("stop_requested".into())
+fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, String> {
+    let child = process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .take();
+    match child {
+        Some(child) => child
+            .kill()
+            .map(|_| "stopped".into())
+            .map_err(|e| format!("agent stop failed: {}", e)),
+        None => Ok("not_running".into()),
+    }
 }
 
 /// Fetch task progress via SSE stream (simplified: returns latest status snapshot).
 #[tauri::command]
-async fn local_agent_task_status(client: State<'_, HttpClient>, task_id: String) -> Result<LocalAgentStatus, String> {
+async fn local_agent_task_status(
+    client: State<'_, HttpClient>,
+    task_id: String,
+) -> Result<LocalAgentStatus, String> {
     // Report back the current overall status; task_id is validated server-side.
     local_agent_status(client).await
 }
@@ -176,6 +214,7 @@ async fn local_agent_bind(client: State<'_, HttpClient>) -> Result<BindResponse,
 fn main() {
     tauri::Builder::default()
         .manage(HttpClient::new(8765))
+        .manage(AgentProcess::default())
         .invoke_handler(tauri::generate_handler![
             local_agent_status,
             local_agent_health,
