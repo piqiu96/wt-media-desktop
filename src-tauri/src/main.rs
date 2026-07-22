@@ -233,6 +233,34 @@ async fn local_agent_bind(client: State<'_, HttpClient>) -> Result<BindResponse,
     Ok(body)
 }
 
+/// Read the current BitBrowser Profile snapshot through the Local Agent.
+///
+/// Desktop owns this local bridge. The Vue layer must not call the Local Agent
+/// port or hold Local Agent credentials directly.
+#[tauri::command]
+async fn local_agent_profile_scan(
+    client: State<'_, HttpClient>,
+) -> Result<serde_json::Value, String> {
+    let url = format!(
+        "{}/api/v1/bit-browser/profile-scans",
+        client.local_agent_base
+    );
+    let resp = client
+        .inner
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("profile scan failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("profile scan failed: {} {}", status, text));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("invalid profile scan response: {}", e))
+}
+
 // ---- App Entry Point ----
 
 fn main() {
@@ -246,6 +274,7 @@ fn main() {
             local_agent_stop,
             local_agent_task_status,
             local_agent_bind,
+            local_agent_profile_scan,
         ])
         .plugin(tauri_plugin_shell::init())
         .run(tauri::generate_context!())
