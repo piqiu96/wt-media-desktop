@@ -46,8 +46,20 @@ pub struct LocalAgentStatusResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalAgentStatusData {
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub agent_id: String,
     pub status: String,
+    #[serde(default)]
+    pub bitbrowser_status: Option<String>,
+    #[serde(default)]
+    pub main_user_id: Option<String>,
+    #[serde(default)]
+    pub operating_system: Option<String>,
+    #[serde(default)]
+    pub cpu_architecture: Option<String>,
+    #[serde(default)]
+    pub agent_version: Option<String>,
     #[serde(default)]
     pub current_task_id: Option<String>,
     #[serde(default)]
@@ -60,8 +72,14 @@ pub struct LocalAgentStatusData {
 
 #[derive(Clone, Debug, Serialize)]
 struct LocalAgentStatus {
+    node_id: Option<String>,
     agent_id: String,
     status: String,
+    bitbrowser_status: Option<String>,
+    main_user_id: Option<String>,
+    operating_system: Option<String>,
+    cpu_architecture: Option<String>,
+    agent_version: Option<String>,
     current_task_id: Option<String>,
     current_task_progress: Option<u32>,
     current_task_status: Option<String>,
@@ -71,8 +89,14 @@ struct LocalAgentStatus {
 impl From<LocalAgentStatusData> for LocalAgentStatus {
     fn from(d: LocalAgentStatusData) -> Self {
         Self {
+            node_id: d.node_id,
             agent_id: d.agent_id,
             status: d.status,
+            bitbrowser_status: d.bitbrowser_status,
+            main_user_id: d.main_user_id,
+            operating_system: d.operating_system,
+            cpu_architecture: d.cpu_architecture,
+            agent_version: d.agent_version,
             current_task_id: d.current_task_id,
             current_task_progress: d.current_task_progress,
             current_task_status: d.current_task_status,
