@@ -275,6 +275,36 @@ struct RestoreProfileVerification {
     status: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ProfileOperationArgs {
+    bit_profile_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CreateProfileArgs {
+    name: String,
+    group_id: String,
+    #[serde(default)]
+    group_name: String,
+    #[serde(default)]
+    seq: Option<i64>,
+    #[serde(default)]
+    remark: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProfileOperationResult {
+    bit_profile_id: String,
+    status: String,
+    snapshot: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CreateProfileResult {
+    bit_profile_id: String,
+    snapshot: serde_json::Value,
+}
+
 // ---- Tauri Commands ----
 
 #[tauri::command]
@@ -788,6 +818,108 @@ async fn local_agent_profile_scan(
         .map_err(|e| format!("invalid profile scan response: {}", e))
 }
 
+#[tauri::command]
+async fn local_agent_profile_groups(
+    client: State<'_, HttpClient>,
+) -> Result<serde_json::Value, String> {
+    let url = format!(
+        "{}/api/v1/bit-browser/profile-groups",
+        client.local_agent_base
+    );
+    let resp = client
+        .inner
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("读取BitBrowser分组失败: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("读取BitBrowser分组失败: {} {}", status, text));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("BitBrowser分组响应格式错误: {}", e))
+}
+
+#[tauri::command]
+async fn local_agent_profile_open(
+    client: State<'_, HttpClient>,
+    args: ProfileOperationArgs,
+) -> Result<ProfileOperationResult, String> {
+    let bit_profile_id = args.bit_profile_id.trim().to_string();
+    if bit_profile_id.is_empty() {
+        return Err("打开窗口失败：缺少BitBrowser窗口ID".into());
+    }
+    post_local_agent_profile_operation(&client, "profile-open", &bit_profile_id).await?;
+    let snapshot = local_agent_profile_scan(client.clone()).await?;
+    Ok(ProfileOperationResult {
+        bit_profile_id,
+        status: "opened".into(),
+        snapshot,
+    })
+}
+
+#[tauri::command]
+async fn local_agent_profile_close(
+    client: State<'_, HttpClient>,
+    args: ProfileOperationArgs,
+) -> Result<ProfileOperationResult, String> {
+    let bit_profile_id = args.bit_profile_id.trim().to_string();
+    if bit_profile_id.is_empty() {
+        return Err("关闭窗口失败：缺少BitBrowser窗口ID".into());
+    }
+    post_local_agent_profile_operation(&client, "profile-close", &bit_profile_id).await?;
+    let snapshot = local_agent_profile_scan(client.clone()).await?;
+    Ok(ProfileOperationResult {
+        bit_profile_id,
+        status: "closed".into(),
+        snapshot,
+    })
+}
+
+#[tauri::command]
+async fn local_agent_profile_create(
+    client: State<'_, HttpClient>,
+    args: CreateProfileArgs,
+) -> Result<CreateProfileResult, String> {
+    let payload = create_profile_payload(&args)?;
+    let url = format!(
+        "{}/api/v1/bit-browser/profile-create",
+        client.local_agent_base
+    );
+    let resp = client
+        .inner
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("创建BitBrowser窗口失败: {}", e))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("创建BitBrowser窗口失败: {} {}", status, text));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("创建BitBrowser窗口响应格式错误: {}", e))?;
+    let bit_profile_id = value
+        .get("data")
+        .and_then(|data| data.get("id"))
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if bit_profile_id.is_empty() {
+        return Err("创建BitBrowser窗口后未返回窗口ID".into());
+    }
+    let snapshot = local_agent_profile_scan(client.clone()).await?;
+    verify_snapshot_has_profile(&snapshot, &bit_profile_id)?;
+    Ok(CreateProfileResult {
+        bit_profile_id,
+        snapshot,
+    })
+}
+
 /// Restore selected Cloud profile facts to BitBrowser through Local Agent and
 /// read back the full profile snapshot before reporting success.
 #[tauri::command]
@@ -885,6 +1017,77 @@ fn restore_payload(profile: &RestoreProfileInput) -> serde_json::Value {
         );
     }
     serde_json::Value::Object(payload)
+}
+
+async fn post_local_agent_profile_operation(
+    client: &HttpClient,
+    operation: &str,
+    bit_profile_id: &str,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/api/v1/bit-browser/{}",
+        client.local_agent_base, operation
+    );
+    let resp = client
+        .inner
+        .post(&url)
+        .json(&serde_json::json!({"id": bit_profile_id}))
+        .send()
+        .await
+        .map_err(|e| format!("BitBrowser窗口操作失败: {}", e))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Err(format!("BitBrowser窗口操作失败: {} {}", status, text))
+}
+
+fn create_profile_payload(args: &CreateProfileArgs) -> Result<serde_json::Value, String> {
+    let name = args.name.trim();
+    let group_id = args.group_id.trim();
+    if name.is_empty() {
+        return Err("创建窗口失败：请填写窗口名称".into());
+    }
+    if group_id.is_empty() {
+        return Err("创建窗口失败：请选择BitBrowser真实分组".into());
+    }
+    let mut payload = serde_json::Map::new();
+    payload.insert("name".into(), serde_json::Value::String(name.to_string()));
+    payload.insert("groupId".into(), serde_json::Value::String(group_id.to_string()));
+    if !args.group_name.trim().is_empty() {
+        payload.insert(
+            "groupName".into(),
+            serde_json::Value::String(args.group_name.trim().to_string()),
+        );
+    }
+    if let Some(seq) = args.seq {
+        payload.insert("seq".into(), serde_json::Value::Number(seq.into()));
+    }
+    if !args.remark.trim().is_empty() {
+        payload.insert(
+            "remark".into(),
+            serde_json::Value::String(args.remark.trim().to_string()),
+        );
+    }
+    Ok(serde_json::Value::Object(payload))
+}
+
+fn verify_snapshot_has_profile(snapshot: &serde_json::Value, bit_profile_id: &str) -> Result<(), String> {
+    let profiles = snapshot
+        .get("profiles")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "创建后读回BitBrowser结果格式不正确".to_string())?;
+    if profiles
+        .iter()
+        .any(|profile| string_field(profile, "bit_profile_id") == bit_profile_id)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "创建结果待确认：读回BitBrowser时没有找到新窗口 {}",
+        bit_profile_id
+    ))
 }
 
 fn verify_restored_profiles(
@@ -1036,6 +1239,51 @@ mod tests {
     }
 
     #[test]
+    fn create_profile_payload_requires_real_group() {
+        let err = create_profile_payload(&CreateProfileArgs {
+            name: "窗口一".into(),
+            group_id: "".into(),
+            group_name: "".into(),
+            seq: None,
+            remark: "".into(),
+        })
+        .unwrap_err();
+
+        assert!(err.contains("真实分组"));
+    }
+
+    #[test]
+    fn create_profile_payload_maps_safe_bitbrowser_fields() {
+        let payload = create_profile_payload(&CreateProfileArgs {
+            name: "窗口一".into(),
+            group_id: "group-1".into(),
+            group_name: "默认分组".into(),
+            seq: Some(7),
+            remark: "备注".into(),
+        })
+        .unwrap();
+
+        assert_eq!(payload["name"], "窗口一");
+        assert_eq!(payload["groupId"], "group-1");
+        assert_eq!(payload["groupName"], "默认分组");
+        assert_eq!(payload["seq"], 7);
+        assert_eq!(payload["remark"], "备注");
+        assert!(payload.get("cookie").is_none());
+        assert!(payload.get("user_id").is_none());
+    }
+
+    #[test]
+    fn verify_snapshot_has_profile_rejects_missing_created_profile() {
+        let snapshot = serde_json::json!({
+            "profiles": [{"bit_profile_id": "another"}]
+        });
+
+        let err = verify_snapshot_has_profile(&snapshot, "profile-created").unwrap_err();
+
+        assert!(err.contains("没有找到新窗口"));
+    }
+
+    #[test]
     fn verify_restored_profiles_accepts_matching_readback() {
         let expected = vec![restore_input()];
         let snapshot = serde_json::json!({
@@ -1092,6 +1340,10 @@ fn main() {
             local_agent_refresh_runtime,
             local_agent_account_check,
             local_agent_profile_scan,
+            local_agent_profile_groups,
+            local_agent_profile_open,
+            local_agent_profile_close,
+            local_agent_profile_create,
             local_agent_profile_restore,
         ])
         .plugin(tauri_plugin_shell::init())
