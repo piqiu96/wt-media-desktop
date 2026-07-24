@@ -8,11 +8,11 @@ mod secure_store;
 mod system;
 mod updater;
 
-use local_agent::{BindingTransport, BoundNodeFacts};
+use local_agent::BoundNodeFacts;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::State;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
@@ -198,12 +198,47 @@ struct RuntimeReportRequest {
     bitbrowser_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     main_user_id: Option<String>,
+    #[serde(default)]
+    bit_profile_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct BindSessionArgs {
     binding_ticket: String,
     cloud_base_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RefreshRuntimeArgs {
+    cloud_base_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AccountCheckArgs {
+    cloud_base_url: String,
+    task_id: String,
+    bit_profile_id: String,
+    platform: String,
+    #[serde(default)]
+    expected_platform_account_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AccountCheckResult {
+    platform_account_id: String,
+    name: String,
+    avatar_url: String,
+    login_status: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GuardPreflightOutcome {
+    outcome: String,
+    #[serde(default)]
+    permit_id: String,
+    #[serde(default)]
+    permit_credential: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -337,7 +372,7 @@ fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, String> 
 #[tauri::command]
 async fn local_agent_task_status(
     client: State<'_, HttpClient>,
-    task_id: String,
+    _task_id: String,
 ) -> Result<LocalAgentStatus, String> {
     // Report back the current overall status; task_id is validated server-side.
     local_agent_status(client).await
@@ -452,6 +487,194 @@ async fn local_agent_bind_session(
         return Err(format!("写入Local Agent节点失败: {} {}", status_code, text));
     }
 
+    report_runtime_to_cloud(
+        &client,
+        &cloud_base_url,
+        &registration.node.id,
+        &registration.node_credential,
+        &status,
+    )
+    .await?;
+
+    binding_state
+        .0
+        .lock()
+        .map_err(|_| "runtime binding lock poisoned")?
+        .replace(RuntimeBinding {
+            node_id: registration.node.id.clone(),
+            node_credential: registration.node_credential,
+        });
+
+    Ok(BoundNodeFacts {
+        id: registration.node.id,
+        agent_id: registration.node.agent_id,
+        user_id: registration.node.user_id.to_string(),
+        status: registration.node.status,
+    })
+}
+
+#[tauri::command]
+async fn local_agent_refresh_runtime(
+    client: State<'_, HttpClient>,
+    binding_state: State<'_, RuntimeBindingState>,
+    args: RefreshRuntimeArgs,
+) -> Result<LocalAgentStatus, String> {
+    let cloud_base_url = args.cloud_base_url.trim().trim_end_matches('/').to_string();
+    if cloud_base_url.is_empty() {
+        return Err("Cloud地址为空，无法刷新本机可信状态".into());
+    }
+    let binding = binding_state
+        .0
+        .lock()
+        .map_err(|_| "runtime binding lock poisoned")?
+        .clone()
+        .ok_or_else(|| {
+            "当前电脑尚未完成可信绑定，请先到环境状态页绑定当前比特浏览器账号".to_string()
+        })?;
+    let status = local_agent_status(client.clone()).await?;
+    report_runtime_to_cloud(
+        &client,
+        &cloud_base_url,
+        &binding.node_id,
+        &binding.node_credential,
+        &status,
+    )
+    .await?;
+    Ok(status)
+}
+
+#[tauri::command]
+async fn local_agent_account_check(
+    client: State<'_, HttpClient>,
+    binding_state: State<'_, RuntimeBindingState>,
+    args: AccountCheckArgs,
+) -> Result<AccountCheckResult, String> {
+    let cloud_base_url = args.cloud_base_url.trim().trim_end_matches('/').to_string();
+    if cloud_base_url.is_empty() {
+        return Err("Cloud地址为空，无法执行账号检查".into());
+    }
+    let task_id = args.task_id.trim().to_string();
+    let bit_profile_id = args.bit_profile_id.trim().to_string();
+    let platform = args.platform.trim().to_lowercase();
+    if task_id.is_empty() || bit_profile_id.is_empty() || platform.is_empty() {
+        return Err("账号检查参数不完整".into());
+    }
+    let binding = binding_state
+        .0
+        .lock()
+        .map_err(|_| "runtime binding lock poisoned")?
+        .clone()
+        .ok_or_else(|| "当前电脑尚未完成可信绑定，请先到环境状态页重新检测并绑定".to_string())?;
+    let status = local_agent_status(client.clone()).await?;
+    report_runtime_to_cloud(
+        &client,
+        &cloud_base_url,
+        &binding.node_id,
+        &binding.node_credential,
+        &status,
+    )
+    .await?;
+
+    let preflight_url = format!(
+        "{}/api/v1/local-agent/sensitive-tasks/{}/preflight",
+        cloud_base_url, task_id
+    );
+    let preflight_resp = client
+        .inner
+        .post(&preflight_url)
+        .bearer_auth(&binding.node_credential)
+        .json(&serde_json::json!({"node_id": binding.node_id}))
+        .send()
+        .await
+        .map_err(|e| format!("账号检查预检失败: {}", e))?;
+    let preflight_status = preflight_resp.status();
+    let preflight_text = preflight_resp.text().await.unwrap_or_default();
+    if !preflight_status.is_success() {
+        return Err(format!(
+            "账号检查预检失败: {} {}",
+            preflight_status, preflight_text
+        ));
+    }
+    let preflight_body: CloudEnvelope<GuardPreflightOutcome> =
+        serde_json::from_str(&preflight_text)
+            .map_err(|e| format!("账号检查预检响应格式错误: {}", e))?;
+    if preflight_body.errcode != 0 {
+        return Err(if preflight_body.message.is_empty() {
+            "账号检查预检失败".into()
+        } else {
+            preflight_body.message
+        });
+    }
+    let preflight = preflight_body
+        .data
+        .ok_or_else(|| "账号检查预检缺少授权结果".to_string())?;
+    if preflight.outcome != "granted" {
+        return Err("当前窗口正在执行其他敏感操作，请稍后重试".into());
+    }
+    if preflight.permit_id.is_empty() || preflight.permit_credential.is_empty() {
+        return Err("账号检查授权缺少本机执行凭证".into());
+    }
+
+    let account_check_url = format!("{}/api/v1/account-check", client.local_agent_base);
+    let account_check_resp = client
+        .inner
+        .post(&account_check_url)
+        .json(&serde_json::json!({
+            "profile_id": bit_profile_id,
+            "platform": platform,
+            "expected_platform_account_id": args.expected_platform_account_id,
+        }))
+        .send()
+        .await;
+
+    let finish_outcome = if account_check_resp.is_ok() {
+        "completed"
+    } else {
+        "result_uncertain"
+    };
+    let finish_result = finish_sensitive_permit(
+        &client,
+        &cloud_base_url,
+        &binding,
+        &preflight.permit_id,
+        &preflight.permit_credential,
+        finish_outcome,
+    )
+    .await;
+
+    let account_check_resp =
+        account_check_resp.map_err(|e| format!("Local Agent账号检查失败: {}", e))?;
+    let status = account_check_resp.status();
+    let text = account_check_resp.text().await.unwrap_or_default();
+    if let Err(e) = finish_result {
+        return Err(e);
+    }
+    if !status.is_success() {
+        return Err(format!("Local Agent账号检查失败: {} {}", status, text));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Local Agent账号检查响应格式错误: {}", e))?;
+    let data = value
+        .get("data")
+        .cloned()
+        .ok_or_else(|| "Local Agent账号检查响应缺少数据".to_string())?;
+    serde_json::from_value(data).map_err(|e| format!("Local Agent账号检查结果格式错误: {}", e))
+}
+
+async fn report_runtime_to_cloud(
+    client: &HttpClient,
+    cloud_base_url: &str,
+    node_id: &str,
+    node_credential: &str,
+    status: &LocalAgentStatus,
+) -> Result<(), String> {
+    let main_user_id = status.main_user_id.clone().unwrap_or_default();
+    if main_user_id.trim().is_empty() {
+        return Err("未读取到BitBrowser主账号，请确认BitBrowser已登录后重新检测".into());
+    }
+    if status.bitbrowser_status.as_deref() != Some("normal") {
+        return Err("BitBrowser不可用或身份不可验证，请处理后重新检测".into());
+    }
     let runtime_report = RuntimeReportRequest {
         operating_system: status
             .operating_system
@@ -486,40 +709,55 @@ async fn local_agent_bind_session(
             .clone()
             .unwrap_or_else(|| "unknown".into()),
         main_user_id: Some(main_user_id),
+        bit_profile_ids: status.bit_profile_ids.clone(),
     };
     let report_url = format!(
         "{}/api/v1/local-agent/nodes/{}/runtime-report",
-        cloud_base_url, registration.node.id
+        cloud_base_url, node_id
     );
     let report_resp = client
         .inner
         .post(&report_url)
-        .bearer_auth(&registration.node_credential)
+        .bearer_auth(node_credential)
         .json(&runtime_report)
         .send()
         .await
-        .map_err(|e| format!("本机运行状态上报失败: {}", e))?;
-    if !report_resp.status().is_success() {
-        let status_code = report_resp.status();
-        let text = report_resp.text().await.unwrap_or_default();
-        return Err(format!("本机运行状态上报失败: {} {}", status_code, text));
+        .map_err(|e| format!("本机可信状态刷新失败: {}", e))?;
+    if report_resp.status().is_success() {
+        return Ok(());
     }
+    let status_code = report_resp.status();
+    let text = report_resp.text().await.unwrap_or_default();
+    Err(format!("本机可信状态刷新失败: {} {}", status_code, text))
+}
 
-    binding_state
-        .0
-        .lock()
-        .map_err(|_| "runtime binding lock poisoned")?
-        .replace(RuntimeBinding {
-            node_id: registration.node.id.clone(),
-            node_credential: registration.node_credential,
-        });
-
-    Ok(BoundNodeFacts {
-        id: registration.node.id,
-        agent_id: registration.node.agent_id,
-        user_id: registration.node.user_id.to_string(),
-        status: registration.node.status,
-    })
+async fn finish_sensitive_permit(
+    client: &HttpClient,
+    cloud_base_url: &str,
+    binding: &RuntimeBinding,
+    permit_id: &str,
+    permit_credential: &str,
+    outcome: &str,
+) -> Result<(), String> {
+    let finish_url = format!(
+        "{}/api/v1/local-agent/sensitive-permits/{}/finish",
+        cloud_base_url, permit_id
+    );
+    let resp = client
+        .inner
+        .post(&finish_url)
+        .bearer_auth(&binding.node_credential)
+        .header("X-Profile-Permit", permit_credential)
+        .json(&serde_json::json!({"node_id": binding.node_id, "outcome": outcome}))
+        .send()
+        .await
+        .map_err(|e| format!("释放账号检查本机授权失败: {}", e))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Err(format!("释放账号检查本机授权失败: {} {}", status, text))
 }
 
 /// Read the current BitBrowser Profile snapshot through the Local Agent.
@@ -851,6 +1089,8 @@ fn main() {
             local_agent_task_status,
             local_agent_bind,
             local_agent_bind_session,
+            local_agent_refresh_runtime,
+            local_agent_account_check,
             local_agent_profile_scan,
             local_agent_profile_restore,
         ])
