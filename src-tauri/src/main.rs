@@ -297,7 +297,8 @@ struct CreateProfileArgs {
 struct ProfileOperationResult {
     bit_profile_id: String,
     status: String,
-    snapshot: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -853,11 +854,10 @@ async fn local_agent_profile_open(
         return Err("打开窗口失败：缺少BitBrowser窗口ID".into());
     }
     post_local_agent_profile_operation(&client, "profile-open", &bit_profile_id).await?;
-    let snapshot = local_agent_profile_scan(client.clone()).await?;
     Ok(ProfileOperationResult {
         bit_profile_id,
         status: "opened".into(),
-        snapshot,
+        snapshot: None,
     })
 }
 
@@ -871,11 +871,10 @@ async fn local_agent_profile_close(
         return Err("关闭窗口失败：缺少BitBrowser窗口ID".into());
     }
     post_local_agent_profile_operation(&client, "profile-close", &bit_profile_id).await?;
-    let snapshot = local_agent_profile_scan(client.clone()).await?;
     Ok(ProfileOperationResult {
         bit_profile_id,
         status: "closed".into(),
-        snapshot,
+        snapshot: None,
     })
 }
 
@@ -1281,6 +1280,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.bit_profile_id, "profile-1");
+    }
+
+    #[test]
+    fn profile_operation_result_can_omit_snapshot_for_open_close() {
+        let result = ProfileOperationResult {
+            bit_profile_id: "profile-1".into(),
+            status: "opened".into(),
+            snapshot: None,
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["bit_profile_id"], "profile-1");
+        assert_eq!(value["status"], "opened");
+        assert!(value.get("snapshot").is_none());
     }
 
     #[test]
