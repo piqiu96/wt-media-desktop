@@ -277,6 +277,7 @@ struct RestoreProfileVerification {
 
 #[derive(Clone, Debug, Deserialize)]
 struct ProfileOperationArgs {
+    #[serde(alias = "bitProfileId")]
     bit_profile_id: String,
 }
 
@@ -1270,6 +1271,16 @@ mod tests {
         assert_eq!(payload["remark"], "备注");
         assert!(payload.get("cookie").is_none());
         assert!(payload.get("user_id").is_none());
+    }
+
+    #[test]
+    fn profile_operation_args_accepts_tauri_camel_case_payload() {
+        let args: ProfileOperationArgs = serde_json::from_value(serde_json::json!({
+            "bitProfileId": "profile-1"
+        }))
+        .unwrap();
+
+        assert_eq!(args.bit_profile_id, "profile-1");
     }
 
     #[test]
