@@ -7,7 +7,7 @@
     "frontendDist": "../.generated/frontend",
     "devUrl": "http://127.0.0.1:5174",
     "beforeDevCommand": "cd ../../wt-media-cloud/web && npm run dev:desktop",
-    "beforeBuildCommand": "../../wt-media-workspace/scripts/build-desktop.sh"
+    "beforeBuildCommand": "bash ../wt-media-workspace/scripts/build-desktop.sh"
   },
   "app": {
     "windows": [

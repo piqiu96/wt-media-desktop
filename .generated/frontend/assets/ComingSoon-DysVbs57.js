@@ -1,1 +1,0 @@
-import{_ as a,c as s,w as o,C as _,a as r,d as t,J as m,x as p}from"./index.desktop-CJAjrFv5.js";const i={};function d(f,l){const n=p,c=m,e=_;return r(),s(e,null,{default:o(()=>[t(c,{description:"该模块正在建设中，敬请期待"},{image:o(()=>[t(n,{name:"tools",size:"64px"})]),_:1})]),_:1})}const u=a(i,[["render",d]]);export{u as default};
