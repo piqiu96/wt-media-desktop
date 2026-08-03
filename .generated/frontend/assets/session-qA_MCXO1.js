@@ -1,1 +1,0 @@
-import{c as a}from"./http-CKDd7Zrd.js";function s({base:e="/api/v1",fetch:n=globalThis.fetch}={}){const t=a({base:e,fetchImpl:n});return{async login(i,o,r={}){return t.post("/auth/login",{username:i,password:o,replace_existing:!!r.replaceExisting})},async me(){return t.get("/auth/me")},async logout(){return t.post("/auth/logout")}}}export{s as createSessionClient};
