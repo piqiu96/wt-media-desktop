@@ -12,7 +12,7 @@ use local_agent::BoundNodeFacts;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
@@ -339,6 +339,16 @@ async fn local_agent_health(client: State<'_, HttpClient>) -> Result<String, Str
         .await
         .map_err(|e| format!("read error: {}", e))?;
     Ok(text)
+}
+
+// Temporary diagnostics: forwards WebView console/error output to stdout so
+// packaged-app JS failures can be captured without opening devtools.
+#[tauri::command]
+fn log_js_error(message: String, stack: String) {
+    println!("[WEBVIEW] {}", message);
+    if !stack.is_empty() {
+        println!("[WEBVIEW-STACK] {}", stack);
+    }
 }
 
 #[tauri::command]
@@ -1354,6 +1364,35 @@ fn main() {
         .manage(HttpClient::new(8765))
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
+        .setup(|app| {
+            // Temporary diagnostics: forward WebView console/errors to stdout.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval(
+                    r#"(function() {
+                        function report(msg, stack) {
+                            try {
+                                window.__TAURI_INTERNALS__.invoke("log_js_error", { message: String(msg), stack: String(stack || "") });
+                            } catch (e) {}
+                        }
+                        window.addEventListener("error", function(e) {
+                            report((e.message || "") + " @ " + (e.filename || "") + ":" + (e.lineno || 0), e.error ? e.error.stack : "");
+                        });
+                        window.addEventListener("unhandledrejection", function(e) {
+                            var r = e.reason || {};
+                            report("unhandled rejection: " + (r && r.message ? r.message : String(r)), r && r.stack ? r.stack : "");
+                        });
+                        ["error","warn"].forEach(function(level) {
+                            var orig = console[level].bind(console);
+                            console[level] = function() {
+                                report("[console." + level + "] " + Array.prototype.map.call(arguments, String).join(" "), "");
+                                orig.apply(null, arguments);
+                            };
+                        });
+                    })();"#,
+                );
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             local_agent_status,
             local_agent_health,
@@ -1370,6 +1409,7 @@ fn main() {
             local_agent_profile_close,
             local_agent_profile_create,
             local_agent_profile_restore,
+            log_js_error,
         ])
         .plugin(tauri_plugin_shell::init())
         .run(tauri::generate_context!())
