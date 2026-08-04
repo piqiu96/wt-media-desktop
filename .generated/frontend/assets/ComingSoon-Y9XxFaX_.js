@@ -1,1 +1,0 @@
-import{_ as a,a as s,w as o,C as _,b as r,e as t,P as m,B as p}from"./index.desktop-C_b0qimw.js";const i={};function d(f,l){const e=p,n=m,c=_;return r(),s(c,null,{default:o(()=>[t(n,{description:"该模块正在建设中，敬请期待"},{image:o(()=>[t(e,{name:"tools",size:"64px"})]),_:1})]),_:1})}const x=a(i,[["render",d]]);export{x as default};
