@@ -230,6 +230,8 @@ struct AccountCheckResult {
     avatar_url: String,
     login_status: String,
     message: String,
+    #[serde(default)]
+    check_items: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
