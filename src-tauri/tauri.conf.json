@@ -7,7 +7,7 @@
     "frontendDist": "../.generated/frontend",
     "devUrl": "http://127.0.0.1:5174",
     "beforeDevCommand": "cd ../../wt-media-cloud/web && npm run dev:desktop",
-    "beforeBuildCommand": "bash ../wt-media-workspace/scripts/build-desktop.sh"
+    "beforeBuildCommand": "bash scripts/prepare-release-sidecar.sh && bash ../wt-media-workspace/scripts/build-desktop.sh"
   },
   "app": {
     "windows": [
@@ -18,11 +18,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8765 http://127.0.0.1:18080; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:18080; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "externalBin": ["binaries/wt-media-agent"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

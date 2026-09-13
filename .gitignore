@@ -5,3 +5,4 @@ src-tauri/target/
 .cache/
 .DS_Store
 *.log
+src-tauri/binaries/wt-media-agent-*

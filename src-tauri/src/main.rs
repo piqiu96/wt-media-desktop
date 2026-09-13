@@ -46,6 +46,20 @@ impl HttpClient {
     }
 }
 
+fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
+    debug_build && explicitly_enabled
+}
+
+fn development_python_fallback_enabled() -> bool {
+    python_fallback_allowed(
+        cfg!(debug_assertions),
+        matches!(
+            std::env::var("WT_MEDIA_DESKTOP_ALLOW_PYTHON_FALLBACK").as_deref(),
+            Ok("1")
+        ),
+    )
+}
+
 // ---- Data types matching the Local Agent API ----
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -384,7 +398,8 @@ async fn local_agent_start(
     {
         return Ok("already_running".into());
     }
-    // Try to spawn the sidecar binary first, fall back to `python3 -m wt_media_agent.local_main`
+    // Release builds must run only the bundled sidecar. Development can opt into
+    // a Python fallback explicitly when iterating without a frozen binary.
     let sidecar_result = app.shell().sidecar("wt-media-agent").map(|cmd| cmd.spawn());
 
     match sidecar_result {
@@ -396,12 +411,13 @@ async fn local_agent_start(
                 .replace(child);
             Ok("sidecar_started".into())
         }
-        _ => {
-            // Fallback: launch via python module (dev environment)
+        _ if development_python_fallback_enabled() => {
+            // Deliberate development-only fallback; it is unreachable from a
+            // release bundle so customers never need a system Python install.
             let shell = app.shell();
             let (_events, child) = shell
                 .command("python3")
-                .args(["-m", "wt_media_agent.local_main"])
+                .args(["-m", "wt_media_agent.local_api.server"])
                 .spawn()
                 .map_err(|e| format!("agent launch failed: {}", e))?;
             process
@@ -411,6 +427,9 @@ async fn local_agent_start(
                 .replace(child);
             Ok("started".into())
         }
+        _ => Err(
+            "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),
+        ),
     }
 }
 
@@ -1202,7 +1221,10 @@ fn create_profile_payload(args: &CreateProfileArgs) -> Result<serde_json::Value,
     }
     let mut payload = serde_json::Map::new();
     payload.insert("name".into(), serde_json::Value::String(name.to_string()));
-    payload.insert("groupId".into(), serde_json::Value::String(group_id.to_string()));
+    payload.insert(
+        "groupId".into(),
+        serde_json::Value::String(group_id.to_string()),
+    );
     if !args.group_name.trim().is_empty() {
         payload.insert(
             "groupName".into(),
@@ -1221,7 +1243,10 @@ fn create_profile_payload(args: &CreateProfileArgs) -> Result<serde_json::Value,
     Ok(serde_json::Value::Object(payload))
 }
 
-fn verify_snapshot_has_profile(snapshot: &serde_json::Value, bit_profile_id: &str) -> Result<(), String> {
+fn verify_snapshot_has_profile(
+    snapshot: &serde_json::Value,
+    bit_profile_id: &str,
+) -> Result<(), String> {
     let profiles = snapshot
         .get("profiles")
         .and_then(|value| value.as_array())
@@ -1356,6 +1381,13 @@ fn string_field(value: &serde_json::Value, field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_fallback_requires_debug_build_and_explicit_opt_in() {
+        assert!(!python_fallback_allowed(false, true));
+        assert!(!python_fallback_allowed(true, false));
+        assert!(python_fallback_allowed(true, true));
+    }
 
     fn restore_input() -> RestoreProfileInput {
         RestoreProfileInput {
