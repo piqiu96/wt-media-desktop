@@ -13,7 +13,12 @@ cd "$DESKTOP_DIR"
 cargo tauri build --bundles app
 
 APP_PATH="$DESKTOP_DIR/target/release/bundle/macos/WT Media.app"
-DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/WT Media_0.1.0_aarch64.dmg"
+case "$(uname -m)" in
+  arm64|aarch64) DMG_SUFFIX="aarch64" ;;
+  x86_64) DMG_SUFFIX="x64" ;;
+  *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/WT Media_0.1.0_${DMG_SUFFIX}.dmg"
 bash "$SCRIPT_DIR/repair-macos-signing.sh" "$APP_PATH"
 
 STAGING_DIR="$(mktemp -d /private/tmp/wt-media-dmg.XXXXXX)"
