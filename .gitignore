@@ -6,3 +6,6 @@ src-tauri/target/
 .DS_Store
 *.log
 src-tauri/binaries/wt-media-agent-*
+.claude
+.codex
+.generated
