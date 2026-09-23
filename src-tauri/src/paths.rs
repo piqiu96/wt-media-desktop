@@ -12,6 +12,13 @@
 //! than with no CSP and no Cloud address. A locator that could return "nothing"
 //! would make that failure mode possible.
 //!
+//! Which layout applies is decided by the **build's** environment, not by the
+//! file's — the file cannot be located until we know where to look for it. A
+//! release binary is production unconditionally, so that is one fact, not two:
+//! `Environment::Production` means both "look in the bundle" and "honour no
+//! `WT_MEDIA_DESKTOP_*` variable", and passing them as separate arguments would
+//! only create a way for them to disagree.
+//!
 //! `locate` is pure — the "does this path exist" question is a parameter — so
 //! the descending order is testable without a filesystem or a real environment.
 //! Reading the chosen file is [`file_text`], the only impure part.
@@ -19,14 +26,18 @@
 //! Not wired yet: T-07 calls this from `main` and feeds the text to
 //! `config::load_with`. Until then this module has no consumer.
 
-use crate::config::PRODUCTION_TOML;
+use crate::config::{Environment, PRODUCTION_TOML};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Points at the config file, overriding every other candidate. Honoured in
-/// development only: `config::load_with` ignores the whole `WT_MEDIA_DESKTOP_*`
-/// namespace once the effective environment is production, and that rule is
-/// enforced there rather than here so there is one place to audit.
+/// Points at the config file, overriding every other candidate.
+///
+/// Honoured in development only. `config::load_with` ignores the whole
+/// `WT_MEDIA_DESKTOP_*` namespace once the effective environment is production,
+/// but it cannot enforce that for *this* variable: the locator is what finds the
+/// file that would have declared the environment, so the gate has to be here and
+/// it has to key on the build's environment. A release bundle therefore cannot be
+/// redirected at another file by whoever sets variables in its environment.
 pub const CONFIG_ENV: &str = "WT_MEDIA_DESKTOP_CONFIG";
 
 /// The file name looked for in the resource and manifest directories.
@@ -56,27 +67,30 @@ impl Source {
 
 /// The candidates in the order they are tried.
 ///
-/// Ordering rationale, one step each: the operator's override beats everything;
-/// the resource directory is where a bundle actually keeps it; beside the
-/// executable covers a bundle whose resource directory was not resolved; the
-/// development tree is last because it only exists in a checkout.
+/// Ordering rationale, one step each: the operator's override beats everything
+/// (in development only — see [`CONFIG_ENV`]); the resource directory is where a
+/// bundle actually keeps it; beside the executable covers a bundle whose
+/// resource directory was not resolved; the development tree is last because it
+/// only exists in a checkout.
 pub fn candidates(
     env: &BTreeMap<String, String>,
-    bundled: bool,
+    environment: Environment,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     manifest_dir: &Path,
 ) -> Vec<(PathBuf, Source)> {
     let mut out = Vec::new();
 
-    if let Some(raw) = env.get(CONFIG_ENV) {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            out.push((PathBuf::from(raw), Source::EnvOverride));
+    if environment == Environment::Development {
+        if let Some(raw) = env.get(CONFIG_ENV) {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                out.push((PathBuf::from(raw), Source::EnvOverride));
+            }
         }
     }
 
-    if bundled {
+    if environment == Environment::Production {
         if let Some(dir) = resource_dir {
             out.push((dir.join(RESOURCE_NAME), Source::BundledResource));
         }
@@ -97,13 +111,13 @@ pub fn candidates(
 /// the compiled-in default.
 pub fn locate(
     env: &BTreeMap<String, String>,
-    bundled: bool,
+    environment: Environment,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     manifest_dir: &Path,
     exists: impl Fn(&Path) -> bool,
 ) -> Option<(PathBuf, Source)> {
-    candidates(env, bundled, resource_dir, exe_dir, manifest_dir)
+    candidates(env, environment, resource_dir, exe_dir, manifest_dir)
         .into_iter()
         .find(|(path, _)| exists(path))
 }
@@ -115,12 +129,12 @@ pub fn locate(
 /// something parseable to hand to `config::load_with`.
 pub fn file_text(
     env: &BTreeMap<String, String>,
-    bundled: bool,
+    environment: Environment,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     manifest_dir: &Path,
 ) -> (String, Source) {
-    match locate(env, bundled, resource_dir, exe_dir, manifest_dir, |p| p.is_file()) {
+    match locate(env, environment, resource_dir, exe_dir, manifest_dir, |p| p.is_file()) {
         Some((path, source)) => match std::fs::read_to_string(&path) {
             Ok(text) => (text, source),
             // The file existed when it was looked for and could not be read —
@@ -148,14 +162,57 @@ mod tests {
         PathBuf::from("/crate")
     }
 
-    /// The order a packaged app descends, and that it never consults the
-    /// development tree.
+    /// A production build honours no `WT_MEDIA_DESKTOP_*` variable, and the
+    /// locator is the one that would otherwise slip past `config::load_with`:
+    /// that module never sees this variable, so nothing downstream can enforce
+    /// the rule. Without the gate here, a release bundle whose environment
+    /// carries `WT_MEDIA_DESKTOP_CONFIG` reads a file chosen by whoever set it.
+    ///
+    /// The path in the variable is a real-looking one, and the assertion is on
+    /// the *absence of the source*, not on the list being a particular length:
+    /// a locator that is ignored must be ignored however many other candidates
+    /// there are.
     #[test]
-    fn bundled_order_is_override_resource_exe() {
+    fn a_production_build_ignores_the_locator() {
         let env = env_of(&[(CONFIG_ENV, "/operator/agent.toml")]);
+
         let got = candidates(
             &env,
-            true,
+            Environment::Production,
+            Some(Path::new("/app/Resources")),
+            Some(Path::new("/app/MacOS")),
+            &manifest(),
+        );
+
+        assert!(
+            !got.iter().any(|(_, source)| *source == Source::EnvOverride),
+            "production must not honour the locator: {got:?}"
+        );
+
+        // The same variable *is* honoured in development — otherwise the test
+        // above would also pass for a locator that never reads the variable at
+        // all, which is a different (and broken) behaviour.
+        let got = candidates(
+            &env,
+            Environment::Development,
+            None,
+            None,
+            &manifest(),
+        );
+        assert_eq!(
+            got.first(),
+            Some(&(PathBuf::from("/operator/agent.toml"), Source::EnvOverride)),
+            "development must honour the locator: {got:?}"
+        );
+    }
+
+    /// The order a production build descends, and that it never consults the
+    /// development tree.
+    #[test]
+    fn production_order_is_resource_then_exe() {
+        let got = candidates(
+            &BTreeMap::new(),
+            Environment::Production,
             Some(Path::new("/app/Resources")),
             Some(Path::new("/app/MacOS")),
             &manifest(),
@@ -164,26 +221,37 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (PathBuf::from("/operator/agent.toml"), Source::EnvOverride),
                 (PathBuf::from("/app/Resources").join(RESOURCE_NAME), Source::BundledResource),
                 (PathBuf::from("/app/MacOS").join(RESOURCE_NAME), Source::BesideExecutable),
             ]
         );
     }
 
-    /// A development tree has exactly one file candidate, and no override means
-    /// no first entry at all — not an empty-path candidate.
+    /// A development tree descends through the override to its one file
+    /// candidate, and no override means no first entry at all — not an
+    /// empty-path candidate.
     #[test]
-    fn development_order_is_manifest_resources_only() {
-        let got = candidates(&BTreeMap::new(), false, Some(Path::new("/app/Resources")), None, &manifest());
+    fn development_order_is_override_then_manifest_resources_only() {
+        let env = env_of(&[(CONFIG_ENV, "/operator/agent.toml")]);
+        let got = candidates(
+            &env,
+            Environment::Development,
+            Some(Path::new("/app/Resources")),
+            Some(Path::new("/app/MacOS")),
+            &manifest(),
+        );
         assert_eq!(
             got,
-            vec![(manifest().join("resources").join(RESOURCE_NAME), Source::DevelopmentTree)]
+            vec![
+                (PathBuf::from("/operator/agent.toml"), Source::EnvOverride),
+                (manifest().join("resources").join(RESOURCE_NAME), Source::DevelopmentTree),
+            ],
+            "a development tree never consults the bundle's resource directory"
         );
 
         for blank in ["", "   "] {
             let env = env_of(&[(CONFIG_ENV, blank)]);
-            let got = candidates(&env, false, None, None, &manifest());
+            let got = candidates(&env, Environment::Development, None, None, &manifest());
             assert_eq!(
                 got.len(),
                 1,
@@ -200,24 +268,9 @@ mod tests {
     /// to provide.
     #[test]
     fn locate_takes_the_first_candidate_that_exists() {
-        let env = env_of(&[(CONFIG_ENV, "/operator/agent.toml")]);
-        let found = locate(
-            &env,
-            true,
-            Some(Path::new("/app/Resources")),
-            Some(Path::new("/app/MacOS")),
-            &manifest(),
-            |_| true,
-        );
-        assert_eq!(
-            found,
-            Some((PathBuf::from("/operator/agent.toml"), Source::EnvOverride)),
-            "with all candidates present, the override must still win"
-        );
-
-        // And with the override absent, the resource directory beats the
-        // executable's own directory.
-        let found = locate(&BTreeMap::new(), true, Some(Path::new("/app/Resources")),
+        // Production: the resource directory beats the executable's own.
+        let found = locate(&BTreeMap::new(), Environment::Production,
+                           Some(Path::new("/app/Resources")),
                            Some(Path::new("/app/MacOS")), &manifest(), |_| true);
         assert_eq!(
             found,
@@ -226,6 +279,22 @@ mod tests {
                 Source::BundledResource
             ))
         );
+
+        // Development: the override beats the tree.
+        let env = env_of(&[(CONFIG_ENV, "/operator/agent.toml")]);
+        let found = locate(
+            &env,
+            Environment::Development,
+            None,
+            None,
+            &manifest(),
+            |_| true,
+        );
+        assert_eq!(
+            found,
+            Some((PathBuf::from("/operator/agent.toml"), Source::EnvOverride)),
+            "with every candidate present, the override must still win"
+        );
     }
 
     /// Nothing on disk is a supported outcome, and it is the one the compiled-in
@@ -233,11 +302,11 @@ mod tests {
     #[test]
     fn no_candidate_existing_falls_through_to_the_compiled_default() {
         assert_eq!(
-            locate(&BTreeMap::new(), true, None, None, &manifest(), |_| false),
+            locate(&BTreeMap::new(), Environment::Production, None, None, &manifest(), |_| false),
             None
         );
 
-        let (text, source) = file_text(&BTreeMap::new(), true, None, None, &manifest());
+        let (text, source) = file_text(&BTreeMap::new(), Environment::Production, None, None, &manifest());
         assert_eq!(source, Source::CompiledIn);
         assert_eq!(text, PRODUCTION_TOML, "the fallback must be the shipped config");
         assert!(!source.is_file());
@@ -258,7 +327,7 @@ mod tests {
         let path = resources.join(RESOURCE_NAME);
         std::fs::write(&path, [0xff, 0xfe, 0x00]).expect("write non-UTF-8 config");
 
-        let (text, source) = file_text(&BTreeMap::new(), false, None, None, &dir);
+        let (text, source) = file_text(&BTreeMap::new(), Environment::Development, None, None, &dir);
 
         std::fs::remove_dir_all(&dir).ok();
 
@@ -270,12 +339,12 @@ mod tests {
     /// for another. This is the only assertion here that reaches `config`.
     #[test]
     fn the_compiled_default_is_a_usable_config() {
-        let (text, source) = file_text(&BTreeMap::new(), false, None, None, &manifest());
+        let (text, source) = file_text(&BTreeMap::new(), Environment::Production, None, None, &manifest());
         assert_eq!(source, Source::CompiledIn);
         let parsed = crate::config::load_with(
             &BTreeMap::new(),
             &text,
-            crate::config::Environment::Production,
+            Environment::Production,
         );
         assert!(parsed.is_ok(), "the fallback must parse and validate: {parsed:?}");
     }
