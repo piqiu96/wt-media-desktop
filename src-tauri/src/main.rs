@@ -4,24 +4,19 @@
 mod commands;
 mod dto;
 mod filesystem;
+mod http;
 mod local_agent;
 mod secure_store;
 mod system;
 mod updater;
 
 use dto::*;
+use http::{CloudClient, LocalAgentClient};
 use local_agent::BoundNodeFacts;
-use reqwest::Client;
 use std::sync::Mutex;
 use tauri::State;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
-
-/// HTTP client shared across Tauri commands.
-pub struct HttpClient {
-    inner: Client,
-    local_agent_base: String,
-}
 
 /// Owns the Local Agent child for the lifetime of the Desktop session.
 /// Keeping the handle here makes start/stop deterministic in both packaged
@@ -36,15 +31,6 @@ pub struct RuntimeBindingState(Mutex<Option<RuntimeBinding>>);
 struct RuntimeBinding {
     node_id: String,
     node_credential: String,
-}
-
-impl HttpClient {
-    fn new(local_agent_port: u16) -> Self {
-        Self {
-            inner: Client::new(),
-            local_agent_base: format!("http://127.0.0.1:{}", local_agent_port),
-        }
-    }
 }
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
@@ -64,8 +50,8 @@ fn development_python_fallback_enabled() -> bool {
 // ---- Tauri Commands ----
 
 #[tauri::command]
-async fn local_agent_status(client: State<'_, HttpClient>) -> Result<LocalAgentStatus, String> {
-    let url = format!("{}/api/v1/status", client.local_agent_base);
+async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<LocalAgentStatus, String> {
+    let url = format!("{}/api/v1/status", client.base);
     let resp = client
         .inner
         .get(&url)
@@ -80,8 +66,8 @@ async fn local_agent_status(client: State<'_, HttpClient>) -> Result<LocalAgentS
 }
 
 #[tauri::command]
-async fn local_agent_health(client: State<'_, HttpClient>) -> Result<String, String> {
-    let url = format!("{}/healthz", client.local_agent_base);
+async fn local_agent_health(client: State<'_, LocalAgentClient>) -> Result<String, String> {
+    let url = format!("{}/healthz", client.base);
     let resp = client
         .inner
         .get(&url)
@@ -172,7 +158,7 @@ fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, String> 
 /// Fetch task progress via SSE stream (simplified: returns latest status snapshot).
 #[tauri::command]
 async fn local_agent_task_status(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
     _task_id: String,
 ) -> Result<LocalAgentStatus, String> {
     // Report back the current overall status; task_id is validated server-side.
@@ -181,8 +167,8 @@ async fn local_agent_task_status(
 
 /// Bind the Desktop to the Local Agent, receiving a session token.
 #[tauri::command]
-async fn local_agent_bind(client: State<'_, HttpClient>) -> Result<BindResponse, String> {
-    let url = format!("{}/api/v1/bind", client.local_agent_base);
+async fn local_agent_bind(client: State<'_, LocalAgentClient>) -> Result<BindResponse, String> {
+    let url = format!("{}/api/v1/bind", client.base);
     let resp = client
         .inner
         .post(&url)
@@ -205,7 +191,8 @@ async fn local_agent_bind(client: State<'_, HttpClient>) -> Result<BindResponse,
 /// back to Cloud. The credential is never returned to Vue.
 #[tauri::command]
 async fn local_agent_bind_session(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
+    cloud: State<'_, CloudClient>,
     binding_state: State<'_, RuntimeBindingState>,
     args: BindSessionArgs,
 ) -> Result<BoundNodeFacts, String> {
@@ -239,7 +226,7 @@ async fn local_agent_bind_session(
         contract_major_version: "v1".into(),
         contract_revision: "2026.07.15.1".into(),
     };
-    let register_resp = client
+    let register_resp = cloud
         .inner
         .post(&register_url)
         .json(&register_payload)
@@ -271,7 +258,7 @@ async fn local_agent_bind_session(
         .data
         .ok_or_else(|| "Cloud节点注册响应缺少数据".to_string())?;
 
-    let bind_url = format!("{}/api/v1/bind", client.local_agent_base);
+    let bind_url = format!("{}/api/v1/bind", client.base);
     let bind_resp = client
         .inner
         .post(&bind_url)
@@ -289,7 +276,7 @@ async fn local_agent_bind_session(
     }
 
     report_runtime_to_cloud(
-        &client,
+        &cloud,
         &cloud_base_url,
         &registration.node.id,
         &registration.node_credential,
@@ -316,7 +303,8 @@ async fn local_agent_bind_session(
 
 #[tauri::command]
 async fn local_agent_refresh_runtime(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
+    cloud: State<'_, CloudClient>,
     binding_state: State<'_, RuntimeBindingState>,
     args: RefreshRuntimeArgs,
 ) -> Result<LocalAgentStatus, String> {
@@ -334,7 +322,7 @@ async fn local_agent_refresh_runtime(
         })?;
     let status = local_agent_status(client.clone()).await?;
     report_runtime_to_cloud(
-        &client,
+        &cloud,
         &cloud_base_url,
         &binding.node_id,
         &binding.node_credential,
@@ -346,7 +334,8 @@ async fn local_agent_refresh_runtime(
 
 #[tauri::command]
 async fn local_agent_account_check(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
+    cloud: State<'_, CloudClient>,
     binding_state: State<'_, RuntimeBindingState>,
     args: AccountCheckArgs,
 ) -> Result<AccountCheckResult, String> {
@@ -368,7 +357,7 @@ async fn local_agent_account_check(
         .ok_or_else(|| "当前电脑尚未完成可信绑定，请先到环境状态页重新检测并绑定".to_string())?;
     let status = local_agent_status(client.clone()).await?;
     report_runtime_to_cloud(
-        &client,
+        &cloud,
         &cloud_base_url,
         &binding.node_id,
         &binding.node_credential,
@@ -380,7 +369,7 @@ async fn local_agent_account_check(
         "{}/api/v1/local-agent/sensitive-tasks/{}/preflight",
         cloud_base_url, task_id
     );
-    let preflight_resp = client
+    let preflight_resp = cloud
         .inner
         .post(&preflight_url)
         .bearer_auth(&binding.node_credential)
@@ -416,7 +405,7 @@ async fn local_agent_account_check(
         return Err("账号检查授权缺少本机执行凭证".into());
     }
 
-    let account_check_url = format!("{}/api/v1/account-check", client.local_agent_base);
+    let account_check_url = format!("{}/api/v1/account-check", client.base);
     let account_check_resp = client
         .inner
         .post(&account_check_url)
@@ -434,7 +423,7 @@ async fn local_agent_account_check(
         "result_uncertain"
     };
     let finish_result = finish_sensitive_permit(
-        &client,
+        &cloud,
         &cloud_base_url,
         &binding,
         &preflight.permit_id,
@@ -464,7 +453,8 @@ async fn local_agent_account_check(
 
 #[tauri::command]
 async fn local_agent_cookie_read(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
+    cloud: State<'_, CloudClient>,
     binding_state: State<'_, RuntimeBindingState>,
     args: CookieReadArgs,
 ) -> Result<CookieReadResult, String> {
@@ -485,7 +475,7 @@ async fn local_agent_cookie_read(
         .ok_or_else(|| "当前电脑尚未完成可信绑定，请先到环境状态页重新检测并绑定".to_string())?;
     let status = local_agent_status(client.clone()).await?;
     report_runtime_to_cloud(
-        &client,
+        &cloud,
         &cloud_base_url,
         &binding.node_id,
         &binding.node_credential,
@@ -497,7 +487,7 @@ async fn local_agent_cookie_read(
         "{}/api/v1/local-agent/sensitive-tasks/{}/preflight",
         cloud_base_url, task_id
     );
-    let preflight_resp = client
+    let preflight_resp = cloud
         .inner
         .post(&preflight_url)
         .bearer_auth(&binding.node_credential)
@@ -533,7 +523,7 @@ async fn local_agent_cookie_read(
         return Err("Cookie读取授权缺少本机执行凭证".into());
     }
 
-    let cookie_read_url = format!("{}/api/v1/cookie-read", client.local_agent_base);
+    let cookie_read_url = format!("{}/api/v1/cookie-read", client.base);
     let cookie_read_resp = client
         .inner
         .post(&cookie_read_url)
@@ -547,7 +537,7 @@ async fn local_agent_cookie_read(
         "result_uncertain"
     };
     let finish_result = finish_sensitive_permit(
-        &client,
+        &cloud,
         &cloud_base_url,
         &binding,
         &preflight.permit_id,
@@ -581,7 +571,7 @@ async fn local_agent_cookie_read(
 }
 
 async fn report_runtime_to_cloud(
-    client: &HttpClient,
+    client: &CloudClient,
     cloud_base_url: &str,
     node_id: &str,
     node_credential: &str,
@@ -651,7 +641,7 @@ async fn report_runtime_to_cloud(
 }
 
 async fn finish_sensitive_permit(
-    client: &HttpClient,
+    client: &CloudClient,
     cloud_base_url: &str,
     binding: &RuntimeBinding,
     permit_id: &str,
@@ -685,11 +675,11 @@ async fn finish_sensitive_permit(
 /// port or hold Local Agent credentials directly.
 #[tauri::command]
 async fn local_agent_profile_scan(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
 ) -> Result<serde_json::Value, String> {
     let url = format!(
         "{}/api/v1/bit-browser/profile-scans",
-        client.local_agent_base
+        client.base
     );
     let resp = client
         .inner
@@ -709,11 +699,11 @@ async fn local_agent_profile_scan(
 
 #[tauri::command]
 async fn local_agent_profile_groups(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
 ) -> Result<serde_json::Value, String> {
     let url = format!(
         "{}/api/v1/bit-browser/profile-groups",
-        client.local_agent_base
+        client.base
     );
     let resp = client
         .inner
@@ -733,7 +723,7 @@ async fn local_agent_profile_groups(
 
 #[tauri::command]
 async fn local_agent_profile_open(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
     args: ProfileOperationArgs,
 ) -> Result<ProfileOperationResult, String> {
     let bit_profile_id = args.bit_profile_id.trim().to_string();
@@ -750,7 +740,7 @@ async fn local_agent_profile_open(
 
 #[tauri::command]
 async fn local_agent_profile_close(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
     args: ProfileOperationArgs,
 ) -> Result<ProfileOperationResult, String> {
     let bit_profile_id = args.bit_profile_id.trim().to_string();
@@ -767,13 +757,13 @@ async fn local_agent_profile_close(
 
 #[tauri::command]
 async fn local_agent_profile_create(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
     args: CreateProfileArgs,
 ) -> Result<CreateProfileResult, String> {
     let payload = create_profile_payload(&args)?;
     let url = format!(
         "{}/api/v1/bit-browser/profile-create",
-        client.local_agent_base
+        client.base
     );
     let resp = client
         .inner
@@ -811,7 +801,7 @@ async fn local_agent_profile_create(
 /// read back the full profile snapshot before reporting success.
 #[tauri::command]
 async fn local_agent_profile_restore(
-    client: State<'_, HttpClient>,
+    client: State<'_, LocalAgentClient>,
     profiles: Vec<RestoreProfileInput>,
 ) -> Result<RestoreProfileResult, String> {
     if profiles.is_empty() {
@@ -823,7 +813,7 @@ async fn local_agent_profile_restore(
         }
         let update_url = format!(
             "{}/api/v1/bit-browser/profile-update",
-            client.local_agent_base
+            client.base
         );
         let update_payload = restore_payload(profile);
         let update_resp = client
@@ -907,13 +897,13 @@ fn restore_payload(profile: &RestoreProfileInput) -> serde_json::Value {
 }
 
 async fn post_local_agent_profile_operation(
-    client: &HttpClient,
+    client: &LocalAgentClient,
     operation: &str,
     bit_profile_id: &str,
 ) -> Result<(), String> {
     let url = format!(
         "{}/api/v1/bit-browser/{}",
-        client.local_agent_base, operation
+        client.base, operation
     );
     let resp = client
         .inner
@@ -1226,7 +1216,8 @@ mod tests {
 
 fn main() {
     tauri::Builder::default()
-        .manage(HttpClient::new(8765))
+        .manage(LocalAgentClient::new(8765))
+        .manage(CloudClient::new())
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
         .setup(|_app| {
