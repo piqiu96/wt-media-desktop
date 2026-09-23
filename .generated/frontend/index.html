@@ -4,7 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WT Media Desktop</title>
-    <script type="module" crossorigin src="/assets/index.desktop-Ae7LHWT3.js"></script>
+    <!-- TDesign 图标精灵，必须由**同源**提供且早于任何 t-icon 挂载。
+         tdesign-icons 默认从 https://tdesign.gtimg.com 注入 <script> 来定义 #t-icon-* 符号；
+         桌面端 CSP 没有 script-src，回落 default-src 'self' 会把它拦掉，于是每个 <use> 都解析为空、
+         所有图标空白（Web 端无 CSP 故正常）。内置同源副本后无需放松 CSP，且离线可用。
+         这里刻意用普通 <script> 而非 module：它在解析期同步执行，必然早于下方 defer 的 module 入口。
+         详见 public/tdesign-icons/README.md。 -->
+    <script src="/tdesign-icons/0.4.3/index.js"></script>
+    <script type="module" crossorigin src="/assets/index.desktop-B9m5zWs5.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-o03HRtYg.css">
   </head>
   <body>
