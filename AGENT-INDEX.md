@@ -52,4 +52,4 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 3. `DIRECTORY_MAP.md`（目录导航；含 Vue 产物来源与集成方式）
 4. 只读目标模块的代码、直接依赖与 `tests/`
 
-治理上下文（当前 CHG、契约）在 `../wt-media-workspace`，按其 `.ai/CURRENT_CONTEXT.md` 指引加载。禁止默认扫描 `target/`、`../.generated/`、`src-tauri/gen/`。
+治理上下文（当前 CHG、契约）在 `../wt-media-workspace`，按其 `.ai/CURRENT_CONTEXT.md` 指引加载。禁止默认扫描 `target/`、`../.generated/`、`src-tauri/gen/`、`../generated`。
