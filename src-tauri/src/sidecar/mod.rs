@@ -10,9 +10,12 @@
 //! this was extracted from (`sidecar_started` / `started` / `already_running` /
 //! `not_running`), because the Vue layer matches on them.
 
+use crate::state::SidecarLog;
 use tauri::AppHandle;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+
+pub mod drain;
 
 /// Start the Local Agent, returning the path label and the child handle.
 ///
@@ -20,17 +23,31 @@ use tauri_plugin_shell::ShellExt;
 /// falls through to the Python path, and without it the caller gets the
 /// "reinstall" message — which is the message that helps a user either way. The
 /// spawn error itself is deliberately not surfaced, as before.
-pub fn start(app: &AppHandle, allow_python_fallback: bool) -> Result<(&'static str, CommandChild), String> {
+///
+/// Both paths hand their event receiver to `drain`, so whichever one ran, its
+/// output is readable from `log` afterwards.
+pub fn start(
+    app: &AppHandle,
+    allow_python_fallback: bool,
+    log: &SidecarLog,
+) -> Result<(&'static str, CommandChild), String> {
+    const SIDECAR: &str = "sidecar_started";
+    const FALLBACK: &str = "started";
+
     match app.shell().sidecar("wt-media-agent").map(|cmd| cmd.spawn()) {
-        Ok(Ok((_events, child))) => Ok(("sidecar_started", child)),
+        Ok(Ok((events, child))) => {
+            drain::follow(events, log.clone(), SIDECAR);
+            Ok((SIDECAR, child))
+        }
         _ if allow_python_fallback => {
             let shell = app.shell();
-            let (_events, child) = shell
+            let (events, child) = shell
                 .command("python3")
                 .args(["-m", "wt_media_agent.local_api.server"])
                 .spawn()
                 .map_err(|e| format!("agent launch failed: {}", e))?;
-            Ok(("started", child))
+            drain::follow(events, log.clone(), FALLBACK);
+            Ok((FALLBACK, child))
         }
         _ => Err(
             "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),

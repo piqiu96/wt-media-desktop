@@ -15,7 +15,7 @@ mod system;
 mod updater;
 
 use http::{CloudClient, LocalAgentClient};
-use state::{AgentProcess, RuntimeBindingState};
+use state::{AgentProcess, RuntimeBindingState, SidecarLog};
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
     debug_build && explicitly_enabled
@@ -51,6 +51,7 @@ fn main() {
         .manage(CloudClient::new())
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
+        .manage(SidecarLog::default())
         .setup(|_app| {
             // WebView 报错转发的注册点在**前端**（`web/src/apps/desktop/webviewErrors.js`），
             // 不在这里用 `window.eval`。

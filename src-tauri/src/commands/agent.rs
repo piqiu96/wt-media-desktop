@@ -3,8 +3,8 @@
 use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
-use crate::sidecar;
-use crate::state::AgentProcess;
+use crate::sidecar::{self, drain};
+use crate::state::{AgentProcess, SidecarLog};
 use tauri::State;
 
 #[tauri::command]
@@ -23,24 +23,28 @@ pub async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<L
     Ok(LocalAgentStatus::from(body.data))
 }
 #[tauri::command]
-pub async fn local_agent_health(client: State<'_, LocalAgentClient>) -> Result<String, String> {
+pub async fn local_agent_health(
+    client: State<'_, LocalAgentClient>,
+    log: State<'_, SidecarLog>,
+) -> Result<String, String> {
     let url = format!("{}/healthz", client.base);
     let resp = client
         .inner
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("agent unreachable: {}", e))?;
+        .map_err(|e| format!("agent unreachable: {}{}", e, drain::summary(log.inner())))?;
     let text = resp
         .text()
         .await
-        .map_err(|e| format!("read error: {}", e))?;
+        .map_err(|e| format!("read error: {}{}", e, drain::summary(log.inner())))?;
     Ok(text)
 }
 #[tauri::command]
 pub async fn local_agent_start(
     app: tauri::AppHandle,
     process: State<'_, AgentProcess>,
+    log: State<'_, SidecarLog>,
 ) -> Result<String, String> {
     if process
         .0
@@ -52,7 +56,8 @@ pub async fn local_agent_start(
     }
     // Release builds must run only the bundled sidecar. Development can opt into
     // a Python fallback explicitly when iterating without a frozen binary.
-    let (label, child) = sidecar::start(&app, development_python_fallback_enabled())?;
+    let (label, child) = sidecar::start(&app, development_python_fallback_enabled(), log.inner())
+        .map_err(|e| format!("{}{}", e, drain::summary(log.inner())))?;
     process
         .0
         .lock()
