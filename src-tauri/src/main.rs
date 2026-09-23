@@ -9,6 +9,7 @@ mod http;
 mod local_agent;
 mod preflight;
 mod secure_store;
+mod sidecar;
 mod state;
 mod system;
 mod updater;

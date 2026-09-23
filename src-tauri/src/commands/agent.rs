@@ -3,9 +3,9 @@
 use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
+use crate::sidecar;
 use crate::state::AgentProcess;
 use tauri::State;
-use tauri_plugin_shell::ShellExt;
 
 #[tauri::command]
 pub async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<LocalAgentStatus, String> {
@@ -52,37 +52,13 @@ pub async fn local_agent_start(
     }
     // Release builds must run only the bundled sidecar. Development can opt into
     // a Python fallback explicitly when iterating without a frozen binary.
-    let sidecar_result = app.shell().sidecar("wt-media-agent").map(|cmd| cmd.spawn());
-
-    match sidecar_result {
-        Ok(Ok((_events, child))) => {
-            process
-                .0
-                .lock()
-                .map_err(|_| "agent process lock poisoned")?
-                .replace(child);
-            Ok("sidecar_started".into())
-        }
-        _ if development_python_fallback_enabled() => {
-            // Deliberate development-only fallback; it is unreachable from a
-            // release bundle so customers never need a system Python install.
-            let shell = app.shell();
-            let (_events, child) = shell
-                .command("python3")
-                .args(["-m", "wt_media_agent.local_api.server"])
-                .spawn()
-                .map_err(|e| format!("agent launch failed: {}", e))?;
-            process
-                .0
-                .lock()
-                .map_err(|_| "agent process lock poisoned")?
-                .replace(child);
-            Ok("started".into())
-        }
-        _ => Err(
-            "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),
-        ),
-    }
+    let (label, child) = sidecar::start(&app, development_python_fallback_enabled())?;
+    process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .replace(child);
+    Ok(label.into())
 }
 #[tauri::command]
 pub fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, String> {
@@ -92,10 +68,7 @@ pub fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, Stri
         .map_err(|_| "agent process lock poisoned")?
         .take();
     match child {
-        Some(child) => child
-            .kill()
-            .map(|_| "stopped".into())
-            .map_err(|e| format!("agent stop failed: {}", e)),
+        Some(child) => sidecar::stop(child),
         None => Ok("not_running".into()),
     }
 }
