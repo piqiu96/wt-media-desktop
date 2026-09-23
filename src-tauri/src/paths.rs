@@ -23,8 +23,8 @@
 //! the descending order is testable without a filesystem or a real environment.
 //! Reading the chosen file is [`file_text`], the only impure part.
 //!
-//! Not wired yet: T-07 calls this from `main` and feeds the text to
-//! `config::load_with`. Until then this module has no consumer.
+//! The caller is `bootstrap::resolve`, which supplies the two directories from
+//! the running process and hands the text to `config::load_with`.
 
 use crate::config::{Environment, PRODUCTION_TOML};
 use std::collections::BTreeMap;
@@ -56,13 +56,6 @@ pub enum Source {
     DevelopmentTree,
     /// `config::PRODUCTION_TOML`, compiled into the binary.
     CompiledIn,
-}
-
-impl Source {
-    /// Whether this source is a file on disk (as opposed to compiled in).
-    pub fn is_file(self) -> bool {
-        self != Source::CompiledIn
-    }
 }
 
 /// The candidates in the order they are tried.
@@ -309,7 +302,6 @@ mod tests {
         let (text, source) = file_text(&BTreeMap::new(), Environment::Production, None, None, &manifest());
         assert_eq!(source, Source::CompiledIn);
         assert_eq!(text, PRODUCTION_TOML, "the fallback must be the shipped config");
-        assert!(!source.is_file());
     }
 
     /// A file that exists but cannot be read must fall back, not panic.
@@ -347,21 +339,5 @@ mod tests {
             Environment::Production,
         );
         assert!(parsed.is_ok(), "the fallback must parse and validate: {parsed:?}");
-    }
-
-    /// Every source except the compiled-in one names a file on disk, so a caller
-    /// can tell "we read a file" from "we fell back" without matching on the
-    /// enum. Getting this backwards would make a fallback look like a file.
-    #[test]
-    fn only_the_compiled_default_is_not_a_file() {
-        for (source, is_file) in [
-            (Source::EnvOverride, true),
-            (Source::BundledResource, true),
-            (Source::BesideExecutable, true),
-            (Source::DevelopmentTree, true),
-            (Source::CompiledIn, false),
-        ] {
-            assert_eq!(source.is_file(), is_file, "{source:?}");
-        }
     }
 }

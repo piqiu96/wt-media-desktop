@@ -1,6 +1,7 @@
 // WT Media Desktop — Tauri v2 shell with real Local Agent HTTP/SSE bridge.
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
+mod bootstrap;
 mod commands;
 mod config;
 mod dto;
@@ -48,6 +49,16 @@ mod tests {
 // ---- App Entry Point ----
 
 fn main() {
+    // The config is resolved *before* the app is built, because the CSP has to
+    // be set on the `Context`: Tauri copies the context's config into the
+    // `AppManager`, and that copy is what it reads when it serves the window.
+    // Once `Builder::run` has been handed the context there is no way back to
+    // it — see `bootstrap`'s header for the call chain.
+    let mut context = tauri::generate_context!();
+    let startup = bootstrap::resolve(context.package_info());
+    bootstrap::apply_csp(context.config_mut(), &startup.config);
+    eprintln!("[wt-media-desktop] {}", startup.summary());
+
     tauri::Builder::default()
         .manage(LocalAgentClient::new(8765))
         .manage(CloudClient::new())
@@ -85,6 +96,6 @@ fn main() {
             commands::logging::log_js_error,
         ])
         .plugin(tauri_plugin_shell::init())
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running wt-media-desktop tauri application");
 }
