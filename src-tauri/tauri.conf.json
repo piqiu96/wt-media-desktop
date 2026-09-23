@@ -17,9 +17,7 @@
         "height": 800
       }
     ],
-    "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:18080; style-src 'self' 'unsafe-inline'; img-src 'self' https:"
-    }
+    "security": {}
   },
   "bundle": {
     "active": true,

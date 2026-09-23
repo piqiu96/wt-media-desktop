@@ -220,22 +220,54 @@ mod tests {
         assert_eq!(build_environment(), build_environment_of(cfg!(debug_assertions)));
     }
 
-    /// The CSP this module builds must be the one the bundle ships today,
-    /// **byte for byte**, until the literal is deleted from `tauri.conf.json`.
+    /// `tauri.conf.json` must not carry a policy of its own any more.
     ///
-    /// This is the whole safety argument for moving it: injection changes where
-    /// the policy comes from, and nothing else. If this test fails, the move has
-    /// changed the policy — which is a different and much larger change than the
-    /// one being made.
+    /// The two keys are not equally dangerous and the test says which is which:
+    ///
+    /// - `csp`: `apply_csp` overwrites it, so a literal coming back would still
+    ///   be **dead** — it would not change behaviour, it would only mislead the
+    ///   next reader into thinking that line is the policy.
+    /// - `devCsp`: this one **wins**. `Manager::csp()` prefers `dev_csp` and
+    ///   falls back to `csp` (`tauri/src/manager/mod.rs:369-380`), and `apply_csp`
+    ///   sets only `csp` — so a `devCsp` literal would silently override the
+    ///   injected policy in every dev build, and the file would be the thing in
+    ///   force again.
+    ///
+    /// Together with `apply_csp_writes_the_field_a_dev_build_would_otherwise_
+    /// prefer_over` (which pins `dev_csp` staying `None`), this is what makes
+    /// "the injected policy is the policy, in dev and in production" hold.
     #[test]
-    fn the_shipped_config_produces_the_policy_tauri_conf_carries() {
+    fn tauri_conf_carries_no_policy_of_its_own() {
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json is JSON");
-        let literal = conf["app"]["security"]["csp"]
-            .as_str()
-            .expect("tauri.conf.json must still carry the csp it is about to stop carrying");
+        let security = &conf["app"]["security"];
 
-        assert_eq!(csp_policy(&shipped()), literal);
+        for key in ["csp", "devCsp"] {
+            assert!(
+                security.get(key).is_none(),
+                "tauri.conf.json must not declare {key}: the policy comes from the desktop \
+                 config through `apply_csp`. Found {security:?}"
+            );
+        }
+    }
+
+    /// The policy's whole shape is pinned, not only its variable part.
+    ///
+    /// The string below is, deliberately, **the literal that used to sit in
+    /// `tauri.conf.json`** — same directives, same order, same separators. Until
+    /// that literal was deleted, `the_shipped_config_produces_the_policy_tauri_
+    /// conf_carries` asserted this equality byte for byte against the file; when
+    /// the file lost its copy, the assertion moved here rather than being
+    /// dropped. Its job now is to make "the policy moved, it did not change" a
+    /// permanent claim: a directive that is edited, added or reordered has to
+    /// edit this string too, on purpose.
+    #[test]
+    fn the_policy_is_shape_for_shape_the_literal_it_replaced() {
+        assert_eq!(
+            csp_policy(&shipped()),
+            "default-src 'self'; connect-src 'self' http://127.0.0.1:18080; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' https:"
+        );
     }
 
     /// The mutation lands in `app.security.csp` — the field `Manager::csp()`
