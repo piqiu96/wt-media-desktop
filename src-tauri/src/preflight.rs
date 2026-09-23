@@ -221,7 +221,6 @@ pub async fn sync_runtime_facts(
         cloud_base_url, node_id
     );
     let report_resp = cloud
-        .inner
         .post(&report_url)
         .bearer_auth(node_credential)
         .json(&runtime_report)
@@ -255,7 +254,6 @@ pub async fn run(
         cloud_base_url, task_id
     );
     let resp = cloud
-        .inner
         .post(&url)
         .bearer_auth(&binding.node_credential)
         .json(&serde_json::json!({"node_id": binding.node_id}))
@@ -309,7 +307,6 @@ pub async fn finish_permit(
         cloud_base_url, permit_id
     );
     let resp = cloud
-        .inner
         .post(&finish_url)
         .bearer_auth(&binding.node_credential)
         .header("X-Profile-Permit", permit_credential)

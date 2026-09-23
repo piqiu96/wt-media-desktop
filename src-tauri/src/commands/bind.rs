@@ -18,10 +18,8 @@ use super::agent::local_agent_status;
 /// Bind the Desktop to the Local Agent, receiving a session token.
 #[tauri::command]
 pub async fn local_agent_bind(client: State<'_, LocalAgentClient>) -> Result<BindResponse, String> {
-    let url = format!("{}/api/v1/bind", client.base);
     let resp = client
-        .inner
-        .post(&url)
+        .post("/api/v1/bind")
         .json(&serde_json::json!({"node_id": "wt-media-desktop", "binding_token": "desktop-init"}))
         .send()
         .await
@@ -68,7 +66,6 @@ pub async fn local_agent_bind_session(
         contract_revision: "2026.07.15.1".into(),
     };
     let register_resp = cloud
-        .inner
         .post(&register_url)
         .json(&register_payload)
         .send()
@@ -99,10 +96,8 @@ pub async fn local_agent_bind_session(
         .data
         .ok_or_else(|| "Cloud节点注册响应缺少数据".to_string())?;
 
-    let bind_url = format!("{}/api/v1/bind", client.base);
     let bind_resp = client
-        .inner
-        .post(&bind_url)
+        .post("/api/v1/bind")
         .json(&serde_json::json!({
             "node_id": registration.node.id,
             "binding_token": "cloud-runtime-bound"

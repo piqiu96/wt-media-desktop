@@ -39,10 +39,8 @@ pub async fn local_agent_account_check(
 
     let preflight = preflight::run(&cloud, &cloud_base_url, &task_id, &binding, ACCOUNT_CHECK).await?;
 
-    let account_check_url = format!("{}/api/v1/account-check", client.base);
     let account_check_resp = client
-        .inner
-        .post(&account_check_url)
+        .post("/api/v1/account-check")
         .json(&serde_json::json!({
             "profile_id": bit_profile_id,
             "platform": platform,
@@ -111,10 +109,8 @@ pub async fn local_agent_cookie_read(
 
     let preflight = preflight::run(&cloud, &cloud_base_url, &task_id, &binding, COOKIE_READ).await?;
 
-    let cookie_read_url = format!("{}/api/v1/cookie-read", client.base);
     let cookie_read_resp = client
-        .inner
-        .post(&cookie_read_url)
+        .post("/api/v1/cookie-read")
         .json(&serde_json::json!({"profile_id": bit_profile_id}))
         .send()
         .await;

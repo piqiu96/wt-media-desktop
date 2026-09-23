@@ -19,6 +19,7 @@ mod updater;
 
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, RuntimeBindingState, SidecarLog};
+use token::RuntimeToken;
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
     debug_build && explicitly_enabled
@@ -59,9 +60,15 @@ fn main() {
     bootstrap::apply_csp(context.config_mut(), &startup.config);
     eprintln!("[wt-media-desktop] {}", startup.summary());
 
+    // One token per launch, generated here and handed to the client that owns
+    // it. Nothing persists it and nothing passes it on a command line: it
+    // reaches the Agent through the client's own requests, and (from T-07's
+    // sidecar commit) through the child's environment.
+    let token = RuntimeToken::generate();
+
     tauri::Builder::default()
-        .manage(LocalAgentClient::new(8765))
-        .manage(CloudClient::new())
+        .manage(LocalAgentClient::new(&startup.config, token))
+        .manage(CloudClient::new(&startup.config))
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
         .manage(SidecarLog::default())

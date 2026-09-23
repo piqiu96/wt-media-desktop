@@ -18,13 +18,8 @@ use tauri::State;
 pub async fn local_agent_profile_scan(
     client: State<'_, LocalAgentClient>,
 ) -> Result<serde_json::Value, String> {
-    let url = format!(
-        "{}/api/v1/bit-browser/profile-scans",
-        client.base
-    );
     let resp = client
-        .inner
-        .post(&url)
+        .post("/api/v1/bit-browser/profile-scans")
         .send()
         .await
         .map_err(|e| format!("profile scan failed: {}", e))?;
@@ -41,13 +36,8 @@ pub async fn local_agent_profile_scan(
 pub async fn local_agent_profile_groups(
     client: State<'_, LocalAgentClient>,
 ) -> Result<serde_json::Value, String> {
-    let url = format!(
-        "{}/api/v1/bit-browser/profile-groups",
-        client.base
-    );
     let resp = client
-        .inner
-        .post(&url)
+        .post("/api/v1/bit-browser/profile-groups")
         .send()
         .await
         .map_err(|e| format!("读取BitBrowser分组失败: {}", e))?;
@@ -98,13 +88,8 @@ pub async fn local_agent_profile_create(
     args: CreateProfileArgs,
 ) -> Result<CreateProfileResult, String> {
     let payload = create_profile_payload(&args)?;
-    let url = format!(
-        "{}/api/v1/bit-browser/profile-create",
-        client.base
-    );
     let resp = client
-        .inner
-        .post(&url)
+        .post("/api/v1/bit-browser/profile-create")
         .json(&payload)
         .send()
         .await
@@ -147,14 +132,9 @@ pub async fn local_agent_profile_restore(
         if profile.bit_profile_id.trim().is_empty() {
             return Err("恢复失败：存在缺少BitBrowser窗口ID的Cloud窗口".into());
         }
-        let update_url = format!(
-            "{}/api/v1/bit-browser/profile-update",
-            client.base
-        );
         let update_payload = restore_payload(profile);
         let update_resp = client
-            .inner
-            .post(&update_url)
+            .post("/api/v1/bit-browser/profile-update")
             .json(&update_payload)
             .send()
             .await
@@ -235,13 +215,8 @@ async fn post_local_agent_profile_operation(
     operation: &str,
     bit_profile_id: &str,
 ) -> Result<(), String> {
-    let url = format!(
-        "{}/api/v1/bit-browser/{}",
-        client.base, operation
-    );
     let resp = client
-        .inner
-        .post(&url)
+        .post(&format!("/api/v1/bit-browser/{}", operation))
         .json(&serde_json::json!({"id": bit_profile_id}))
         .send()
         .await

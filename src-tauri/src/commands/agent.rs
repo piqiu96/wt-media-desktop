@@ -9,10 +9,8 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<LocalAgentStatus, String> {
-    let url = format!("{}/api/v1/status", client.base);
     let resp = client
-        .inner
-        .get(&url)
+        .get("/api/v1/status")
         .send()
         .await
         .map_err(|e| format!("agent unreachable: {}", e))?;
@@ -27,10 +25,8 @@ pub async fn local_agent_health(
     client: State<'_, LocalAgentClient>,
     log: State<'_, SidecarLog>,
 ) -> Result<String, String> {
-    let url = format!("{}/healthz", client.base);
     let resp = client
-        .inner
-        .get(&url)
+        .get("/healthz")
         .send()
         .await
         .map_err(|e| format!("agent unreachable: {}{}", e, drain::summary(log.inner())))?;
