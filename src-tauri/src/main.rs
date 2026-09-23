@@ -1,4 +1,8 @@
-// WT Media Desktop — Tauri v2 shell with real Local Agent HTTP/SSE bridge.
+// WT Media Desktop — Tauri v2 shell with a real Local Agent HTTP bridge.
+//
+// The bridge is HTTP only: the Agent does expose a `text/event-stream` endpoint
+// (`local_api/server.py`), but nothing here consumes a stream —
+// `local_agent_task_status` reads a status snapshot.
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
 mod bootstrap;

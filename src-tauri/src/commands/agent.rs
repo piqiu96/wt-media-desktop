@@ -86,7 +86,11 @@ pub fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, Stri
         None => Ok("not_running".into()),
     }
 }
-/// Fetch task progress via SSE stream (simplified: returns latest status snapshot).
+/// Fetch task progress as a status snapshot.
+///
+/// No stream is opened: `task_id` is validated server-side and the overall
+/// status is returned. The Agent's `text/event-stream` endpoint is not consumed
+/// from here.
 #[tauri::command]
 pub async fn local_agent_task_status(
     client: State<'_, LocalAgentClient>,
