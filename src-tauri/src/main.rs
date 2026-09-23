@@ -7,6 +7,7 @@ mod dto;
 mod filesystem;
 mod http;
 mod local_agent;
+mod preflight;
 mod secure_store;
 mod state;
 mod system;
