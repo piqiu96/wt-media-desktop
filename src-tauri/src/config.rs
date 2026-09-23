@@ -16,7 +16,7 @@
 //! filesystem. Reading the file from the right place on disk (dev vs bundled)
 //! is a separate, impure concern that belongs to the loader, not here.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The production resource, compiled in. A bundle whose resource file is
@@ -28,7 +28,11 @@ pub const PRODUCTION_TOML: &str = include_str!("../resources/desktop.production.
 /// variable it replaces, so an existing development shell keeps working.
 pub const ENV_PYTHON_FALLBACK: &str = "WT_MEDIA_DESKTOP_ALLOW_PYTHON_FALLBACK";
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+/// `Serialize` exists for exactly one reader: `dto::PublicConfig` hands the page
+/// the effective environment, and the wire value has to be the same lowercase
+/// word the file uses (`"development"` / `"production"`) — `rename_all` covers
+/// both directions so the two can never spell it differently.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
     Development,

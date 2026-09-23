@@ -69,6 +69,10 @@ fn main() {
     tauri::Builder::default()
         .manage(LocalAgentClient::new(&startup.config, token))
         .manage(CloudClient::new(&startup.config))
+        // The config is managed as its own state as well as being consumed
+        // during startup: `get_public_config` answers from this copy, so the
+        // page and `apply_csp` can never be reading two different configs.
+        .manage(startup.config.clone())
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
         .manage(SidecarLog::default())
@@ -101,6 +105,9 @@ fn main() {
             commands::profile::local_agent_profile_create,
             commands::profile::local_agent_profile_restore,
             commands::logging::log_js_error,
+            // Appended, not inserted: `localAgentService.test.js` asserts on exact
+            // argument objects, and the existing seventeen keep their positions.
+            commands::public_config::get_public_config,
         ])
         .plugin(tauri_plugin_shell::init())
         .run(context)

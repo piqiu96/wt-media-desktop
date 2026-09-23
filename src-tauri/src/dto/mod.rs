@@ -1,7 +1,8 @@
 //! Wire types crossing the Rust boundary, grouped by the flow that consumes
 //! them: `agent` (Local Agent status and runtime facts), `bind` (Cloud node
 //! registration), `account` (account check and cookie read), `profile`
-//! (BitBrowser profile operations).
+//! (BitBrowser profile operations), `config` (the narrow slice of Desktop's own
+//! configuration the page may see).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -11,11 +12,13 @@
 mod account;
 mod agent;
 mod bind;
+mod config;
 mod profile;
 
 pub use account::*;
 pub use agent::*;
 pub use bind::*;
+pub use config::*;
 pub use profile::*;
 
 use serde::Deserialize;
