@@ -12,7 +12,7 @@ use local_agent::BoundNodeFacts;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::State;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
@@ -1534,33 +1534,15 @@ fn main() {
         .manage(HttpClient::new(8765))
         .manage(AgentProcess::default())
         .manage(RuntimeBindingState::default())
-        .setup(|app| {
-            // Temporary diagnostics: forward WebView console/errors to stdout.
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval(
-                    r#"(function() {
-                        function report(msg, stack) {
-                            try {
-                                window.__TAURI_INTERNALS__.invoke("log_js_error", { message: String(msg), stack: String(stack || "") });
-                            } catch (e) {}
-                        }
-                        window.addEventListener("error", function(e) {
-                            report((e.message || "") + " @ " + (e.filename || "") + ":" + (e.lineno || 0), e.error ? e.error.stack : "");
-                        });
-                        window.addEventListener("unhandledrejection", function(e) {
-                            var r = e.reason || {};
-                            report("unhandled rejection: " + (r && r.message ? r.message : String(r)), r && r.stack ? r.stack : "");
-                        });
-                        ["error","warn"].forEach(function(level) {
-                            var orig = console[level].bind(console);
-                            console[level] = function() {
-                                report("[console." + level + "] " + Array.prototype.map.call(arguments, String).join(" "), "");
-                                orig.apply(null, arguments);
-                            };
-                        });
-                    })();"#,
-                );
-            }
+        .setup(|_app| {
+            // WebView 报错转发的注册点在**前端**（`web/src/apps/desktop/webviewErrors.js`），
+            // 不在这里用 `window.eval`。
+            //
+            // 原因：应用 CSP 的 script-src 回落到 default-src 'self' 且不含 'unsafe-eval'，
+            // `window.eval` 会被 WebView 直接拒绝——这段注入在实际运行中从未生效，
+            // 原生端因此一行报错都看不到（2026-09-23 实测确认）。
+            // 前端入口本身就是 'self' 加载的脚本，不受该限制；这样也无需为了
+            // 日志给 CSP 开 'unsafe-eval'。落点仍是下方 `log_js_error`。
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
