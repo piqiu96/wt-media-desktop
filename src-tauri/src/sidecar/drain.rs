@@ -127,20 +127,35 @@ pub fn follow(events: Receiver<CommandEvent>, log: SidecarLog, path: &'static st
     });
 }
 
-fn report_exit(path: &str, code: Option<i32>, signal: Option<i32>, log: &SidecarLog) {
+/// The text of the exit report.
+///
+/// Split from printing it so the wording is testable — `eprintln!` is not.
+///
+/// It reports both how many lines were **held** and how many are shown. The two
+/// differ exactly when the buffer overflowed, and that difference is a fact
+/// about the diagnosis: if 200 lines were captured and only the last 20 shown,
+/// whatever killed the sidecar may have said so earlier, and the reader should
+/// know the tail is not the whole story rather than assume it is.
+pub fn exit_report(path: &str, code: Option<i32>, signal: Option<i32>, log: &SidecarLog) -> String {
     let how = match (code, signal) {
         (Some(code), _) => format!("退出码 {code}"),
         (None, Some(signal)) => format!("被信号 {signal} 终止"),
         (None, None) => "退出状态未知".to_string(),
     };
     let lines = tail(log, TAIL_ON_EXIT);
-    eprintln!(
-        "[wt-media-desktop] Local Agent（{path}）{how}；末 {} 行输出：",
+    let mut out = format!(
+        "[wt-media-desktop] Local Agent（{path}）{how}；缓冲共 {} 行，末 {} 行输出：",
+        len(log),
         lines.len()
     );
     for line in &lines {
-        eprintln!("[wt-media-desktop] | {line}");
+        out.push_str(&format!("\n[wt-media-desktop] | {line}"));
     }
+    out
+}
+
+fn report_exit(path: &str, code: Option<i32>, signal: Option<i32>, log: &SidecarLog) {
+    eprintln!("{}", exit_report(path, code, signal, log));
 }
 
 #[cfg(test)]
@@ -208,6 +223,42 @@ mod tests {
             summary(&log),
             "\n\nLocal Agent 最近输出：\nstarting\nbind: 127.0.0.1:8765"
         );
+    }
+
+    /// Both counts appear, and the wording is the whole report.
+    #[test]
+    fn exit_report_names_the_status_held_count_and_the_lines() {
+        let log = log_with(&["a", "b"]);
+        assert_eq!(
+            exit_report("sidecar_started", Some(0), None, &log),
+            "[wt-media-desktop] Local Agent（sidecar_started）退出码 0；缓冲共 2 行，末 2 行输出：\
+             \n[wt-media-desktop] | a\
+             \n[wt-media-desktop] | b"
+        );
+
+        // Every status spelling, so a missing branch is visible here.
+        assert!(exit_report("started", None, Some(9), &log).contains("被信号 9 终止"));
+        assert!(exit_report("started", None, None, &log).contains("退出状态未知"));
+        // No output captured is still a report, not a panic or an empty line.
+        let report = exit_report("sidecar_started", Some(1), None, &SidecarLog::default());
+        assert!(report.contains("缓冲共 0 行，末 0 行输出："), "{report}");
+    }
+
+    /// The held count must be the buffer's, not the tail's — otherwise a
+    /// truncated tail looks like the whole story.
+    #[test]
+    fn exit_report_distinguishes_held_lines_from_shown_lines() {
+        let log = SidecarLog::default();
+        for i in 0..CAPACITY {
+            push(&log, format!("l{i}"));
+        }
+        let report = exit_report("sidecar_started", Some(1), None, &log);
+        assert!(
+            report.contains(&format!("缓冲共 {CAPACITY} 行，末 {TAIL_ON_EXIT} 行输出")),
+            "a full buffer must report {CAPACITY} held and {TAIL_ON_EXIT} shown: {report}"
+        );
+        assert!(report.contains("| l199"), "the newest line must be shown");
+        assert!(!report.contains("| l0"), "the oldest must have been evicted");
     }
 
     /// The exit report and the error suffix show the same window, so the plan's
