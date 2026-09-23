@@ -8,30 +8,45 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/main.rs` | Tauri 初始化、窗口、应用退出、系统托盘、客户端运行状态 | 改客户端生命周期 |
-| `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、devUrl 5174、构建命令指向 `../wt-media-cloud/web` | 改窗口/构建配置 |
+| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、18 个命令的 `generate_handler!`（约 115 行；AC-04 上限 300） | 改客户端生命周期、增删命令 |
+| `src-tauri/src/bootstrap.rs` | 配置 → 启动所需物件的引导，以及**必须在 Tauri 构建任何东西之前**完成的 CSP 注入 | 改启动顺序 |
+| `src-tauri/src/config.rs` | 配置模式：一个 schema、一条解析路径、两条只往更严方向走的叠加规则（production 忽略整个 `WT_MEDIA_DESKTOP_*` 命名空间） | 改配置键、改优先级 |
+| `src-tauri/src/paths.rs` | 配置文件定位：打包版看资源目录，开发树看 crate `resources/`，两条路都以编译进二进制的 `PRODUCTION_TOML` 兜底 | 改配置定位 |
+| `src-tauri/src/token.rs` | 每次启动生成的本机运行 token。**无 `Debug`/`Display`/`Serialize`**——这是它作为类型而非 `String` 存在的全部理由 | 改本地鉴权 |
+| `src-tauri/src/state.rs` | Tauri 管理的原生状态（绑定凭据、sidecar 句柄）。**不越过 IPC 到 Vue** | 改原生状态 |
+| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback` | 改发布默认值 |
+| `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、devUrl 5174、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
 | `src-tauri/build.rs`、`src-tauri/gen/`、`src-tauri/icons/` | 构建脚本、生成内容、图标 | 改打包资源 |
 
 ## 二、Rust 命令与安全桥
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/commands/` | 暴露给 Vue 页面的 Tauri 命令 | 改命令接口 |
+| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（18 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`logging.rs`、`public_config.rs` | 改命令接口 |
+| `src-tauri/src/dto/` | 按消费方分组的 serde 结构体。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象 | 改命令载荷 |
+| `src-tauri/src/http/` | 两个**分开的**客户端类型：`local_agent.rs`（回环、带运行 token）、`cloud.rs`（地址与凭据都是逐请求事实）。分开是因为可信级别不同——合在一起会让「这次调用带没带本机 token」无法从类型上回答 | 改出站客户端 |
+| `src-tauri/src/preflight.rs` | 敏感流程共用的 Cloud 预检与守卫。原先在 account/cookie 各抄一份；错误文案由 `tests::message_parity` 钉住 | 改预检、改错误文案 |
 | `src-tauri/src/filesystem/` | 文件/目录选择等受控本地文件能力 | 改文件桥 |
 | `src-tauri/src/secure_store/` | OS 安全存储（敏感 Token 不进 localStorage） | 改安全存储 |
 | `src-tauri/src/system/` | 系统信息与本地系统能力 | 改系统能力桥 |
 | `src-tauri/capabilities/default.json` | Tauri 权限能力声明 | 改权限边界 |
 
-规则：Vue 页面不直接访问 Local Agent 动态端口或 Token；平台特定行为放 Rust 桥模块，不散落在业务 UI。
+规则：Vue 页面不直接访问 Local Agent 动态端口或 Token（地址经 `get_public_config` 取得）；平台特定行为放 Rust 桥模块，不散落在业务 UI。
+
+`filesystem/`、`secure_store/`、`system/`、`updater/` 目前是 3 行空壳——它们被占位保留，尚无实现，不要把它们当成可读的实现来源。
 
 ## 三、Agent Sidecar 生命周期
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/local_agent/` | Local Agent Sidecar 启动、停止、健康检查、进程恢复；Rust 代理 Local Agent HTTP 与 SSE | 改 Sidecar 启停、本地通信 |
+| `src-tauri/src/sidecar/mod.rs` | sidecar 的启停。两条 spawn 路径都在这里，且**注入同一组四个环境变量**（`WT_MEDIA_LOCAL_API_HOST`/`_PORT`、`WT_MEDIA_AGENT_RUNTIME_TOKEN`、`WT_MEDIA_AGENT_DATA_DIR`）。返回的标签（`sidecar_started`/`started`/`already_running`/`not_running`）逐字保持，Vue 按它分支 | 改 Sidecar 启停 |
+| `src-tauri/src/sidecar/drain.rs` | 保留 sidecar 的输出（原先绑给 `_events` 再不消费，等于全丢）。**只在内存环形缓冲，不落盘/不轮转/不脱敏**——脱敏归 CHG-057 | 改侧车日志处理 |
+| `src-tauri/src/local_agent/` | 只余一个纯契约类型 `BoundNodeFacts`（绑定后交给 Vue 的非敏感事实） | 改绑定返回 |
 | `src-tauri/binaries/` | Sidecar 二进制组件（当前含 `wt-media-agent-aarch64-apple-darwin`） | 改 Sidecar 集成 |
 
 Agent 内部如何执行浏览器操作或 FFmpeg，不属于本仓库（归 `../wt-media-agent`）。
+
+**两条 spawn 路径的差异是有意的**：打包 sidecar 是发布版唯一可走的路，Python fallback 在 debug 构建的开关之后，release 产物里不可达——客户不需要装系统 Python。
 
 ## 四、更新与跨平台打包
 

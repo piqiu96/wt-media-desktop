@@ -12,9 +12,10 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 
 ## 本仓库拥有
 
-- 客户端生命周期：Tauri 初始化、窗口、应用退出、系统托盘、运行状态（`src-tauri/src/main.rs`）。
-- 本地安全桥：受控权限下向 Vue 页面暴露本地系统能力——文件/目录选择、安全存储、系统信息（`src-tauri/src/{commands,filesystem,secure_store,system}`）。
-- Agent 生命周期：Local Agent Sidecar 的启动、停止、健康检查、进程恢复，以及 Desktop 与 Local Agent 的本地通信（Rust 代理 HTTP/SSE）（`src-tauri/src/local_agent`、`src-tauri/binaries`）。
+- 客户端生命周期：Tauri 初始化、窗口、应用退出、系统托盘、运行状态（`src-tauri/src/main.rs`，约 115 行）。
+- 启动期配置与安全：`config.rs`（一个 schema、一条解析路径）、`paths.rs`（配置文件定位）、`bootstrap.rs`（引导顺序 + CSP 注入）、`token.rs`（每次启动的本机运行 token）、`state.rs`（不进 IPC 的原生状态）。
+- 本地安全桥：受控权限下向 Vue 页面暴露本地系统能力——文件/目录选择、安全存储、系统信息（`src-tauri/src/{commands,dto,preflight,filesystem,secure_store,system}`）。
+- Agent 生命周期：Local Agent Sidecar 的启动、停止、健康检查、进程恢复，以及 Desktop 与 Local Agent 的本地通信（`src-tauri/src/sidecar/`、`http/`、`src-tauri/binaries`）。**通信是普通 HTTP**：Agent 侧有 `text/event-stream` 端点（`local_api/server.py`），但 Desktop 不消费流，`local_agent_task_status` 取的是状态快照。
 - 客户端交付：原生依赖、Sidecar 集成、安装包、版本检测、签名、更新、跨平台打包（`src-tauri/src/updater`、`scripts/`）。支持 Windows x64、macOS Intel、macOS Apple Silicon。
 
 ## 本仓库不拥有
@@ -27,9 +28,15 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 
 | 需求是 | 去哪里 |
 |---|---|
-| 改 Agent Sidecar 启停/健康检查 | `src-tauri/src/local_agent/` |
-| 改 Tauri 安全桥（文件、存储、系统信息） | `src-tauri/src/{commands,filesystem,secure_store,system}/` |
-| 改本地通信（HTTP/SSE 代理） | `src-tauri/src/local_agent/` |
+| 改 Agent Sidecar 启停/健康检查 | `src-tauri/src/sidecar/`（两条 spawn 路径都在此，且共用同一组四个环境变量） |
+| 改本地通信（回环客户端、运行 token） | `src-tauri/src/http/local_agent.rs` |
+| 改 Cloud 出站调用 | `src-tauri/src/http/cloud.rs` |
+| 改配置键、发布默认值、配置文件定位 | `src-tauri/src/config.rs`、`paths.rs`、`resources/desktop.production.toml` |
+| 改 CSP | `src-tauri/resources/desktop.production.toml` 的 `browser.csp_connect_src` + `src-tauri/src/bootstrap.rs`（**不在 `tauri.conf.json`**） |
+| 改页面能看到的非敏感配置 | `src-tauri/src/commands/public_config.rs`（只返回 `cloud_base_url`/`local_agent_port`/`environment`） |
+| 改 Tauri 安全桥（文件、存储、系统信息） | `src-tauri/src/{commands,filesystem,secure_store,system}/`（后三个目前是 3 行空壳） |
+| 改命令载荷形状 | `src-tauri/src/dto/`（**字段名与 serde 属性是契约**） |
+| 改敏感流程的 Cloud 预检 | `src-tauri/src/preflight.rs` |
 | 改 Windows/macOS 安装包、签名、更新 | `src-tauri/src/updater/`、`scripts/build-release-macos.sh` 等 |
 | 改 Desktop 使用的 Vue 业务页面 | `../wt-media-cloud/web`（**不在本仓库**） |
 | 改窗口、托盘、退出逻辑 | `src-tauri/src/main.rs` |
