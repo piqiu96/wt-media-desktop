@@ -1,5 +1,6 @@
 //! Local Agent observation and process lifecycle commands.
 
+use crate::config::DesktopConfig;
 use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
@@ -39,6 +40,8 @@ pub async fn local_agent_health(
 #[tauri::command]
 pub async fn local_agent_start(
     app: tauri::AppHandle,
+    client: State<'_, LocalAgentClient>,
+    config: State<'_, DesktopConfig>,
     process: State<'_, AgentProcess>,
     log: State<'_, SidecarLog>,
 ) -> Result<String, String> {
@@ -52,8 +55,18 @@ pub async fn local_agent_start(
     }
     // Release builds must run only the bundled sidecar. Development can opt into
     // a Python fallback explicitly when iterating without a frozen binary.
-    let (label, child) = sidecar::start(&app, development_python_fallback_enabled(), log.inner())
-        .map_err(|e| format!("{}{}", e, drain::summary(log.inner())))?;
+    //
+    // The token comes from the client, not from a second copy: the Agent has to
+    // be told the same secret the requests will present, and one owner is what
+    // makes that true by construction rather than by discipline.
+    let (label, child) = sidecar::start(
+        &app,
+        development_python_fallback_enabled(),
+        log.inner(),
+        &config,
+        client.token(),
+    )
+    .map_err(|e| format!("{}{}", e, drain::summary(log.inner())))?;
     process
         .0
         .lock()
