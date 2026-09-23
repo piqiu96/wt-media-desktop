@@ -16,3 +16,8 @@ tokio = { version = "1", features = ["full"] }
 # Already in the lockfile as a dependency of the tauri crates, so this adds no
 # new crate. Default features include `serde` + `parse`.
 toml = "0.9"
+# `v4` pulls in `getrandom`, which the lockfile already carries for the tauri
+# crates, so this adds no new crate either. Only `v4` is enabled: the other
+# versions are time-ordered or MAC-based, and neither is wanted for a bearer
+# credential.
+uuid = { version = "1", features = ["v4"] }

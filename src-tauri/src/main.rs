@@ -13,6 +13,7 @@ mod secure_store;
 mod sidecar;
 mod state;
 mod system;
+mod token;
 mod updater;
 
 use http::{CloudClient, LocalAgentClient};
