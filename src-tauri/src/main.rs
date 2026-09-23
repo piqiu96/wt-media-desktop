@@ -2,6 +2,7 @@
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
 mod commands;
+mod config;
 mod dto;
 mod filesystem;
 mod http;

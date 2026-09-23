@@ -25,6 +25,7 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/wt-media-agent"],
+    "resources": ["resources/*.toml"],
     "macOS": {
       "signingIdentity": "-"
     }
