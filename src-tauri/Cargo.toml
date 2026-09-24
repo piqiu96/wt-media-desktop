@@ -21,3 +21,22 @@ toml = "0.9"
 # versions are time-ordered or MAC-based, and neither is wanted for a bearer
 # credential.
 uuid = { version = "1", features = ["v4"] }
+# Emitting. `tracing`/`tracing-core` were already in the lockfile as transitive
+# dependencies of h2, hyper-util and softbuffer -- those three are already
+# emitting into any subscriber that exists, which is why the target filter has
+# to be explicit (see `logging::targets`). Default features are off because
+# `attributes` would pull in the `tracing-attributes` proc macro and nothing
+# here uses `#[instrument]`; the rest of `default` is the `log` bridge, which
+# this crate does not need either.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+# The collector. `default-features = false` + `fmt`/`std` only: the defaults
+# would also enable `env-filter` (matchers + regex) and `ansi`
+# (nu-ansi-term). Measured after the change: 4 crates added in total
+# (tracing-subscriber, sharded-slab, thread_local, lazy_static) and
+# `nu-ansi-term`/`matchers`/`tracing-log` at zero.
+#
+# No `tracing-appender`: its rolling writers split by date only, and this CHG
+# owes three things they cannot express -- a 20MB cap per file, a byte budget
+# across the directory, and a truncation marker on a single over-long record.
+# The writer is ours (see `logging::rolling`) either way.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
