@@ -24,6 +24,7 @@ mod updater;
 
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, RuntimeBindingState, SidecarLog};
+use std::path::PathBuf;
 use token::RuntimeToken;
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
@@ -63,13 +64,44 @@ fn main() {
     let mut context = tauri::generate_context!();
     let startup = bootstrap::resolve(context.package_info());
     bootstrap::apply_csp(context.config_mut(), &startup.config);
-    eprintln!("[wt-media-desktop] {}", startup.summary());
 
     // One token per launch, generated here and handed to the client that owns
     // it. Nothing persists it and nothing passes it on a command line: it
     // reaches the Agent through the client's own requests, and (from T-07's
     // sidecar commit) through the child's environment.
+    //
+    // Generated before logging is installed because the sink needs it: the token
+    // is named by no key and matches no shape rule, so the only way it can be
+    // kept out of a log line is for the mask to hold the value itself.
     let token = RuntimeToken::generate();
+
+    // Logging comes up before anything can want to say anything, so the launch
+    // summary below is the **first record** in `desktop.log`. The environment is
+    // the build's, not `startup.config.environment`'s: the two disagree on every
+    // ordinary debug launch (the shipped file says production and `load_with`
+    // takes the stricter of the two), and the directory has to follow the build
+    // or the development layout would never be used. Both are named in the
+    // summary, which is the line a reader starts from.
+    let plan = logging::setup::plan(
+        &startup.config,
+        bootstrap::build_environment(),
+        // `HOME` is read here and injected downward: `logging::paths` never
+        // touches the environment, so its layout rules stay askable.
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
+    let installed = logging::setup::install(plan, vec![token.expose().to_string()]);
+    let summary = format!("{}；{}", startup.summary(), installed.summary());
+    if installed.installed {
+        // stderr as before: `assemble` always attaches the terminal layer, and
+        // the file is where the same line becomes a record.
+        tracing::info!(target: "desktop.startup", "{summary}");
+    } else {
+        // A subscriber was already installed, so the record would go nowhere.
+        // The summary is the one line a launch must not lose, so it falls back
+        // to the plain write this replaces.
+        eprintln!("[wt-media-desktop] {summary}");
+    }
 
     tauri::Builder::default()
         .manage(LocalAgentClient::new(&startup.config, token))

@@ -16,10 +16,12 @@
 //! The pieces, in the order a record meets them: [`targets`] decides whether
 //! the record is Desktop's at all, [`backend`] renders it as one line and
 //! hands it to a sink, [`redact`] masks what may not be printed on the way, and
-//! [`rolling`] bounds what the files may occupy. [`paths`] says where they are.
+//! [`rolling`] bounds what the files may occupy. [`paths`] says where they are,
+//! and [`setup`] is the one function that puts it all together for the process.
 
 pub mod backend;
 pub mod paths;
 pub mod redact;
 pub mod rolling;
+pub mod setup;
 pub mod targets;

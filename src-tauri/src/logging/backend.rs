@@ -214,8 +214,10 @@ impl Sink {
 ///
 /// The one channel that cannot be the broken one, and never the record itself:
 /// the line is already on stderr, and what a reader of an empty log file needs
-/// is the reason it is empty.
-fn note(what: &str) {
+/// is the reason it is empty. `setup` uses the same channel for the failures
+/// that precede the subscriber — one place, so "why is the log empty" has one
+/// answer to grep for.
+pub(crate) fn note(what: &str) {
     let _ = writeln!(io::stderr(), "desktop.log: {what}");
 }
 
