@@ -30,7 +30,7 @@ use std::sync::Arc;
 use tracing::level_filters::LevelFilter;
 
 use crate::config::{DesktopConfig, Environment, LOG_LEVEL_AUTO};
-use crate::logging::rolling::{self, Limits};
+use crate::logging::rolling::Limits;
 use crate::logging::targets::Levels;
 use crate::logging::{backend, paths};
 
@@ -171,7 +171,7 @@ pub fn install(plan: Plan, secrets: Vec<String>) -> Installed {
         secrets,
         directory: directory.clone(),
         limits,
-        clock: Arc::new(rolling::SystemClock),
+        clock: Arc::new(backend::SystemClock),
     });
     let installed = match tracing::subscriber::set_global_default(subscriber) {
         Ok(()) => true,
@@ -240,12 +240,11 @@ pub fn filter_of(token: &str) -> Option<LevelFilter> {
     })
 }
 
-/// The budgets the writer runs under, from `[logging]`.
+/// The two numbers the writer runs under, from `[logging]`.
 pub fn limits_of(config: &DesktopConfig) -> Limits {
     Limits {
-        max_file_bytes: config.logging.max_file_bytes,
         retention_days: config.logging.retention_days,
-        total_bytes: config.logging.total_bytes,
+        max_record_bytes: config.logging.max_record_bytes,
     }
 }
 
@@ -441,13 +440,13 @@ mod tests {
             Err("HOME is not set, so the installed layout has no directory".to_string())
         );
 
-        // The budgets travel with the plan rather than being re-decided at
+        // The numbers travel with the plan rather than being re-decided at
         // installation time.
-        config.logging.max_file_bytes = 4096;
+        config.logging.max_record_bytes = 4096;
         assert_eq!(
             plan(&config, Environment::Development, None, &manifest)
                 .limits
-                .max_file_bytes,
+                .max_record_bytes,
             4096
         );
 
@@ -563,21 +562,19 @@ mod tests {
         );
     }
 
-    /// The budgets are the ones the file declares, not re-defaulted here.
+    /// The numbers are the ones the file declares, not re-defaulted here.
     #[test]
     fn the_limits_are_the_configured_ones() {
         let mut config = shipped();
         assert_eq!(limits_of(&config), Limits::SHIPPED);
 
-        config.logging.max_file_bytes = 4096;
         config.logging.retention_days = 2;
-        config.logging.total_bytes = 8192;
+        config.logging.max_record_bytes = 8192;
         assert_eq!(
             limits_of(&config),
             Limits {
-                max_file_bytes: 4096,
                 retention_days: 2,
-                total_bytes: 8192
+                max_record_bytes: 8192
             }
         );
     }

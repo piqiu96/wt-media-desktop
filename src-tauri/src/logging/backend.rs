@@ -17,7 +17,7 @@
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
@@ -26,6 +26,26 @@ use tracing_subscriber::layer::{Identity, Layer, SubscriberExt};
 use tracing_subscriber::registry::{LookupSpan, Registry};
 
 use crate::logging::{redact, rolling, targets::Levels};
+
+/// Where the formatter reads the time.
+///
+/// It lives here rather than in `rolling` because rotation time is no longer
+/// ours to read: `file-rotate` takes its own clock, and (measured) does not let a
+/// caller supply one — its `mock_time` is `#[cfg(test)]` inside the crate. What
+/// is left to inject is the **stamp**, which is why this trait is one method
+/// wide and why the tests that need a fixed second still get one.
+pub trait Clock {
+    fn now(&self) -> SystemTime;
+}
+
+/// The system clock, which is what a launch uses.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
 
 /// What the subscriber needs, all of it injected.
 pub struct Options {
@@ -37,19 +57,22 @@ pub struct Options {
     /// Where the file goes. `None` is a launch whose log directory could not be
     /// prepared: stderr only, and the program still starts.
     pub directory: Option<PathBuf>,
-    /// The file and directory budgets (`[logging]`, T-14).
+    /// How long history is kept and how long one record may be (`[logging]`,
+    /// T-14).
     pub limits: rolling::Limits,
-    /// The clock the stamp and the file rotation share.
-    pub clock: Arc<dyn rolling::Clock + Send + Sync>,
+    /// The clock the stamp is read from. The file's own rotation reads the same
+    /// wall clock from inside the crate, which is why the stamp has to agree
+    /// with it in *zone* and not only in instant: see [`stamp`].
+    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Build the subscriber. It is not installed here: the caller owns the
 /// process-wide decision (`set_global_default`), which a test must not make.
 ///
-/// Nothing in here fails. A directory that cannot be written is not known until
-/// the first record, and the ruling is that it may not stop a launch -- so the
-/// failure surfaces on the sink that is still working, not as an error return
-/// the caller would have to invent a policy for.
+/// Nothing in here fails. A directory that cannot be written is refused by
+/// `rolling::Writer::open` as a value, and the ruling is that it may not stop a
+/// launch -- so the failure surfaces on the sink that is still working, not as
+/// an error return the caller would have to invent a policy for.
 pub fn assemble(options: Options) -> impl Subscriber + Send + Sync {
     let filter = options.levels.filter();
     let format = LineFormat {
@@ -59,17 +82,15 @@ pub fn assemble(options: Options) -> impl Subscriber + Send + Sync {
 
     let document: Box<dyn Layer<Registry> + Send + Sync> = match options.directory.as_ref() {
         Some(directory) => {
-            let writer =
-                rolling::Writer::open(directory, options.limits, SharedClock(options.clock));
-            match writer {
+            match rolling::Writer::open(directory, options.limits) {
                 Ok(writer) => Box::new(
                     tracing_subscriber::fmt::layer()
                         .event_format(format.clone())
                         .with_writer(LineWriter::file(writer, Arc::clone(&secrets)))
                         .with_filter(filter.clone()),
                 ),
-                // Reached only if the writer cannot read the directory at all.
-                // The records still have somewhere to go.
+                // Reached only if the directory cannot be used at all. The
+                // records still have somewhere to go.
                 Err(reason) => {
                     note(&reason.to_string());
                     Box::new(Identity::default())
@@ -87,38 +108,26 @@ pub fn assemble(options: Options) -> impl Subscriber + Send + Sync {
     Registry::default().with(document).with(terminal)
 }
 
-/// The clock, seen through the two shapes that need it.
-///
-/// The formatter wants an `Arc` it can share and `rolling` wants something it
-/// can own. One clock for both, or a record's stamp and the file it lands in
-/// could disagree about which day it is.
-struct SharedClock(Arc<dyn rolling::Clock + Send + Sync>);
-
-impl rolling::Clock for SharedClock {
-    fn now(&self) -> SystemTime {
-        self.0.now()
-    }
-}
-
 /// The record as one plain-text line, in the Agent's shape:
 ///
 /// ```text
-/// 2026-09-24T10:11:12Z [INFO] desktop.startup: the launch summary
+/// 2026-09-24T18:11:12 [INFO] desktop.startup: the launch summary
 /// ```
 ///
 /// The shape is `logging.py`'s `FMT`/`DATEFMT`, so a reader moving between the
-/// two halves of the product reads the same line. Two deliberate differences,
-/// both registered in the CHG evidence:
+/// two halves of the product reads the same line. One deliberate difference
+/// remains, registered in the CHG evidence:
 ///
-/// - the stamp is **UTC**, and says so with a `Z`. The file names are UTC
-///   (T-12), and a local stamp on a UTC-named file disagrees with itself for
-///   eight hours a day. The Agent's `%(asctime)s` is local time and unmarked.
 /// - the fields carry no span context. Desktop uses no spans (the `attributes`
 ///   feature is off and nothing here opens one), so there is none to lose; a
 ///   future span would have to come back to this line and say how to print it.
+///
+/// The stamp is **UTC** and marked with a `Z`, until the next commit: the
+/// archive names come from `file-rotate`, which formats `chrono::Local` and has
+/// no UTC switch, so the two cannot stay apart for long.
 #[derive(Clone)]
 struct LineFormat {
-    clock: Arc<dyn rolling::Clock + Send + Sync>,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl<S, N> FormatEvent<S, N> for LineFormat
@@ -148,22 +157,16 @@ where
 }
 
 /// The UTC stamp, `%Y-%m-%dT%H:%M:%S` with a `Z` on the end.
+///
+/// It used to be assembled by hand from `rolling::date_of`, which went with the
+/// hand-rolled rotator (T-02); the arithmetic and the output are unchanged, and
+/// `chrono` -- now a direct dependency -- does the civil-date half of it. The
+/// zone is the part the next commit changes: `file-rotate` names the archives in
+/// `chrono::Local` and offers no UTC switch, so a UTC stamp and a local file name
+/// disagree with each other for eight hours a day.
 fn stamp(time: SystemTime) -> String {
-    let seconds = match time.duration_since(UNIX_EPOCH) {
-        Ok(since) => since.as_secs() as i64,
-        Err(before) => -(before.duration().as_secs() as i64),
-    };
-    let date = rolling::date_of(time);
-    let day = seconds.rem_euclid(86_400);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        date.year(),
-        date.month(),
-        date.day(),
-        day / 3_600,
-        (day % 3_600) / 60,
-        day % 60
-    )
+    let utc: chrono::DateTime<chrono::Utc> = time.into();
+    utc.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// One record, one line.
@@ -320,10 +323,9 @@ mod tests {
     use tracing::subscriber::with_default;
     use tracing::Level;
 
-    use crate::logging::test_support::{clock, options, scratch, written};
+    use crate::logging::test_support::{options, scratch, written};
 
     use crate::config::Environment;
-    use std::time::Duration;
 
     /// The targets emitted below, one literal each: `target:` is expanded into
     /// a constant, so the list cannot be iterated at the call site. The
@@ -469,9 +471,7 @@ mod tests {
         // The path the current formatter never takes, pinned anyway: the
         // alternative is losing a record in silence.
         let directory = scratch("drop");
-        let writer =
-            rolling::Writer::open(&directory.0, rolling::Limits::SHIPPED, SharedClock(clock()))
-                .expect("open");
+        let writer = rolling::Writer::open(&directory.0, rolling::Limits::SHIPPED).expect("open");
         {
             let mut sink = LineWriter::file(writer, Arc::from(Vec::<String>::new())).make_writer();
             io::Write::write_all(&mut sink, b"a record with no newline").expect("buffered");
@@ -479,32 +479,30 @@ mod tests {
         assert!(written(&directory.0).contains("a record with no newline"));
     }
 
+    /// A path that is a file, not a directory, is **refused** at `open` rather
+    /// than accepted.
+    ///
+    /// This test used to assert the opposite — that the writer could be built
+    /// over an unusable directory and that the sink then swallowed whatever
+    /// happened on write. That state no longer exists: `rolling::Writer::open`
+    /// asks about the directory itself, because the crate underneath would
+    /// *panic* creating it and *silently drop* every later record. So what is
+    /// asserted here is the refusal as a value, plus the composition the ruling
+    /// actually turns on — the launch still gets a subscriber whose records go
+    /// to stderr. That the record reaches stderr is T-15's real launch, because
+    /// a unit test cannot read the terminal it is writing to.
     #[test]
-    fn a_file_that_cannot_be_written_does_not_turn_into_an_io_error() {
-        // A path that is a file, not a directory: the record cannot go
-        // anywhere. What must not happen is an error travelling back through
-        // the subscriber, which would put a second message of the crate's own
-        // on top of the reason the sink already printed.
+    fn a_directory_that_cannot_be_written_is_refused_and_the_launch_still_has_a_subscriber() {
         let blocked = scratch("blocked-write");
         std::fs::write(&blocked.0, b"not a directory").expect("the scratch file");
-        let writer =
-            rolling::Writer::open(&blocked.0, rolling::Limits::SHIPPED, SharedClock(clock()))
-                .expect("an unusable directory is not an open failure");
-        let mut sink = LineWriter::file(writer, Arc::from(Vec::<String>::new())).make_writer();
-        assert!(io::Write::write_all(&mut sink, b"a record\n").is_ok());
-        std::fs::remove_file(&blocked.0).ok();
-        std::fs::remove_dir_all(&blocked.0).ok();
-    }
 
-    #[test]
-    fn an_unusable_directory_still_gives_a_subscriber() {
-        // The ruling's "a log directory that cannot be written may not stop a
-        // launch", at the assembly level. What is asserted is that the caller
-        // gets a subscriber and nothing panics; that the record then shows up
-        // on stderr is T-15's real launch, because a unit test cannot read the
-        // terminal it is writing to.
-        let blocked = scratch("blocked-assembly");
-        std::fs::write(&blocked.0, b"not a directory").expect("the scratch file");
+        let refused = rolling::Writer::open(&blocked.0, rolling::Limits::SHIPPED);
+        assert!(
+            refused.is_err(),
+            "a directory that cannot be created is refused, not accepted and then \
+             written to in silence"
+        );
+
         let subscriber = assemble(options(Some(&blocked.0)));
         with_default(
             subscriber,
@@ -515,14 +513,15 @@ mod tests {
 
     #[test]
     fn the_stamp_is_the_day_and_the_time_utc() {
+        use chrono::TimeZone;
         // The clock is the only input, so a wrong hour is a wrong field rather
         // than a wrong zone: the machine running this test is not on UTC.
-        let date = rolling::Date::from_ymd(2026, 12, 31).expect("a real date");
-        let seconds = date.days() as u64 * 86_400 + 23 * 3_600 + 59 * 60 + 59;
-        assert_eq!(
-            stamp(UNIX_EPOCH + Duration::from_secs(seconds)),
-            "2026-12-31T23:59:59Z"
-        );
+        let when: SystemTime = chrono::Utc
+            .with_ymd_and_hms(2026, 12, 31, 23, 59, 59)
+            .single()
+            .expect("a real instant")
+            .into();
+        assert_eq!(stamp(when), "2026-12-31T23:59:59Z");
     }
 
     #[test]

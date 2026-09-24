@@ -15,24 +15,32 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::subscriber::Subscriber;
 
 use crate::config::Environment;
-use crate::logging::backend::{assemble, Options};
+use crate::logging::backend::{assemble, Clock, Options};
 use crate::logging::rolling;
 use crate::logging::targets::Levels;
 
 /// A clock that does not move, so a stamp can be asserted to the second.
 pub(crate) struct Fixed(pub(crate) SystemTime);
 
-impl rolling::Clock for Fixed {
+impl Clock for Fixed {
     fn now(&self) -> SystemTime {
         self.0
     }
 }
 
 /// 2026-09-24T10:11:12Z, so an expected line can be written out in full.
-pub(crate) fn clock() -> Arc<dyn rolling::Clock + Send + Sync> {
-    let date = rolling::Date::from_ymd(2026, 9, 24).expect("a real date");
-    let seconds = date.days() as u64 * 86_400 + 10 * 3_600 + 11 * 60 + 12;
-    Arc::new(Fixed(UNIX_EPOCH + Duration::from_secs(seconds)))
+///
+/// Built from civil fields rather than from the hand-rolled `rolling::Date` the
+/// previous implementation counted days with (T-02): `chrono` does that half
+/// now, and the instant it produces is the same one.
+pub(crate) fn clock() -> Arc<dyn Clock + Send + Sync> {
+    let time = chrono::NaiveDate::from_ymd_opt(2026, 9, 24)
+        .expect("a real date")
+        .and_hms_opt(10, 11, 12)
+        .expect("a real time")
+        .and_utc()
+        .timestamp() as u64;
+    Arc::new(Fixed(UNIX_EPOCH + Duration::from_secs(time)))
 }
 
 /// A path of this test's own, removed when the guard drops.
@@ -78,19 +86,40 @@ pub(crate) fn options(directory: Option<&Path>) -> Options {
 /// record, so the file is readable while the subscriber is still alive. A
 /// directory that was never created reads as no records, which is what a
 /// launch that logged nothing produces.
+///
+/// **What "in order" means now that the file name is stable.** The live file is
+/// `desktop.log` and the archives are `desktop.log.<YYYY-MM-DD-HH>`, so the
+/// live file is the one `file-rotate` is currently appending to and the
+/// archives are the hours that ended — oldest first, and the live file last.
+/// The old filter (`extension() == "log"`) happened to work, but for the wrong
+/// reason: it was written when every file in the family was a `.log` and the
+/// union of them was what a test wanted. It would now silently *exclude* the
+/// archives, and a test that ran across a real hour boundary would lose the
+/// records written before it and fail somewhere unrelated. Named explicitly
+/// instead, so the archive case is at least handled the same way it was.
 pub(crate) fn written(directory: &Path) -> String {
     let mut text = String::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
         return text;
     };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|kind| kind == "log"))
-        .collect();
-    paths.sort();
-    for path in paths {
-        text.push_str(&std::fs::read_to_string(&path).expect("the log file"));
+    let prefix = format!("{}.", rolling::LOG_FILE_NAME);
+    let mut archives: Vec<PathBuf> = Vec::new();
+    let mut live: Option<PathBuf> = None;
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        if name == rolling::LOG_FILE_NAME {
+            live = Some(path);
+        } else if name.starts_with(&prefix) {
+            archives.push(path);
+        }
+    }
+    archives.sort();
+    for path in archives.iter().chain(live.iter()) {
+        text.push_str(&std::fs::read_to_string(path).expect("the log file"));
     }
     text
 }

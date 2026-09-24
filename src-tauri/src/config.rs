@@ -109,8 +109,6 @@ pub const LOG_LEVEL_AUTO: &str = "auto";
 pub struct Logging {
     /// `auto` or one of [`LOG_LEVELS`].
     pub level: String,
-    /// One file rolls at this size.
-    pub max_file_bytes: u64,
     /// Days a rolled file survives before the age sweep deletes it.
     ///
     /// Signed, because TOML has negative integers and `-1` parses into `i64`
@@ -118,8 +116,16 @@ pub struct Logging {
     /// future and expire every file including today's, so validation rejects
     /// the sign rather than only zero.
     pub retention_days: i64,
-    /// The whole directory's budget, across all files.
-    pub total_bytes: u64,
+    /// How long a **single record** may be before it is cut and marked.
+    ///
+    /// This is the one size left in `[logging]`. The per-file cap and the
+    /// directory budget were both cancelled by the user's ruling of 2026-09-24
+    /// (CHG-058 D-03, 「不需要控制总量，只需要控制能保留多少天」): rotation is
+    /// what bounds a file's size now, and it does so by the hour, not by a byte
+    /// count. A record is the one thing rotation cannot bound -- one runaway
+    /// line would still grow the live file forever, and no rotation would help
+    /// because the file it is growing is the one being written.
+    pub max_record_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -199,8 +205,14 @@ impl DesktopConfig {
             ));
         }
         for (key, seconds) in [
-            ("http.request_timeout_seconds", self.http.request_timeout_seconds),
-            ("http.connect_timeout_seconds", self.http.connect_timeout_seconds),
+            (
+                "http.request_timeout_seconds",
+                self.http.request_timeout_seconds,
+            ),
+            (
+                "http.connect_timeout_seconds",
+                self.http.connect_timeout_seconds,
+            ),
         ] {
             if seconds == 0 {
                 return Err(ConfigError::Invalid(format!("{} must be > 0", key)));
@@ -220,29 +232,18 @@ impl DesktopConfig {
                 LOG_LEVELS.join(", ")
             )));
         }
-        // Three zero checks rather than one loop: `retention_days` is the only
-        // signed one, and `<= 0` is what its type makes meaningful.
-        for (key, bytes) in [
-            ("logging.max_file_bytes", self.logging.max_file_bytes),
-            ("logging.total_bytes", self.logging.total_bytes),
-        ] {
-            if bytes == 0 {
-                return Err(ConfigError::Invalid(format!("{} must be > 0", key)));
-            }
+        // Two checks, one per type: `retention_days` is signed and `<= 0` is
+        // what that makes meaningful; `max_record_bytes` is unsigned, so zero is
+        // the only value its type cannot reject and the only one the truncation
+        // arithmetic could not work with.
+        if self.logging.max_record_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "logging.max_record_bytes must be > 0".to_string(),
+            ));
         }
         if self.logging.retention_days <= 0 {
             return Err(ConfigError::Invalid(
                 "logging.retention_days must be > 0".to_string(),
-            ));
-        }
-        // Checked beyond the plan's list: a total budget smaller than a single
-        // file's cap is not merely tight, it is unsatisfiable — the writer would
-        // roll to stay under the per-file cap and then have to delete the file it
-        // just wrote to stay under the total, so every record written is also the
-        // one that evicts it. Both keys are named; neither value is echoed.
-        if self.logging.total_bytes < self.logging.max_file_bytes {
-            return Err(ConfigError::Invalid(
-                "logging.total_bytes must be >= logging.max_file_bytes".to_string(),
             ));
         }
         if self.environment == Environment::Production {
@@ -319,12 +320,19 @@ mod tests {
     /// A minimal development config; tests mutate one key at a time so a
     /// failure names the rule it broke.
     fn development_toml() -> String {
-        PRODUCTION_TOML.replace("environment = \"production\"", "environment = \"development\"")
+        PRODUCTION_TOML.replace(
+            "environment = \"production\"",
+            "environment = \"development\"",
+        )
     }
 
     fn development_config() -> DesktopConfig {
-        load_with(&BTreeMap::new(), &development_toml(), Environment::Development)
-            .expect("the development twin of the shipped resource must load")
+        load_with(
+            &BTreeMap::new(),
+            &development_toml(),
+            Environment::Development,
+        )
+        .expect("the development twin of the shipped resource must load")
     }
 
     /// The shipped resource and this module's schema must not drift apart: a
@@ -341,23 +349,22 @@ mod tests {
         assert!(!config.development.python_fallback);
     }
 
-    /// The shipped file's three log numbers are the writer's shipped limits —
-    /// the *same* three, not three that happen to agree today.
+    /// The shipped file's two log numbers are the writer's shipped limits —
+    /// the *same* two, not two that happen to agree today.
     ///
     /// Two sources, one behaviour: `rolling::Limits::SHIPPED` is what the writer
     /// uses when nobody hands it a set, and the TOML is what the app hands it
     /// once startup wires the two together. Neither reads the other, so without
-    /// this the two can drift silently and the app rolls at a size that appears
-    /// in no document.
+    /// this the two can drift silently and the app keeps its history for a
+    /// number of days that appears in no document.
     #[test]
     fn the_shipped_logging_values_are_the_writers_shipped_limits() {
         let config = load_with(&BTreeMap::new(), PRODUCTION_TOML, Environment::Production)
             .expect("the shipped production resource must load");
         let limits = crate::logging::rolling::Limits::SHIPPED;
 
-        assert_eq!(config.logging.max_file_bytes, limits.max_file_bytes);
         assert_eq!(config.logging.retention_days, limits.retention_days);
-        assert_eq!(config.logging.total_bytes, limits.total_bytes);
+        assert_eq!(config.logging.max_record_bytes, limits.max_record_bytes);
 
         // And the level is pinned to the sentinel: a shipped file naming a level
         // outright would silently override ruling 四 for every install, which is
@@ -410,12 +417,22 @@ mod tests {
 
     #[test]
     fn malformed_and_incomplete_toml_are_rejected() {
-        let malformed = load_with(&BTreeMap::new(), "[agent\nport = ", Environment::Development);
-        assert!(matches!(malformed, Err(ConfigError::Parse(_))), "{malformed:?}");
+        let malformed = load_with(
+            &BTreeMap::new(),
+            "[agent\nport = ",
+            Environment::Development,
+        );
+        assert!(
+            matches!(malformed, Err(ConfigError::Parse(_))),
+            "{malformed:?}"
+        );
 
         let missing_section = PRODUCTION_TOML.replace("[cloud]", "[butterfly]");
         let incomplete = load_with(&BTreeMap::new(), &missing_section, Environment::Production);
-        assert!(matches!(incomplete, Err(ConfigError::Parse(_))), "{incomplete:?}");
+        assert!(
+            matches!(incomplete, Err(ConfigError::Parse(_))),
+            "{incomplete:?}"
+        );
     }
 
     /// Rule 1. The point of testing a *whole-namespace* rule with a key that
@@ -491,18 +508,24 @@ mod tests {
     #[test]
     fn agent_host_rule_accepts_loopback_and_rejects_everything_else() {
         let with_host = |host: &str| {
-            let text = PRODUCTION_TOML
-                .replace("host = \"127.0.0.1\"", &format!("host = {:?}", host));
+            let text =
+                PRODUCTION_TOML.replace("host = \"127.0.0.1\"", &format!("host = {:?}", host));
             load_with(&BTreeMap::new(), &text, Environment::Production)
         };
 
         for host in ["127.0.0.1", "localhost", "::1"] {
-            let config = with_host(host)
-                .unwrap_or_else(|e| panic!("host {host:?} must be accepted: {e}"));
+            let config =
+                with_host(host).unwrap_or_else(|e| panic!("host {host:?} must be accepted: {e}"));
             assert_eq!(config.agent.host, host);
         }
 
-        for host in ["0.0.0.0", "192.168.1.10", "example.com", "", "127.0.0.1.evil.test"] {
+        for host in [
+            "0.0.0.0",
+            "192.168.1.10",
+            "example.com",
+            "",
+            "127.0.0.1.evil.test",
+        ] {
             let result = with_host(host);
             assert!(
                 matches!(result, Err(ConfigError::Invalid(_))),
@@ -520,7 +543,7 @@ mod tests {
     /// the moment the checks are reordered or a new one is inserted above it.
     #[test]
     fn out_of_range_values_are_rejected() {
-        let rows: [(&str, &str, &str, &str); 13] = [
+        let rows: [(&str, &str, &str, &str); 11] = [
             ("privileged port", "port = 8765", "port = 80", "agent.port"),
             (
                 "zero request timeout",
@@ -565,10 +588,10 @@ mod tests {
                 "logging.level",
             ),
             (
-                "zero log file cap",
-                "max_file_bytes = 20971520",
-                "max_file_bytes = 0",
-                "logging.max_file_bytes",
+                "zero record cap",
+                "max_record_bytes = 1048576",
+                "max_record_bytes = 0",
+                "logging.max_record_bytes",
             ),
             (
                 "zero log retention",
@@ -581,18 +604,6 @@ mod tests {
                 "retention_days = 14",
                 "retention_days = -1",
                 "logging.retention_days",
-            ),
-            (
-                "zero log total budget",
-                "total_bytes = 104857600",
-                "total_bytes = 0",
-                "logging.total_bytes",
-            ),
-            (
-                "log budget smaller than one file",
-                "total_bytes = 104857600",
-                "total_bytes = 1024",
-                "logging.total_bytes",
             ),
         ];
 
@@ -704,8 +715,8 @@ mod tests {
     /// production and this case would pass for the wrong reason.
     #[test]
     fn empty_cloud_address_is_development_only() {
-        let text = development_toml()
-            .replace("base_url = \"http://127.0.0.1:18080\"", "base_url = \"\"");
+        let text =
+            development_toml().replace("base_url = \"http://127.0.0.1:18080\"", "base_url = \"\"");
 
         let development = load_with(&BTreeMap::new(), &text, Environment::Development);
         assert!(development.is_ok(), "{development:?}");
@@ -716,7 +727,9 @@ mod tests {
         );
 
         let production = load_with(&BTreeMap::new(), &text, Environment::Production);
-        assert!(matches!(production, Err(ConfigError::Invalid(_))), "{production:?}");
+        assert!(
+            matches!(production, Err(ConfigError::Invalid(_))),
+            "{production:?}"
+        );
     }
-
 }

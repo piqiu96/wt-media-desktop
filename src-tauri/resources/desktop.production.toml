@@ -48,17 +48,24 @@ start_timeout_ms = 15000
 [logging]
 # `auto` follows the environment the app is *running as* in the build sense
 # (development DEBUG, production INFO, ruling 四); an explicit level overrides it.
-# `off`, `error` and `warn` are legal but leave the launch summary unwritten and
-# the log file uncreated -- the file appears at the first record that survives
-# the filter. Measured, see T-15's evidence.
+# `off`, `error` and `warn` are legal, and the live file `desktop.log` is still
+# created -- `file-rotate` opens it when the writer is built rather than at the
+# first record, so a quiet launch leaves an empty file rather than none. Measured,
+# see T-15's evidence and CHG-058 T-02's.
 level = "auto"
-# One file rolls at this size, then the oldest files go: 14 days, and 100 MB for
-# the directory in total. These three are the values `rolling::SHIPPED` holds;
-# a test asserts the two cannot drift apart. A single over-long record is
-# truncated rather than allowed to grow the file past the cap.
-max_file_bytes = 20971520
+# How long history is kept. Rotation itself is hourly and is not configurable:
+# the hour that ends is renamed to `desktop.log.<YYYY-MM-DD-HH>` in local time,
+# and an archive past this many days is deleted. There is no total-size budget --
+# cancelled by the CHG-058 ruling; the hour is what bounds a file's size.
+#
+# This is the value `rolling::DEFAULT_RETENTION_DAYS` holds; a test asserts the
+# two cannot drift apart.
 retention_days = 14
-total_bytes = 104857600
+# The longest a single record may be, whatever rotates. One over-long record is
+# cut and marked `truncate=true original_size=<n>` rather than allowed to grow
+# the live file -- rotation cannot bound this one, because the file it is
+# growing is the one being written. 1 MiB is far above any real record.
+max_record_bytes = 1048576
 
 [development]
 # Release bundles must run only the bundled sidecar; a production config may

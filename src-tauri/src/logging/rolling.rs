@@ -1,260 +1,107 @@
-//! One plain-text log file, bounded four ways, and the history it leaves behind.
+//! The live log file, its hourly history, and the one record that must not grow.
 //!
-//! The four bounds are the user's ruling 六: a file rolls **on a date change**,
-//! rolls when the next record would take it past **20 MB**, truncates a single
-//! record that cannot fit and marks it, and defers history to a **14-day /
-//! 100 MB** budget. The stdlib-style policy (`backupCount` files of `maxBytes`
-//! each) expresses none of them: no time window, no total, and an oversized
-//! single record is written whole, taking the file past its own cap.
+//! **The rotator is `file-rotate`, not ours** (the user's ruling D-02: 尽量使用
+//! 开源，尽可能不改轮子). This module used to carry a hand-written rotator --
+//! a date-and-index name, a `create_new` name claim, an age rule and a byte
+//! budget. The ruling that replaced it (D-01/D-03) asks for exactly what the
+//! crate already does, so what is left here is the wrapper and the one bound the
+//! crate does not have.
 //!
-//! Naming is `desktop-YYYYMMDD-N.log`, UTC, and **every** file carries a date —
-//! including the one being written. The Agent has a stable `agent.log` plus
-//! dated rolled names; Desktop cannot, because two copies of the app may be open
-//! at once and a single stable name would have both of them appending to one
-//! file that either may then rename. Instead each writer *claims* its file with
-//! `create_new`, so the second instance lands on `-2` rather than on the first
-//! instance's file. The claim is the whole reason the index is in the name.
+//! The shape, on both sides of the product (ruling D-01):
 //!
-//! The pieces are split the way `paths` is: [`date_of`], [`fit`], [`rotation`]
-//! and [`expired`] are pure — injected inputs in, decision out — and [`Writer`]
-//! is the thin part that touches the filesystem. A bound that can only be tested
-//! by writing files is a bound that gets tested by the launch that needed it.
-//! The clock is injected for the same reason: "what happens on the 15th day"
-//! has to be answerable without waiting 15 days.
+//! ```text
+//! desktop.log                        <- stable, the file being written
+//! desktop.log.2026-09-24-19          <- the hour that ended, local time
+//! ```
 //!
-//! Two things are **not** covered, both registered rather than implied:
+//! The crate was chosen over `tracing-appender` for one measured reason: it is
+//! the only one of the two with **rename-on-roll**. `tracing-appender` opens the
+//! dated file directly, so `Rotation::HOURLY` and a stable name cannot both be
+//! had from it. `file-rotate` also brings `FileLimit::Age`, which is **real
+//! age-based deletion** -- measured, not taken from its docs: planting archives
+//! 20, 15 and 2 days old and rotating once deletes the first two and keeps the
+//! third. That is what removed the last hand-rolled rule.
 //!
-//! - Windows. The layout question is `paths`' and is already registered; the
-//!   separation here (append, rename-free rolling) is portable, but unmeasured.
-//! - A second instance that started before midnight and is still running after
-//!   it. Its live file is dated yesterday, so the day rule will delete it. Two
-//!   instances must be open across midnight for this to bite, and the writer
-//!   cannot tell a peer's live file from history. Files dated *today* are the
-//!   case it can tell, and it spares those unless this writer rolled them
-//!   itself; see [`expired`].
+//! Four measured consequences, all of them registered rather than implied:
+//!
+//! - **The hour is local time.** The crate formats `chrono::Local` and there is
+//!   no UTC switch, so an archive is named in the operator's own clock. The
+//!   record's own stamp follows it (see `backend::stamp`) -- a UTC stamp on a
+//!   local-named file disagrees with itself for eight hours a day.
+//! - **The clock cannot be injected.** `mock_time` is `#[cfg(test)]` inside the
+//!   crate, so a test cannot stand on an hour boundary. What it can do is set
+//!   the live file's mtime: the hourly trigger compares *that* against the wall
+//!   clock, which is deterministic enough to test and is what the tests here use.
+//! - **The archive set is scanned once, at construction.** A file that appears
+//!   afterwards is never deleted by this writer -- pinned by
+//!   `an_archive_that_appears_after_the_writer_did_is_not_deleted`, because a
+//!   reader who assumes otherwise would believe a real gap was a bug.
+//! - **One live file means one writer.** Two instances share `desktop.log` and
+//!   the crate renames it out from under whichever handle is still writing. That
+//!   is why the single-instance guard is load-bearing rather than a nicety
+//!   (ruling D-04).
+//!
+//! What is **ours** is the truncation marker: a single record that cannot fit is
+//! cut and marked with the size it had. It is orthogonal to rotation and it is
+//! the ruling's 超长单条 rule (CHG-057 D-05), which the cap ruling did not
+//! revoke -- it only removed the number the old threshold came from. The number
+//! is now its own, much larger, and configurable.
 
-use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{Error as IoError, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The name every file starts with.
-pub const FILE_STEM: &str = "desktop";
+use file_rotate::compression::Compression;
+use file_rotate::suffix::{AppendTimestamp, DateFrom, FileLimit};
+use file_rotate::{ContentLimit, FileRotate, TimeFrequency};
 
-/// The name every file ends with. Kept as `.log` so a log directory full of
-/// them still reads as a log directory to whatever is looking.
-pub const FILE_SUFFIX: &str = ".log";
+/// The file being written. Stable, so a reader has one name to look at and the
+/// archives sort beside it (ruling D-01).
+pub const LOG_FILE_NAME: &str = "desktop.log";
 
-/// One file's cap, as shipped (the ruling 六).
-pub const DEFAULT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+/// How an archive is stamped: the live file's name, a dot, and the hour that
+/// ended, in local time. Zero-padded, so lexicographic order is chronological
+/// order -- which is what the crate's age comparison relies on.
+pub const ARCHIVE_FORMAT: &str = "%Y-%m-%d-%H";
 
-/// How many days of history survive, as shipped (the ruling 六). A 14-day
-/// window is today plus the 13 days before it.
+/// How many days of history survive, as shipped. A 14-day window is today plus
+/// the 13 days before it. Raised or lowered by `[logging] retention_days`; the
+/// ruling names 7 and 14 as the two acceptable numbers (D-03/Q-02).
 pub const DEFAULT_RETENTION_DAYS: i64 = 14;
 
-/// The whole directory's cap, as shipped (Q-01: Desktop 100 MB, the Agent 400 MB
-/// — one budget per component, so the two do not silently share one number).
-pub const DEFAULT_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+/// How long one record may be, as shipped.
+///
+/// Not the ruling's number -- the ruling cancelled the cap it used to be (D-03),
+/// and a single record still must not be able to grow a file without bound
+/// (CHG-057 D-05). 1 MiB is far above any real record (a webview stack trace is
+/// kilobytes) and is configurable, so the threshold can be lowered without a
+/// code change. Registered as CHG-058 Q-01.
+pub const DEFAULT_MAX_RECORD_BYTES: u64 = 1024 * 1024;
 
 /// What a truncated record is marked with. Byte-for-byte the Agent's marker
 /// (`runtime/logging.py`), because this is one ruling read by one person: a
 /// reader who has learned the marker in `error.log` must not meet a second
-/// spelling in `desktop-*.log`.
+/// spelling in `desktop.log`.
 pub const TRUNCATION_MARKER: &str = " truncate=true original_size=";
 
-/// How many files one day may hold before the writer gives up and reports.
+/// How long history is kept, and how long one record may be.
 ///
-/// Not a bound the ruling asks for: it exists so that a directory stuffed with
-/// `desktop-<today>-1.log … -N.log` cannot spin the claim loop forever. Turning
-/// a hang into an error matters more here than the number, which is far above
-/// anything a day of Desktop records can reach.
-const MAX_INDEX_PER_DAY: u32 = 10_000;
-
-/// Where the writer reads the time. Injected so a test can stand on day 15
-/// without waiting for it.
-pub trait Clock: Send + Sync {
-    fn now(&self) -> SystemTime;
-}
-
-/// The clock a real launch uses.
-#[derive(Debug, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
-    }
-}
-
-/// A day in UTC, as the file names and the retention window both spell it.
-///
-/// UTC rather than local time: a name has to keep its meaning across a timezone
-/// change (a laptop that crosses a border does not get a second day), and the
-/// window is compared against the same clock the names are written with.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Date {
-    year: i64,
-    month: u32,
-    day: u32,
-}
-
-impl Date {
-    /// A calendar date, or `None` if it is not one.
-    ///
-    /// Validating rather than trusting is what lets the name parser reject
-    /// `desktop-20261324-1.log`: a month of 13 is not a date, and treating it as
-    /// one would put a nonsense name into the retention ordering.
-    pub fn from_ymd(year: i64, month: u32, day: u32) -> Option<Date> {
-        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
-            return None;
-        }
-        Some(Date { year, month, day })
-    }
-
-    pub fn year(&self) -> i64 {
-        self.year
-    }
-
-    pub fn month(&self) -> u32 {
-        self.month
-    }
-
-    pub fn day(&self) -> u32 {
-        self.day
-    }
-
-    /// `YYYYMMDD`, zero-padded — the form the file names use.
-    pub fn stamp(&self) -> String {
-        format!("{:04}{:02}{:02}", self.year, self.month, self.day)
-    }
-
-    /// Days since 1970-01-01, negative before it.
-    pub fn days(&self) -> i64 {
-        days_from_civil(self.year, self.month, self.day)
-    }
-
-    /// This date, `count` days earlier.
-    pub fn minus_days(&self, count: i64) -> Date {
-        date_of_days(self.days() - count)
-    }
-}
-
-/// The day a moment belongs to, in UTC.
-pub fn date_of(time: SystemTime) -> Date {
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(since) => date_of_seconds(since.as_secs() as i64),
-        // Before the epoch the elapsed duration is the distance *backwards*.
-        Err(before) => date_of_seconds(-(before.duration().as_secs() as i64)),
-    }
-}
-
-fn date_of_seconds(seconds: i64) -> Date {
-    // `div_euclid`, not `/`: for a negative timestamp the two disagree, and the
-    // one that floors is the one that keeps 1969-12-31 from becoming 1970-01-01.
-    date_of_days(seconds.div_euclid(86_400))
-}
-
-/// The civil date `days` after 1970-01-01. Howard Hinnant's `civil_from_days`:
-/// shift the epoch to 0000-03-01, which puts the leap day at the end of the
-/// year and makes the month arithmetic exact, then undo the shift.
-fn date_of_days(days: i64) -> Date {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted - era * 146_097; // [0, 146096]
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_position = (5 * day_of_year + 2) / 153; // [0, 11], March is 0
-    let day = (day_of_year - (153 * month_position + 2) / 5 + 1) as u32;
-    let month = if month_position < 10 {
-        month_position + 3
-    } else {
-        month_position - 9
-    } as u32;
-    Date {
-        year: if month <= 2 { year + 1 } else { year },
-        month,
-        day,
-    }
-}
-
-/// Days from 1970-01-01 to the given civil date: the inverse of [`date_of_days`].
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400; // [0, 399]
-    let month_position = if month > 2 { month - 3 } else { month + 9 } as i64;
-    let day_of_year = (153 * month_position + 2) / 5 + day as i64 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn days_in_month(year: i64, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-/// The file name for one day and one index.
-pub fn file_name(date: Date, index: u32) -> String {
-    format!("{}-{}-{}{}", FILE_STEM, date.stamp(), index, FILE_SUFFIX)
-}
-
-/// The day and index a name carries, or `None` if the name is not ours.
-///
-/// A name that fails to parse is one the budget will not delete: it is not
-/// provably history, and deleting it would be deleting someone else's file on
-/// the strength of a guess.
-pub fn parse_file_name(name: &str) -> Option<(Date, u32)> {
-    let middle = name.strip_prefix(FILE_STEM)?.strip_prefix('-')?;
-    let middle = middle.strip_suffix(FILE_SUFFIX)?;
-    let (stamp, index) = middle.split_once('-')?;
-    if stamp.len() != 8 || index.is_empty() {
-        return None;
-    }
-    let digits = stamp.parse::<i64>().ok()?;
-    // A stamp of fewer than eight digits would still parse as a number, so the
-    // length is checked above; the index is checked for a leading sign here,
-    // which `parse` would otherwise accept as `+1`.
-    if !index.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-    let index = index.parse::<u32>().ok()?;
-    if index < 1 {
-        return None;
-    }
-    let date = Date::from_ymd(digits / 10_000, (digits / 100 % 100) as u32, (digits % 100) as u32)?;
-    Some((date, index))
-}
-
-/// What one file may occupy, and how long the directory may keep them.
+/// Two fields where there used to be three: the byte budget across the directory
+/// is gone (D-03 -- "不需要控制总量"), and so is the per-file cap that the record
+/// cap used to be derived from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// One file's cap. Also the cap for a single record: a record larger than
-    /// an empty file could never be written at all, and a smaller number would
-    /// invent a bound the ruling does not have.
-    pub max_file_bytes: u64,
+    /// Days of archives to keep. Deletion past this is the crate's rule.
     pub retention_days: i64,
-    /// The directory's cap, counting the file being written.
-    pub total_bytes: u64,
+    /// The longest a single record may be before it is cut and marked.
+    pub max_record_bytes: u64,
 }
 
 impl Limits {
-    /// The shipped numbers. `[logging]` (T-14) may lower or raise them; what it
-    /// may not do is ship something else without the baselines changing too.
+    /// The shipped numbers. `[logging]` (T-14) may change them; what it may not
+    /// do is ship something else without the baselines changing too.
     pub const SHIPPED: Limits = Limits {
-        max_file_bytes: DEFAULT_MAX_FILE_BYTES,
         retention_days: DEFAULT_RETENTION_DAYS,
-        total_bytes: DEFAULT_TOTAL_BYTES,
+        max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
     };
 }
 
@@ -264,16 +111,16 @@ pub struct Fitted {
     /// The line, without its newline.
     pub line: String,
     /// The byte length the record *had*, when it did not fit. `None` means the
-    /// line went in whole — the only way a reader can tell a truncated record
+    /// line went in whole -- the only way a reader can tell a truncated record
     /// from a short one.
     pub original_size: Option<u64>,
 }
 
-/// The record as it will be written: cut to one file's worth, and marked.
-pub fn fit(line: &str, max_file_bytes: u64) -> Fitted {
+/// The record as it will be written: cut to one record's worth, and marked.
+pub fn fit(line: &str, max_record_bytes: u64) -> Fitted {
     // At least one byte, so a caller that skipped the configuration layer's
     // validation cannot hand the arithmetic a zero.
-    let limit = max_file_bytes.max(1) - 1; // the newline that ends the line
+    let limit = max_record_bytes.max(1) - 1; // the newline that ends the line
     let raw = line.as_bytes();
     if raw.len() as u64 <= limit {
         return Fitted {
@@ -304,118 +151,12 @@ pub fn fit(line: &str, max_file_bytes: u64) -> Fitted {
     }
 }
 
-/// Where a record goes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Rotation {
-    /// Into the file that is open.
-    Keep,
-    /// Into a new file: either the day changed or this record does not fit.
-    Roll,
-}
-
-/// Whether a record belongs in the open file.
-///
-/// The date check comes first: a file named for yesterday must not keep
-/// collecting today's records, whatever room it has left.
-pub fn rotation(
-    open_date: Date,
-    today: Date,
-    current_bytes: u64,
-    next_bytes: u64,
-    max_file_bytes: u64,
-) -> Rotation {
-    if open_date != today {
-        return Rotation::Roll;
-    }
-    // `next_bytes` has already been cut to the cap by [`fit`], so an empty file
-    // always takes the record. Without this the caller would roll forever: every
-    // new file would be empty, every record would "not fit", and the loop would
-    // manufacture files. This is also the ruling's 超长单条不得新开文件.
-    if current_bytes == 0 || current_bytes + next_bytes <= max_file_bytes {
-        return Rotation::Keep;
-    }
-    Rotation::Roll
-}
-
-/// One file found in the log directory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Candidate {
-    pub name: String,
-    pub date: Date,
-    pub index: u32,
-    pub bytes: u64,
-}
-
-/// Which files to delete, oldest first.
-///
-/// Pure: a listing in, names out. The caller does the unlinking, so a test can
-/// ask the question without a filesystem and a reader can see the rule instead
-/// of inferring it from what disappeared.
-///
-/// - `keep` is the file a writer holds open. It is never a candidate (the
-///   ruling 六), though its size still counts towards the total — it is on disk.
-/// - `rolled_by_us` is what *this* writer closed during this run. It exists for
-///   the total rule only, and only for files dated today: an index file dated
-///   today that this writer did not roll may be another instance's live file,
-///   and deleting it would destroy a running app's records. Yesterday's files
-///   are history whoever wrote them.
-pub fn expired(
-    candidates: &[Candidate],
-    today: Date,
-    limits: Limits,
-    keep: Option<&str>,
-    rolled_by_us: &BTreeSet<String>,
-) -> Vec<String> {
-    let mut total: u64 = 0;
-    let mut deletable: Vec<&Candidate> = Vec::new();
-    for candidate in candidates {
-        // Counted before the `keep` check: the open file is not deletable, but
-        // it does occupy the directory the budget is about.
-        total = total.saturating_add(candidate.bytes);
-        if Some(candidate.name.as_str()) != keep {
-            deletable.push(candidate);
-        }
-    }
-    // Index as the tie-break, so two rolls on one day retire in the order they
-    // were written rather than in whatever order the directory listed them.
-    deletable.sort_by_key(|candidate| (candidate.date, candidate.index));
-
-    let cutoff = today.minus_days(limits.retention_days);
-    let mut doomed: Vec<String> = Vec::new();
-    let mut remaining: Vec<&Candidate> = Vec::new();
-    for candidate in deletable {
-        // `<=`: a 14-day window is today plus the 13 days before it. A file
-        // dated exactly `retention_days` ago is the 15th day and goes.
-        if candidate.date <= cutoff {
-            doomed.push(candidate.name.clone());
-        } else {
-            remaining.push(candidate);
-        }
-    }
-
-    for candidate in remaining {
-        if total <= limits.total_bytes {
-            break;
-        }
-        if candidate.date >= today && !rolled_by_us.contains(&candidate.name) {
-            // Someone else's file, possibly someone else's *open* file. Sparing
-            // it can leave the directory over budget until tomorrow; deleting it
-            // would silently cut off a running app's log. The first is a bound
-            // that is late, the second is a record that is gone.
-            continue;
-        }
-        doomed.push(candidate.name.clone());
-        total = total.saturating_sub(candidate.bytes);
-    }
-    doomed
-}
-
 /// Why the log file could not be written. Holds no credentials: a log path is a
 /// path.
 #[derive(Debug)]
 pub struct RollingError {
     pub path: PathBuf,
-    pub reason: std::io::Error,
+    pub reason: IoError,
 }
 
 impl std::fmt::Display for RollingError {
@@ -426,289 +167,109 @@ impl std::fmt::Display for RollingError {
 
 impl std::error::Error for RollingError {}
 
-/// The file a writer holds open.
-struct Open {
-    file: std::fs::File,
-    path: PathBuf,
-    name: String,
-    date: Date,
-}
-
-/// The directory's writer: claims a file, writes records, rolls, prunes.
+/// The live log file and the rotation policy over its directory.
 ///
-/// Every failure is a returned `Err` (or a reported-and-continued prune), never
-/// a panic: the caller's response to all of them is the same — say so on stderr
-/// and carry on, because the user's ruling 五 is that logging may never be the
-/// reason a launch fails.
+/// Every failure is a returned `Err`, never a panic: the caller's response to
+/// all of them is the same -- say so on stderr and carry on, because the user's
+/// ruling 五 is that logging may never be the reason a launch fails. The one
+/// place that rule needs saying out loud is [`Writer::open`], because the crate
+/// underneath *panics* on a directory it cannot create and *silently drops every
+/// record* when its file cannot be opened. Both are asked about here, before
+/// there is nothing left to ask.
 pub struct Writer {
     directory: PathBuf,
+    path: PathBuf,
     limits: Limits,
-    clock: Box<dyn Clock + Send + Sync>,
-    open: Option<Open>,
-    rolled_by_us: BTreeSet<String>,
+    log: FileRotate<AppendTimestamp>,
 }
 
 impl Writer {
-    /// A writer for this directory, with the startup prune already done.
+    /// A writer for this directory.
     ///
-    /// No file is claimed here: a file that exists before there is anything to
-    /// put in it is a file that says "Desktop ran and logged nothing", and a
-    /// directory of those is worse than an empty one.
-    pub fn open(
-        directory: &Path,
-        limits: Limits,
-        // `Send + Sync` come with `Clock`, so only the lifetime has to be said.
-        clock: impl Clock + 'static,
-    ) -> Result<Writer, RollingError> {
-        let mut writer = Writer {
-            directory: directory.to_path_buf(),
-            limits,
-            clock: Box::new(clock),
-            open: None,
-            rolled_by_us: BTreeSet::new(),
-        };
-        // The second of the two points the budget is enforced at; the other is
-        // a roll. Between them the open file may grow to its own cap, which is
-        // why the bound is `total_bytes` plus what the open files may still
-        // hold, and not `total_bytes` to the byte.
-        writer.prune();
-        Ok(writer)
+    /// `directory` must be a real path with a parent -- the crate unwraps the
+    /// parent -- and the caller is expected to have proved it writable already
+    /// (`logging::paths::prepare`). The check is repeated here anyway, because
+    /// this function's contract is "never panic and never lose a record
+    /// quietly", and a contract that depends on a caller's earlier call is a
+    /// contract with a hole in it.
+    pub fn open(directory: &Path, limits: Limits) -> Result<Writer, RollingError> {
+        let refused = |reason: IoError, path: PathBuf| RollingError { path, reason };
+        if let Err(reason) = std::fs::create_dir_all(directory) {
+            return Err(refused(reason, directory.to_path_buf()));
+        }
+        let path = directory.join(LOG_FILE_NAME);
+
+        let log = FileRotate::new(
+            &path,
+            AppendTimestamp::with_format(
+                ARCHIVE_FORMAT,
+                // The crate's own age rule. `chrono::Duration`, not
+                // `std::time::Duration`: that is what `FileLimit::Age` takes,
+                // and it is why `chrono` is a direct dependency.
+                FileLimit::Age(chrono::Duration::days(limits.retention_days)),
+                DateFrom::DateHourAgo,
+            ),
+            ContentLimit::Time(TimeFrequency::Hourly),
+            Compression::None,
+            None,
+        );
+
+        // `FileRotate` holds `None` in place of its file when the open failed,
+        // and every later write then reports success while writing nothing. That
+        // is the one failure this wrapper must not inherit, so it is asked about
+        // here -- while there is still a caller to tell.
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => Ok(Writer {
+                directory: directory.to_path_buf(),
+                path,
+                limits,
+                log,
+            }),
+            Ok(_) => Err(refused(
+                IoError::new(
+                    ErrorKind::AlreadyExists,
+                    "a directory is where the log file should be",
+                ),
+                path,
+            )),
+            Err(reason) => Err(refused(reason, path)),
+        }
     }
 
-    /// The file this writer is holding open, if any.
+    /// The directory this writer's files live in.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// The file this writer is appending to. These days that is one stable name
+    /// for the whole run rather than one per day (D-01).
     pub fn open_path(&self) -> Option<&Path> {
-        self.open.as_ref().map(|open| open.path.as_path())
+        Some(self.path.as_path())
     }
 
     /// Write one record. The line must not contain a newline.
+    ///
+    /// The record is cut to `max_record_bytes` first and handed over whole: the
+    /// crate decides when to rotate, and by the time it sees the line the line
+    /// is already one that fits.
     pub fn write_line(&mut self, line: &str) -> Result<(), RollingError> {
-        let today = date_of(self.clock.now());
-        let fitted = fit(line, self.limits.max_file_bytes);
-        let next_bytes = fitted.line.len() as u64 + 1; // the newline
-        let current_bytes = self.open_bytes();
-
-        let roll = match self.open.as_ref() {
-            None => true,
-            Some(open) => {
-                rotation(
-                    open.date,
-                    today,
-                    current_bytes,
-                    next_bytes,
-                    self.limits.max_file_bytes,
-                ) == Rotation::Roll
-            }
-        };
-        if roll {
-            self.roll(today)?;
-        }
-
-        let open = match self.open.as_mut() {
-            Some(open) => open,
-            // Unreachable: `roll` either set `self.open` or returned `Err`.
-            None => return Ok(()),
-        };
-        open.file
-            .write_all(fitted.line.as_bytes())
-            .and_then(|()| open.file.write_all(b"\n"))
+        let fitted = fit(line, self.limits.max_record_bytes);
+        writeln!(self.log, "{}", fitted.line)
             // Flushed per record, not buffered: a log that only reaches the disk
             // on a clean exit is no use for the crash it was written to explain,
             // and Desktop's volume is a handful of records per launch.
-            .and_then(|()| open.file.flush())
+            .and_then(|()| self.log.flush())
             .map_err(|reason| RollingError {
-                path: open.path.clone(),
+                path: self.path.clone(),
                 reason,
             })
-    }
-
-    /// Delete what is out of the window, then what is over the budget.
-    ///
-    /// Returns what it deleted, so the decision is visible to the caller instead
-    /// of being inferred from the directory afterwards.
-    pub fn prune(&mut self) -> Vec<String> {
-        let today = date_of(self.clock.now());
-        let keep = self.open.as_ref().map(|open| open.name.clone());
-        let candidates = match self.list() {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                self.report(&format!("cannot list {}: {error}", self.directory.display()));
-                return Vec::new();
-            }
-        };
-        let doomed = expired(
-            &candidates,
-            today,
-            self.limits,
-            keep.as_deref(),
-            &self.rolled_by_us,
-        );
-
-        let mut deleted = Vec::new();
-        for name in doomed {
-            let path = self.directory.join(&name);
-            match std::fs::remove_file(&path) {
-                Ok(()) => deleted.push(name),
-                // Not fatal, but not quiet either: if the deletion never
-                // succeeds the directory has no bound left, and a reader
-                // wondering why it is full needs this line.
-                Err(error) => self.report(&format!(
-                    "cannot delete {} ({error})",
-                    path.display()
-                )),
-            }
-        }
-        deleted
-    }
-
-    /// Close the open file and start a new one for `today`.
-    fn roll(&mut self, today: Date) -> Result<(), RollingError> {
-        if let Some(open) = self.open.take() {
-            // Closing before the claim, and remembering the name: the file just
-            // became history, so the budget may hold it to the total.
-            drop(open.file);
-            self.rolled_by_us.insert(open.name);
-        }
-        let claimed = self.claim(today)?;
-        self.open = Some(claimed);
-        // After the claim, not before: the new file has to be on disk when the
-        // budget counts what the directory holds.
-        self.prune();
-        Ok(())
-    }
-
-    /// Claim a name for this day, or fail.
-    ///
-    /// `create_new` is what makes the claim atomic. Two instances starting at
-    /// the same second both reach for `-1`; exactly one gets it, and the other
-    /// is sent to `-2` by `AlreadyExists` rather than appending to a file that
-    /// is not its own.
-    fn claim(&mut self, date: Date) -> Result<Open, RollingError> {
-        if let Err(reason) = std::fs::create_dir_all(&self.directory) {
-            return Err(RollingError {
-                path: self.directory.clone(),
-                reason,
-            });
-        }
-        let mut index = 1u32;
-        loop {
-            let name = file_name(date, index);
-            let path = self.directory.join(&name);
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .append(true)
-                .open(&path)
-            {
-                Ok(file) => {
-                    return Ok(Open {
-                        file,
-                        path,
-                        name,
-                        date,
-                    })
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if index >= MAX_INDEX_PER_DAY {
-                        return Err(RollingError { path, reason: error });
-                    }
-                    index += 1;
-                }
-                Err(reason) => return Err(RollingError { path, reason }),
-            }
-        }
-    }
-
-    /// What the open file currently holds.
-    fn open_bytes(&self) -> u64 {
-        match self.open.as_ref() {
-            Some(open) => open.file.metadata().map(|meta| meta.len()).unwrap_or(0),
-            None => 0,
-        }
-    }
-
-    /// Every file in the directory that is ours, with its date and size.
-    fn list(&self) -> std::io::Result<Vec<Candidate>> {
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(&self.directory)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some((date, index)) = parse_file_name(&name) else {
-                // Someone else's file, or a name from a version that spelled it
-                // differently. Not provably history, so never a candidate.
-                continue;
-            };
-            // A file that vanished between the listing and the stat counts as
-            // zero rather than aborting the prune: another writer may rename it
-            // away, and an error here would lose the record whose write
-            // triggered this.
-            let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-            found.push(Candidate {
-                name,
-                date,
-                index,
-                bytes,
-            });
-        }
-        Ok(found)
-    }
-
-    /// Tell the operator something without going back through the logger.
-    ///
-    /// This runs on the emit path: the writer being written is the sink these
-    /// records would go to, so the only destination that is both visible and
-    /// safe is stderr — the same choice `logging.Handler.handleError` makes on
-    /// the Agent's side, for the same reason.
-    fn report(&self, message: &str) {
-        eprintln!("[wt-media-desktop] logging: {message}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    /// A clock a test can move, and keep a handle on after handing it to a
-    /// writer. `AtomicI64` because `Clock::now` takes `&self`; `Arc` because the
-    /// writer takes ownership of the (boxed) clock.
-    #[derive(Clone)]
-    struct Frozen(Arc<AtomicI64>);
-
-    impl Frozen {
-        fn at(seconds: i64) -> Frozen {
-            Frozen(Arc::new(AtomicI64::new(seconds)))
-        }
-
-        /// Midnight UTC on this date.
-        fn on(year: i64, month: u32, day: u32) -> Frozen {
-            Frozen::at(
-                Date::from_ymd(year, month, day)
-                    .expect("a real date")
-                    .days()
-                    * 86_400,
-            )
-        }
-
-        fn advance_days(&self, days: i64) {
-            self.0.fetch_add(days * 86_400, Ordering::SeqCst);
-        }
-    }
-
-    impl Clock for Frozen {
-        fn now(&self) -> SystemTime {
-            let seconds = self.0.load(Ordering::SeqCst);
-            if seconds >= 0 {
-                UNIX_EPOCH + Duration::from_secs(seconds as u64)
-            } else {
-                UNIX_EPOCH - Duration::from_secs((-seconds) as u64)
-            }
-        }
-    }
-
-    fn date(year: i64, month: u32, day: u32) -> Date {
-        Date::from_ymd(year, month, day).expect("a real date")
-    }
+    use std::time::SystemTime;
 
     /// A scratch directory of this test's own, named after the process so two
     /// concurrent runs cannot collide. Removed by the caller.
@@ -718,7 +279,7 @@ mod tests {
             label,
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+                .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.subsec_nanos())
                 .unwrap_or(0)
         ));
@@ -726,122 +287,115 @@ mod tests {
         path
     }
 
+    /// Everything in the directory, sorted, so an assertion can name it exactly.
+    fn listing(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// The rolled files, by the same rule the crate uses to recognise one: the
+    /// live name, a dot, and something that starts like a stamp. `desktop.log.old`
+    /// is deliberately not one of them, and neither is another component's file.
+    fn archives(directory: &Path) -> Vec<String> {
+        let prefix = format!("{LOG_FILE_NAME}.");
+        listing(directory)
+            .into_iter()
+            .filter(|name| {
+                name.strip_prefix(&prefix)
+                    .is_some_and(|stamp| stamp.starts_with(|c: char| c.is_ascii_digit()))
+            })
+            .collect()
+    }
+
     fn shipped() -> Limits {
-        // Small enough to roll without writing 20 MB: the *rule* is what is
-        // under test, and the shipped numbers are asserted separately.
-        Limits {
-            max_file_bytes: 200,
-            retention_days: 14,
-            total_bytes: 100 * 1024 * 1024,
+        Limits::SHIPPED
+    }
+
+    /// A stamp `hours` before now, as the archive names spell it.
+    ///
+    /// The format is written out here rather than read from [`ARCHIVE_FORMAT`]
+    /// on purpose: an expectation built from the constant it is checking moves
+    /// with the constant and cannot fail. Measured -- with `.format(ARCHIVE_FORMAT)`
+    /// here, mutating the constant to `%Y-%m-%d` was caught by nothing but a
+    /// slice panic in a sibling test.
+    fn stamp(hours_ago: i64) -> String {
+        (chrono::Local::now() - chrono::Duration::hours(hours_ago))
+            .format("%Y-%m-%d-%H")
+            .to_string()
+    }
+
+    /// Move a file's mtime back. `set_modified` has been stable since Rust 1.75,
+    /// so this needs no dev-dependency on `filetime`.
+    fn backdate(path: &Path, hours: i64) {
+        let when: SystemTime = (chrono::Local::now() - chrono::Duration::hours(hours)).into();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the file to backdate")
+            .set_modified(when)
+            .expect("set the mtime");
+    }
+
+    /// A live file as a run that stopped in a previous hour leaves it: some
+    /// records, and an mtime an hour old.
+    ///
+    /// This is the only lever a test has on the rotation trigger, and it is the
+    /// **real** one, not a stand-in. The crate compares the wall clock's hour
+    /// against the live file's mtime -- but it reads that mtime **once**, when
+    /// the writer is built, and overwrites its remembered value on every write
+    /// (measured: `ensure_log_directory_exists` seeds `self.modified`, and the
+    /// `Time` arm of `write` then sets it to the hour it just wrote in). So
+    /// backdating the file *after* a writer exists does nothing at all, which is
+    /// why this file has to be created before the writer that should rotate it.
+    ///
+    /// Creating it first is not a testing convenience: it is the production
+    /// scenario, a process that last wrote in the previous hour and has just
+    /// been launched again -- which is also the launch on which the age rule
+    /// runs, since the age rule runs inside a rotation and nowhere else.
+    fn live_file_from_the_previous_hour(directory: &Path) -> PathBuf {
+        std::fs::create_dir_all(directory).expect("scratch");
+        let live = directory.join(LOG_FILE_NAME);
+        std::fs::write(&live, "the hour that ended\n").expect("the live file");
+        backdate(&live, 1);
+        live
+    }
+
+    /// Plant an archive `days` old, before the writer exists.
+    fn plant_archive(directory: &Path, days: i64, contents: &str) -> PathBuf {
+        std::fs::create_dir_all(directory).expect("scratch");
+        let path = directory.join(format!(
+            "{}.{}",
+            LOG_FILE_NAME,
+            (chrono::Local::now() - chrono::Duration::days(days)).format(ARCHIVE_FORMAT)
+        ));
+        std::fs::write(&path, contents).expect("plant the archive");
+        path
+    }
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).expect("the file")
+    }
+
+    /// The refusal, or a panic saying the directory should have been refused.
+    ///
+    /// Not `expect_err`: `FileRotate` is not `Debug`, so the `Ok` arm has no
+    /// printable form and `Err(error)` is unwrapped by hand.
+    fn refused(directory: &Path) -> RollingError {
+        match Writer::open(directory, shipped()) {
+            Ok(_) => panic!("{} must be refused", directory.display()),
+            Err(error) => error,
         }
     }
 
-    // ---- the date, which every other rule is expressed in ----
-
-    #[test]
-    fn the_epoch_is_1970_01_01() {
-        assert_eq!(date_of(UNIX_EPOCH), date(1970, 1, 1));
-        assert_eq!(date_of(UNIX_EPOCH + Duration::from_secs(86_399)), date(1970, 1, 1));
-        assert_eq!(date_of(UNIX_EPOCH + Duration::from_secs(86_400)), date(1970, 1, 2));
-    }
-
-    /// Before the epoch the arithmetic has to floor, not truncate towards zero:
-    /// a second before 1970-01-01 is 1969-12-31, and `-1 / 86_400` is 0.
-    #[test]
-    fn dates_before_the_epoch_are_converted_rather_than_wrapped() {
-        assert_eq!(date_of(UNIX_EPOCH - Duration::from_secs(1)), date(1969, 12, 31));
-        assert_eq!(date_of(UNIX_EPOCH - Duration::from_secs(86_400)), date(1969, 12, 31));
-        assert_eq!(date_of(UNIX_EPOCH - Duration::from_secs(86_401)), date(1969, 12, 30));
-    }
-
-    /// The century rule, which is the half of "leap year" that is easy to get
-    /// wrong: 2000 is a leap year and 1900 is not.
-    #[test]
-    fn leap_years_follow_the_century_rule() {
-        assert_eq!(date_of_seconds(days_of(2024, 2, 29)), date(2024, 2, 29));
-        assert_eq!(date_of_seconds(days_of(2024, 3, 1)), date(2024, 3, 1));
-        assert_eq!(date_of_seconds(days_of(2000, 2, 29)), date(2000, 2, 29));
-        assert_eq!(date_of_seconds(days_of(1900, 2, 28)), date(1900, 2, 28));
-        assert_eq!(Date::from_ymd(1900, 2, 29), None);
-        assert_eq!(Date::from_ymd(2024, 2, 30), None);
-    }
-
-    fn days_of(year: i64, month: u32, day: u32) -> i64 {
-        date(year, month, day).days() * 86_400
-    }
-
-    /// Round trip over a stretch that includes a leap day, so the two halves of
-    /// the conversion are pinned against each other and not just against a
-    /// hand-written table.
-    #[test]
-    fn every_day_of_a_leap_year_round_trips() {
-        let start = date(2024, 1, 1).days();
-        for offset in 0..366 {
-            let days = start + offset;
-            let converted = date_of_days(days);
-            assert_eq!(converted.days(), days, "{converted:?} did not round trip");
-        }
-        assert_eq!(date_of_days(start + 365).stamp(), "20241231");
-    }
-
-    #[test]
-    fn the_stamp_is_zero_padded() {
-        assert_eq!(date(2026, 9, 24).stamp(), "20260924");
-        assert_eq!(date(2026, 1, 5).stamp(), "20260105");
-    }
-
-    #[test]
-    fn a_date_moves_back_by_a_whole_number_of_days() {
-        assert_eq!(date(2026, 3, 1).minus_days(1), date(2026, 2, 28));
-        assert_eq!(date(2024, 3, 1).minus_days(1), date(2024, 2, 29));
-        assert_eq!(date(2026, 1, 1).minus_days(1), date(2025, 12, 31));
-        assert_eq!(date(2026, 9, 24).minus_days(14), date(2026, 9, 10));
-    }
-
-    // ---- names ----
-
-    #[test]
-    fn a_file_name_states_its_date_and_index() {
-        assert_eq!(file_name(date(2026, 9, 24), 1), "desktop-20260924-1.log");
-        assert_eq!(file_name(date(2026, 1, 5), 12), "desktop-20260105-12.log");
-    }
-
-    #[test]
-    fn a_name_we_did_not_write_is_not_ours() {
-        // Accepted.
-        assert_eq!(
-            parse_file_name("desktop-20260924-1.log"),
-            Some((date(2026, 9, 24), 1))
-        );
-        assert_eq!(
-            parse_file_name("desktop-20260105-120.log"),
-            Some((date(2026, 1, 5), 120))
-        );
-
-        // Rejected: another component's file, a name with no index, index zero,
-        // a stamp that is not a date, a suffix that is not ours, and a name
-        // whose parts are the right shape but not digits.
-        for name in [
-            "agent-20260924-1.log",
-            "desktop.log",
-            "desktop-20260924.log",
-            "desktop-20260924-0.log",
-            "desktop-20261324-1.log",
-            "desktop-20260932-1.log",
-            "desktop-2026924-1.log",
-            "desktop-20260924-1.log.txt",
-            "desktop-20260924-1.txt",
-            "desktop--1.log",
-            "desktop-20260924-.log",
-            "desktop-20260924-1.5.log",
-            "desktop-+20260924-1.log",
-            "desktop-20260924-+1.log",
-        ] {
-            assert_eq!(parse_file_name(name), None, "{name} must not parse");
-        }
-    }
-
-    // ---- one record, cut to fit ----
+    // ---- one record, cut to fit (pure: no filesystem, no clock) ----
 
     #[test]
     fn a_record_that_fits_is_written_whole_and_unmarked() {
@@ -872,7 +426,7 @@ mod tests {
         let with_newline = fitted.line.len() + 1;
         assert!(
             with_newline <= 200,
-            "the marked record must still fit the file: {with_newline} bytes"
+            "the marked record must still fit the cap: {with_newline} bytes"
         );
         assert!(
             fitted.line.starts_with("yyy"),
@@ -903,8 +457,8 @@ mod tests {
 
     /// A cap smaller than the marker itself leaves no room for the head. The
     /// marker is still written: a record that says it was truncated beats a
-    /// record with no size information, and the configuration layer rejects
-    /// caps this small.
+    /// record with no size information, and the configuration layer rejects caps
+    /// this small (T-14).
     #[test]
     fn a_cap_too_small_for_the_marker_still_marks_the_record() {
         let fitted = fit("a long record", 4);
@@ -913,224 +467,66 @@ mod tests {
         assert_eq!(fitted.line, " truncate=true original_size=13");
     }
 
-    // ---- where a record goes ----
-
-    #[test]
-    fn a_record_that_fits_stays_in_the_open_file() {
-        assert_eq!(
-            rotation(date(2026, 9, 24), date(2026, 9, 24), 100, 50, 200),
-            Rotation::Keep
-        );
-    }
-
-    #[test]
-    fn a_record_that_would_pass_the_cap_rolls() {
-        assert_eq!(
-            rotation(date(2026, 9, 24), date(2026, 9, 24), 180, 50, 200),
-            Rotation::Roll
-        );
-    }
-
-    /// Exactly filling a file is not overflowing it. An off-by-one here would
-    /// roll a record early, which is invisible until someone counts files.
-    #[test]
-    fn a_record_that_exactly_fills_the_file_is_kept() {
-        assert_eq!(
-            rotation(date(2026, 9, 24), date(2026, 9, 24), 150, 50, 200),
-            Rotation::Keep
-        );
-    }
-
-    #[test]
-    fn the_day_changing_rolls_even_a_file_with_room_left() {
-        assert_eq!(
-            rotation(date(2026, 9, 24), date(2026, 9, 25), 10, 50, 200),
-            Rotation::Roll
-        );
-    }
-
-    /// An oversized record must not start a file of its own: every new file is
-    /// empty, so "it does not fit" would be true forever.
-    #[test]
-    fn a_record_too_large_for_an_empty_file_is_still_written() {
-        assert_eq!(
-            rotation(date(2026, 9, 24), date(2026, 9, 24), 0, 5_000, 200),
-            Rotation::Keep
-        );
-    }
-
-    // ---- what the budget deletes ----
-
-    fn candidate(name: &str, bytes: u64) -> Candidate {
-        let (date, index) = parse_file_name(name).expect("a name we wrote");
-        Candidate {
-            name: name.to_owned(),
-            date,
-            index,
-            bytes,
-        }
-    }
-
-    fn no_set() -> BTreeSet<String> {
-        BTreeSet::new()
-    }
-
-    fn budget(retention_days: i64, total_bytes: u64) -> Limits {
-        Limits {
-            max_file_bytes: 20 * 1024 * 1024,
-            retention_days,
-            total_bytes,
-        }
-    }
-
-    #[test]
-    fn the_window_is_today_plus_the_days_before_it() {
-        let today = date(2026, 9, 24);
-        let candidates = vec![
-            candidate("desktop-20260910-1.log", 10), // 14 days ago: the 15th day
-            candidate("desktop-20260911-1.log", 10), // 13 days ago: inside
-        ];
-
-        let doomed = expired(&candidates, today, budget(14, u64::MAX), None, &no_set());
-
-        assert_eq!(
-            doomed,
-            vec!["desktop-20260910-1.log"],
-            "the day exactly at the window's edge goes, the one inside stays"
-        );
-    }
-
-    #[test]
-    fn files_are_deleted_oldest_first_until_the_total_fits() {
-        let today = date(2026, 9, 24);
-        let candidates = vec![
-            candidate("desktop-20260923-2.log", 100),
-            candidate("desktop-20260923-1.log", 100),
-            candidate("desktop-20260922-1.log", 100),
-        ];
-
-        let doomed = expired(&candidates, today, budget(14, 250), None, &no_set());
-
-        assert_eq!(
-            doomed,
-            vec!["desktop-20260922-1.log"],
-            "the day before yesterday goes; the two that fit stay"
-        );
-    }
-
-    /// The total rule stops when it has deleted enough. A version that emptied
-    /// the directory whenever it was over budget would pass a one-file test and
-    /// lose every record.
-    #[test]
-    fn the_total_rule_deletes_no_more_than_it_has_to() {
-        let today = date(2026, 9, 24);
-        let candidates = vec![
-            candidate("desktop-20260922-1.log", 100),
-            candidate("desktop-20260923-1.log", 100),
-            candidate("desktop-20260924-1.log", 100),
-        ];
-
-        let doomed = expired(&candidates, today, budget(14, 250), None, &no_set());
-
-        assert_eq!(doomed, vec!["desktop-20260922-1.log"]);
-        assert_eq!(doomed.len(), 1, "250 fits two files; only one had to go");
-    }
-
-    /// The ruling 六, as a two-way assertion: the open file is not deleted even
-    /// when it is the oldest thing in the directory *and* out of the window,
-    /// and the same file, not open, is.
-    #[test]
-    fn the_open_file_is_never_a_candidate() {
-        let today = date(2026, 9, 24);
-        let only = vec![candidate("desktop-20260101-1.log", 10_000)];
-        let live = Some("desktop-20260101-1.log");
-
-        assert_eq!(
-            expired(&only, today, budget(14, 100), live, &no_set()),
-            Vec::<String>::new(),
-            "an open file is not history, however old it is"
-        );
-        assert_eq!(
-            expired(&only, today, budget(14, 100), None, &no_set()),
-            vec!["desktop-20260101-1.log"],
-            "the same file, closed, is out of the window and over budget"
-        );
-
-        // And the filter is specific rather than a blanket refusal to prune:
-        // with a second file present, that one still goes.
-        let both = vec![
-            candidate("desktop-20260101-1.log", 10_000),
-            candidate("desktop-20260923-1.log", 10),
-        ];
-        assert_eq!(
-            expired(&both, today, budget(14, 100), live, &no_set()),
-            vec!["desktop-20260923-1.log"]
-        );
-    }
-
-    /// A file dated today that this writer did not roll may be another
-    /// instance's open file. Two-way: a file this writer *did* roll goes.
-    #[test]
-    fn todays_file_is_spared_unless_this_writer_rolled_it() {
-        let today = date(2026, 9, 24);
-        let candidates = vec![candidate("desktop-20260924-1.log", 10_000)];
-
-        let spared = expired(&candidates, today, budget(14, 100), None, &no_set());
-        assert_eq!(spared, Vec::<String>::new());
-
-        let mut rolled = BTreeSet::new();
-        rolled.insert("desktop-20260924-1.log".to_owned());
-        let doomed = expired(&candidates, today, budget(14, 100), None, &rolled);
-        assert_eq!(doomed, vec!["desktop-20260924-1.log"]);
-    }
-
-    /// Yesterday's file is history whoever wrote it, so the exemption above is
-    /// about *today's* files only and not about sparing everything.
-    #[test]
-    fn yesterdays_file_is_history_whoever_wrote_it() {
-        let today = date(2026, 9, 24);
-        let candidates = vec![candidate("desktop-20260923-1.log", 10_000)];
-
-        let doomed = expired(&candidates, today, budget(14, 100), None, &no_set());
-
-        assert_eq!(doomed, vec!["desktop-20260923-1.log"]);
-    }
-
-    // ---- the writer, on a real directory ----
-
     #[test]
     fn the_shipped_limits_are_the_ones_the_ruling_names() {
-        assert_eq!(Limits::SHIPPED.max_file_bytes, 20 * 1024 * 1024);
         assert_eq!(Limits::SHIPPED.retention_days, 14);
-        assert_eq!(Limits::SHIPPED.total_bytes, 100 * 1024 * 1024);
+        assert_eq!(Limits::SHIPPED.max_record_bytes, 1024 * 1024);
     }
 
+    /// The spellings the user's ruling fixes, written out as literals.
+    ///
+    /// Every other test in this module builds its expectation from these
+    /// constants or from the file names they produce, which is what makes them
+    /// read as tests of behaviour — and what would let a wrong constant sail
+    /// through all of them at once. This is the one place the values themselves
+    /// are the subject: `desktop.log` is the ruling's stable name and the
+    /// archives are that name plus the local hour.
     #[test]
-    fn nothing_is_created_before_the_first_record() {
-        let root = scratch("lazy");
-        std::fs::create_dir_all(&root).expect("scratch");
-        let writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
-
-        let created = std::fs::read_dir(&root)
-            .expect("the directory exists")
-            .count();
-        std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(created, 0, "an empty log file is not a log");
-        assert_eq!(writer.open_path(), None);
+    fn the_names_and_the_formats_are_the_ones_the_ruling_names() {
+        assert_eq!(LOG_FILE_NAME, "desktop.log");
+        assert_eq!(ARCHIVE_FORMAT, "%Y-%m-%d-%H");
+        assert_eq!(
+            TRUNCATION_MARKER, " truncate=true original_size=",
+            "the marker is byte-for-byte the Agent's, so one reader learns one spelling"
+        );
     }
 
+    // ---- the live file, and the record landing in it ----
+
     #[test]
-    fn the_first_record_lands_in_todays_first_file() {
-        let root = scratch("first");
-        let mut writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
+    fn the_first_record_lands_in_the_stable_live_file() {
+        let root = scratch("live");
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
         writer.write_line("desktop.startup ready").expect("write");
 
-        let contents = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "desktop.startup ready\n");
+        assert_eq!(writer.open_path(), Some(root.join(LOG_FILE_NAME).as_path()));
         std::fs::remove_dir_all(&root).ok();
+    }
 
-        assert_eq!(contents, "desktop.startup ready\n");
+    /// **A behaviour that changed, pinned rather than only registered.**
+    ///
+    /// The hand-rolled rotator created nothing until the first record arrived
+    /// (its test was `nothing_is_created_before_the_first_record`).
+    /// `FileRotate::new` opens the live file eagerly, so `Writer::open` now
+    /// leaves an empty `desktop.log` behind even on a launch that logs nothing
+    /// -- including `logging.level = "off"`. A consequence worth a test and not
+    /// only a comment: the shipped config's own note about it would otherwise be
+    /// a claim nothing checks.
+    #[test]
+    fn the_live_file_exists_as_soon_as_the_writer_does() {
+        let root = scratch("eager");
+
+        let writer = Writer::open(&root, shipped()).expect("open");
+
+        assert!(
+            root.join(LOG_FILE_NAME).is_file(),
+            "the live file is created by the writer, not by the first record"
+        );
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "", "and it is empty");
+        drop(writer);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// One line per record, which is what the plain-text format promises the
@@ -1138,199 +534,328 @@ mod tests {
     #[test]
     fn records_are_one_line_each() {
         let root = scratch("lines");
-        let mut writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
         writer.write_line("first").expect("write");
         writer.write_line("second").expect("write");
 
-        let contents = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "first\nsecond\n");
         std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(contents, "first\nsecond\n");
     }
 
-    /// The multi-instance rule: the second writer must take the next index
-    /// rather than append to a file that is not its own.
+    /// Nothing has rolled yet, because the hour has not turned. Asserted as an
+    /// absence so a rotator that rolled on every write -- which would also pass
+    /// the rotation test below -- is caught here.
     #[test]
-    fn a_second_writer_takes_the_next_index_rather_than_the_same_file() {
-        let root = scratch("two-writers");
-        let mut first = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
-        let mut second = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
+    fn records_in_one_hour_stay_in_one_file() {
+        let root = scratch("one-hour");
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
-        first.write_line("from the first").expect("write");
-        second.write_line("from the second").expect("write");
+        for index in 0..5 {
+            writer
+                .write_line(&format!("record {index}"))
+                .expect("write");
+        }
 
-        let one = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
-        let two = std::fs::read_to_string(root.join("desktop-20260924-2.log")).expect("read");
+        assert_eq!(archives(&root), Vec::<String>::new());
+        assert_eq!(read(&root.join(LOG_FILE_NAME)).lines().count(), 5);
         std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(one, "from the first\n");
-        assert_eq!(two, "from the second\n");
     }
 
-    /// One writer, one launch, midnight in between: the date changing is enough
-    /// to move the record into a file named for the new day, and yesterday's
-    /// records are still there afterwards.
+    // ---- the hour turning ----
+
+    /// The ruling D-01, end to end: the hour's records are renamed to
+    /// `desktop.log.<hour that ended>` and the live file starts over.
+    ///
+    /// The expected name is bracketed by the clock read either side of the write
+    /// rather than read once: the crate takes its own clock reading at write
+    /// time, so a tick landing between the two is the one case where the hour
+    /// can differ, and both values are therefore correct. Every other run pins
+    /// the rule to `hour - 1` exactly -- `DateFrom::Now` would produce the hour
+    /// that *began*, which is in the bracket's complement.
     #[test]
-    fn the_day_changing_starts_a_new_file_and_keeps_the_old_one() {
-        let root = scratch("day-roll");
-        let clock = Frozen::on(2026, 9, 24);
-        let mut writer =
-            Writer::open(&root, shipped(), clock.clone()).expect("open");
-        writer.write_line("yesterday").expect("write");
+    fn a_record_in_a_new_hour_rotates_the_file_the_previous_run_left() {
+        let root = scratch("hour-roll");
+        live_file_from_the_previous_hour(&root);
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
-        clock.advance_days(1);
-        writer.write_line("today").expect("write");
+        let before = stamp(1);
+        writer.write_line("the hour that began").expect("write");
+        let after = stamp(1);
 
-        let first = std::fs::read_to_string(root.join("desktop-20260924-1.log"));
-        let second = std::fs::read_to_string(root.join("desktop-20260925-1.log"));
+        let rolled = archives(&root);
+        assert_eq!(
+            rolled.len(),
+            1,
+            "one rotation is one archive, not one per write: {rolled:?}"
+        );
+        let archive = root.join(&rolled[0]);
+        assert!(
+            rolled[0].starts_with(&format!("{LOG_FILE_NAME}.")),
+            "the archive keeps the live name as its prefix: {:?}",
+            rolled[0]
+        );
+        assert!(
+            rolled[0] == format!("{LOG_FILE_NAME}.{before}")
+                || rolled[0] == format!("{LOG_FILE_NAME}.{after}"),
+            "the archive is named for the hour that ended ({before} or {after}), \
+             not for whichever hour the crate happened to read: {:?}",
+            rolled[0]
+        );
+
+        // The halves are the halves: nothing was lost and nothing was duplicated.
+        assert_eq!(read(&archive), "the hour that ended\n");
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "the hour that began\n");
         std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(first.expect("read"), "yesterday\n");
-        assert_eq!(second.expect("read"), "today\n");
     }
 
+    /// The live file is rebuilt after a rotation rather than left as the archive
+    /// it was renamed to -- the property that makes `desktop.log` stable across
+    /// hours, and the one a rotator that renamed without reopening would break.
     #[test]
-    fn a_full_file_rolls_and_the_next_record_starts_a_new_one() {
-        let root = scratch("size-roll");
-        let limits = Limits {
-            max_file_bytes: 20,
+    fn the_live_file_is_recreated_after_a_rotation() {
+        let root = scratch("recreate");
+        live_file_from_the_previous_hour(&root);
+        let mut writer = Writer::open(&root, shipped()).expect("open");
+
+        writer.write_line("after").expect("write");
+        writer.write_line("after too").expect("write");
+
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "after\nafter too\n");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- what the age rule deletes ----
+
+    /// The ruling D-03, on the real path: `FileLimit::Age` deletes past the
+    /// window, keeps inside it, and never touches the live file.
+    ///
+    /// The archives are planted **before** the writer exists, because the crate
+    /// scans the directory once at construction -- see
+    /// `an_archive_that_appears_after_the_writer_did_is_not_deleted` for the
+    /// other half of that fact. The rotation that runs the deletion is the
+    /// ordinary one, triggered by the hour turning, so this is the production
+    /// path and not a special "prune now" entry point (there is none).
+    ///
+    /// The files are 20, 15, 8 and 2 days old rather than 20/15/14/2, because
+    /// `too_old` is a strict `<` against `now - 14 days` read from the *crate's*
+    /// clock: a file planted exactly on the cutoff would be kept or deleted
+    /// depending on which side of an hour tick the two readings fell, and a test
+    /// that can flake is a test that gets muted. The exact-cutoff semantics are
+    /// registered in the evidence as read-from-source instead. A full day of
+    /// separation is what makes the rest of the rows deterministic.
+    #[test]
+    fn history_past_the_window_is_deleted_and_history_inside_it_is_kept() {
+        let root = scratch("age");
+        let ancient = plant_archive(&root, 20, "twenty days\n");
+        let edge = plant_archive(&root, 15, "fifteen days\n");
+        let inside = plant_archive(&root, 8, "eight days\n");
+        let recent = plant_archive(&root, 2, "two days\n");
+        live_file_from_the_previous_hour(&root);
+
+        let mut writer = Writer::open(&root, shipped()).expect("open");
+        writer.write_line("this hour").expect("write");
+
+        assert!(!ancient.exists(), "20 days is out of a 14-day window");
+        assert!(!edge.exists(), "15 days is out of a 14-day window");
+        assert!(inside.exists(), "8 days is inside the window");
+        assert!(recent.exists(), "2 days is inside the window");
+        assert!(
+            root.join(LOG_FILE_NAME).exists(),
+            "the file being written is never history"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The other half of the age rule: it is a *window*, not a reset. A run that
+    /// deletes something must leave everything else alone.
+    #[test]
+    fn the_age_rule_deletes_nothing_when_everything_is_inside_the_window() {
+        let root = scratch("age-noop");
+        let plantings: Vec<PathBuf> = (1..=3)
+            .map(|days| plant_archive(&root, days, &format!("{days} days\n")))
+            .collect();
+        live_file_from_the_previous_hour(&root);
+
+        let mut writer = Writer::open(&root, shipped()).expect("open");
+        writer.write_line("this hour").expect("write");
+
+        for path in &plantings {
+            assert!(path.exists(), "{} must survive", path.display());
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The window is the *configured* one, not the shipped one.
+    ///
+    /// Two-way on purpose: with a 1-day window the 2-day file goes and the same
+    /// file stays under the shipped 14. A rule that ignored the configuration
+    /// would pass one of these and fail the other.
+    #[test]
+    fn the_window_is_the_configured_one() {
+        let short = Limits {
+            retention_days: 1,
             ..shipped()
         };
-        let mut writer = Writer::open(&root, limits, Frozen::on(2026, 9, 24)).expect("open");
+        for (label, limits, expect_deleted) in
+            [("short", short, true), ("shipped", shipped(), false)]
+        {
+            let root = scratch(label);
+            let two_days = plant_archive(&root, 2, "two days\n");
+            live_file_from_the_previous_hour(&root);
 
-        writer.write_line("aaaaaaaaa").expect("write"); // 10 bytes
-        writer.write_line("bbbbbbbbb").expect("write"); // 10 bytes: 20 with newlines
-        writer.write_line("ccccccccc").expect("write");
+            let mut writer = Writer::open(&root, limits).expect("open");
+            writer.write_line("this hour").expect("write");
 
-        let first = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
-        let second = std::fs::read_to_string(root.join("desktop-20260924-2.log")).expect("read");
-        std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(first, "aaaaaaaaa\nbbbbbbbbb\n");
-        assert_eq!(second, "ccccccccc\n");
+            assert_eq!(
+                !two_days.exists(),
+                expect_deleted,
+                "{label}: retention_days={} decides this file's fate",
+                limits.retention_days
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
-    /// The record that triggered the roll is in the *new* file, not lost and not
-    /// in the old one.
+    /// **Registered boundary, pinned from both sides so it is not mistaken for a
+    /// bug later.**
+    ///
+    /// `file-rotate` scans the directory for archives once, in `new()`, and the
+    /// deletion pass only ever walks what it scanned. So a file that arrives
+    /// *after* a writer was built is invisible to that writer for the rest of
+    /// its life -- and is picked up by the next one, because the next `new()`
+    /// scans again. Both halves are asserted here, in one directory, because
+    /// either one alone can be read as "the last hour is never cleaned up".
     #[test]
-    fn an_oversized_record_is_marked_in_the_file_it_lands_in() {
+    fn an_archive_is_deleted_by_the_next_writer_and_not_by_the_one_that_missed_it() {
+        let root = scratch("late-arrival");
+        live_file_from_the_previous_hour(&root);
+        let mut first = Writer::open(&root, shipped()).expect("open");
+
+        // Planted after `first` scanned: genuinely too old, and genuinely
+        // invisible to the writer that is about to rotate.
+        let late = plant_archive(&root, 20, "twenty days, planted late\n");
+        first.write_line("this hour").expect("write");
+        assert!(
+            late.exists(),
+            "a file the writer never saw at construction is not its to delete"
+        );
+
+        // The next launch scans again, and now the same file is history.
+        drop(first);
+        backdate(&root.join(LOG_FILE_NAME), 1);
+        let mut second = Writer::open(&root, shipped()).expect("open");
+        second.write_line("the hour after that").expect("write");
+
+        assert!(
+            !late.exists(),
+            "the next writer scans the directory again, so the same file is now \
+             inside its window rule"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A file that is not ours is not history either: another component's log, a
+    /// leftover probe, or a name from a version that spelled it differently.
+    ///
+    /// The rotation has to actually run for this to mean anything -- otherwise
+    /// the files survive because nothing happened -- so the live file is left by
+    /// a previous hour, as in the tests above.
+    #[test]
+    fn a_file_that_is_not_an_archive_is_left_alone() {
+        let root = scratch("not-ours");
+        std::fs::create_dir_all(&root).expect("scratch");
+        let foreign = [
+            ("notes.txt", "someone else's"),
+            ("agent.log.2026-01-01-00", "another component's"),
+            ("desktop.log.old", "no timestamp at all"),
+            (".wt-media-write-probe-1", "a write probe left behind"),
+        ];
+        for (name, contents) in foreign {
+            std::fs::write(root.join(name), contents).expect("plant");
+        }
+        live_file_from_the_previous_hour(&root);
+
+        let mut writer = Writer::open(&root, shipped()).expect("open");
+        writer.write_line("this hour").expect("write");
+
+        assert_eq!(
+            archives(&root).len(),
+            1,
+            "exactly one rotation happened, so the deletions below are a real pass \
+             over this directory"
+        );
+        for (name, _) in foreign {
+            assert!(root.join(name).exists(), "{name} must survive a prune");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- the one bound the crate does not have ----
+
+    #[test]
+    fn a_record_over_the_cap_is_marked_in_the_file_it_lands_in() {
         let root = scratch("truncate");
         let limits = Limits {
-            max_file_bytes: 40,
+            max_record_bytes: 40,
             ..shipped()
         };
-        let mut writer = Writer::open(&root, limits, Frozen::on(2026, 9, 24)).expect("open");
+        let mut writer = Writer::open(&root, limits).expect("open");
 
         writer.write_line(&"z".repeat(500)).expect("write");
 
-        let written = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
-        std::fs::remove_dir_all(&root).ok();
-
+        let written = read(&root.join(LOG_FILE_NAME));
         assert!(written.ends_with("\n"), "one line, newline-terminated");
         assert!(written.contains("truncate=true original_size=500"));
-        assert!(written.len() <= 40, "the file must stay within its cap: {}", written.len());
-    }
-
-    /// The other half of the budget: a file this writer closed today is history
-    /// it may reclaim, and the file it holds open is not. Without the roll being
-    /// recorded, today's files would be spared forever and the directory would
-    /// have no bound at all until the day turned — which is exactly the case a
-    /// runaway log produces.
-    #[test]
-    fn a_file_this_writer_rolled_today_is_reclaimable_under_pressure() {
-        let root = scratch("reclaim");
-        let limits = Limits {
-            max_file_bytes: 20,
-            total_bytes: 30,
-            ..shipped()
-        };
-        let mut writer = Writer::open(&root, limits, Frozen::on(2026, 9, 24)).expect("open");
-
-        for index in 1..=5 {
-            writer.write_line(&format!("record {index}")).expect("write");
-        }
-
-        let oldest = root.join("desktop-20260924-1.log").exists();
-        let middle = root.join("desktop-20260924-2.log").exists();
-        let open = writer.open_path().expect("a file is open").to_path_buf();
-        let newest = std::fs::read_to_string(&open).expect("read");
-        std::fs::remove_dir_all(&root).ok();
-
+        assert_eq!(written.lines().count(), 1, "a cut record is still one line");
         assert!(
-            !oldest,
-            "the oldest file this writer rolled is what the budget takes"
+            archives(&root).is_empty(),
+            "an oversized record is cut, not rolled: rolling it would manufacture \
+             a file per record and never make progress"
         );
-        assert!(middle, "and it stops as soon as the total fits");
-        assert!(
-            newest.contains("record 5"),
-            "the open file still holds the newest record: {newest:?}"
-        );
-    }
-
-    /// The startup prune, end to end: an expired file is gone before anything is
-    /// written, and a file inside the window is still there.
-    #[test]
-    fn opening_the_writer_prunes_what_is_expired() {
-        let root = scratch("prune-startup");
-        std::fs::create_dir_all(&root).expect("scratch");
-        std::fs::write(root.join("desktop-19990101-1.log"), b"ancient").expect("plant");
-        std::fs::write(root.join("desktop-20260924-1.log"), b"recent").expect("plant");
-
-        let _writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
-
-        let ancient = root.join("desktop-19990101-1.log").exists();
-        let recent = root.join("desktop-20260924-1.log").exists();
         std::fs::remove_dir_all(&root).ok();
-
-        assert!(!ancient, "a file from 1999 is out of every window");
-        assert!(recent, "a file from today is not");
     }
 
-    /// The ruling's other half, end to end: the file being written survives a
-    /// prune that deletes everything else around it.
+    /// The shipped cap is not the test's, so the shipped one is asked about
+    /// directly: a real record must go in untouched.
     #[test]
-    fn a_record_written_after_a_prune_is_still_there() {
-        let root = scratch("prune-keeps-open");
-        let limits = Limits {
-            max_file_bytes: 20,
-            total_bytes: 60,
-            ..shipped()
-        };
-        let mut writer = Writer::open(&root, limits, Frozen::on(2026, 9, 24)).expect("open");
+    fn an_ordinary_record_is_never_marked_under_the_shipped_cap() {
+        let root = scratch("under-cap");
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
-        for index in 0..6 {
-            writer.write_line(&format!("record {index}")).expect("write");
-        }
+        let line = format!("desktop.startup ready {}", "x".repeat(4_000));
+        writer.write_line(&line).expect("write");
 
-        let open = writer.open_path().expect("a file is open").to_path_buf();
-        let contents = std::fs::read_to_string(&open).expect("the open file must exist");
+        let written = read(&root.join(LOG_FILE_NAME));
+        assert!(!written.contains("truncate=true"));
+        assert_eq!(written, format!("{line}\n"));
         std::fs::remove_dir_all(&root).ok();
-
-        assert!(
-            contents.contains("record 5"),
-            "the newest record is in the file the writer holds: {contents:?}"
-        );
     }
 
+    // ---- failures are values, never panics ----
+
+    /// The ruling 五 at the writer: a directory that cannot be used is an `Err`
+    /// naming it, not a panic and not a silent sink.
+    ///
+    /// A file where the directory should be, rather than a mode bit: this
+    /// behaves the same for a root user and in CI (`paths`' precedent). The
+    /// crate *panics* on this path (`create_dir_all(...).expect("create dir")`),
+    /// which is exactly why the check is ours.
     #[test]
-    fn a_directory_that_cannot_be_created_is_an_error_rather_than_a_panic() {
+    fn an_unusable_directory_is_an_error_rather_than_a_panic() {
         let root = scratch("occupied");
         std::fs::create_dir_all(&root).expect("scratch");
-        // A file where the directory should be: reachable for a root user and in
-        // CI, unlike a mode bit (`paths`' precedent).
         let occupied = root.join("logs");
         std::fs::write(&occupied, b"not a directory").expect("occupy the path");
 
-        // Opening is lazy — no file is claimed until there is a record — so an
-        // unusable directory shows up at the first record rather than at startup.
-        let mut writer = Writer::open(&occupied, shipped(), Frozen::on(2026, 9, 24))
-            .expect("nothing is claimed yet, so nothing can fail yet");
-        let error = writer.write_line("anything").expect_err("must not succeed");
+        let error = refused(&occupied);
 
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(error.path, occupied, "the error names the directory it could not use");
+        assert_eq!(
+            error.path, occupied,
+            "the error names the directory it could not use"
+        );
         // The *kind* is asserted, not just "some error", and the value is the
         // one measured for `create_dir_all` on a path occupied by a file (T-11
         // measured the same kind for the same call, on this machine).
@@ -1339,46 +864,34 @@ mod tests {
             std::io::ErrorKind::AlreadyExists,
             "the error names the real cause, not a downstream one"
         );
-        assert_eq!(writer.open_path(), None, "and no file was opened");
     }
 
+    /// The crate hides one failure: with no open file it reports every write as
+    /// successful and drops the bytes. `Writer::open` asks, so a live path
+    /// occupied by a directory is refused while there is still a caller to tell.
     #[test]
-    fn a_writer_that_cannot_list_its_directory_still_writes() {
-        let root = scratch("no-list");
-        // The directory does not exist yet, so the startup prune cannot list it.
-        // That must not be fatal: a log directory that cannot be read is not a
-        // reason for the app to stop (the ruling 五).
-        let mut writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
+    fn a_live_path_that_is_a_directory_is_an_error_rather_than_a_silent_sink() {
+        let root = scratch("live-is-a-dir");
+        std::fs::create_dir_all(root.join(LOG_FILE_NAME)).expect("occupy the live name");
 
-        writer.write_line("still works").expect("write");
+        let error = refused(&root);
 
-        let written = std::fs::read_to_string(root.join("desktop-20260924-1.log")).expect("read");
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(written, "still works\n");
+        assert_eq!(error.path, root.join(LOG_FILE_NAME), "{error}");
+        assert_eq!(error.reason.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
-    /// What the budget is allowed to see. A file that is not ours is not
-    /// history, and deleting it would be deleting someone else's file.
+    /// A directory that does not exist yet is created, not refused: the ordinary
+    /// first launch of a build whose log directory was never made by hand.
     #[test]
-    fn the_listing_holds_our_files_and_nothing_else() {
-        let root = scratch("list");
-        std::fs::create_dir_all(&root).expect("scratch");
-        std::fs::write(root.join("desktop-20260924-1.log"), b"ours").expect("plant");
-        std::fs::write(root.join("notes.txt"), b"someone else's").expect("plant");
-        std::fs::write(root.join("agent-20260924-1.log"), b"another component's").expect("plant");
-        // An old shape from a version that spelled the name differently: also
-        // not provably history.
-        std::fs::write(root.join("desktop.log"), b"older ours").expect("plant");
-        let writer = Writer::open(&root, shipped(), Frozen::on(2026, 9, 24)).expect("open");
+    fn a_directory_that_does_not_exist_yet_is_created() {
+        let root = scratch("create-me").join("nested");
 
-        let listed = writer.list().expect("list");
-        std::fs::remove_dir_all(&root).ok();
+        let mut writer = Writer::open(&root, shipped()).expect("open");
 
-        let names: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, vec!["desktop-20260924-1.log"]);
-        assert_eq!(listed[0].bytes, 4);
-        assert_eq!(listed[0].index, 1);
-        assert_eq!(listed[0].date, date(2026, 9, 24));
+        writer.write_line("first ever record").expect("write");
+        assert_eq!(read(&root.join(LOG_FILE_NAME)), "first ever record\n");
+        std::fs::remove_dir_all(root.parent().expect("parent")).ok();
     }
 }

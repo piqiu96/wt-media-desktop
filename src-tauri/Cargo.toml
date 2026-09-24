@@ -35,8 +35,27 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # (tracing-subscriber, sharded-slab, thread_local, lazy_static) and
 # `nu-ansi-term`/`matchers`/`tracing-log` at zero.
 #
-# No `tracing-appender`: its rolling writers split by date only, and this CHG
-# owes three things they cannot express -- a 20MB cap per file, a byte budget
-# across the directory, and a truncation marker on a single over-long record.
-# The writer is ours (see `logging::rolling`) either way.
+# No `tracing-appender`: it has **no rename-on-roll**. `Inner::new` opens the
+# dated file directly, so `Rotation::HOURLY` + `prefix("app.log")` yields
+# `app.log.2026-09-24-19` while `Rotation::NEVER` yields a stable `app.log` --
+# and the two cannot be combined. CHG-C's shape needs both halves at once.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+# The rotator (CHG-20260823-058 T-02, the user's ruling D-02). It is the one
+# crate that gives all four things this shape needs: a stable live `desktop.log`,
+# rename-on-roll to `desktop.log.<YYYY-MM-DD-HH>`, an hourly trigger, and
+# **age-based deletion** (`FileLimit::Age`) -- the last is what no other
+# off-the-shelf rotator offers, and it is why nothing is left to hand-roll.
+# Registered exception: its doc says the base name may not contain `.`, and ours
+# does. Measured to work (`scan_suffixes` strips the `{base}.` prefix rather than
+# splitting on the dot), but that is an upgrade risk: re-run
+# `evidence/task-02-log-rotation.md`'s probe after any version bump.
+file-rotate = "0.8"
+# `FileLimit::Age` takes chrono's `Duration` and the crate does not re-export it,
+# so this is a direct dependency rather than a transitive one. It also supplies
+# the local-time stamp for a record (`logging::backend`), which is the same clock
+# the archive names are built from.
+chrono = "0.4"
+# One window, one app (the ruling D-04). Not a nicety: a stable `desktop.log`
+# means two instances share one live file, and the crate renames it out from
+# under whichever handle is still writing.
+tauri-plugin-single-instance = "2"
