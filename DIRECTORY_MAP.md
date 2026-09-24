@@ -14,7 +14,8 @@
 | `src-tauri/src/paths.rs` | 配置文件定位：打包版看资源目录，开发树看 crate `resources/`，两条路都以编译进二进制的 `PRODUCTION_TOML` 兜底 | 改配置定位 |
 | `src-tauri/src/token.rs` | 每次启动生成的本机运行 token。**无 `Debug`/`Display`/`Serialize`**——这是它作为类型而非 `String` 存在的全部理由 | 改本地鉴权 |
 | `src-tauri/src/state.rs` | Tauri 管理的原生状态（绑定凭据、sidecar 句柄）。**不越过 IPC 到 Vue** | 改原生状态 |
-| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback` | 改发布默认值 |
+| `src-tauri/src/logging/` | Desktop 自己的日志（CHG-057）。`setup.rs` 是**唯一**装配入口（`plan()` 决定一切、`install(plan, secrets)` 只装配；在 `main.rs` 的 CSP 注入与启动摘要之间调用）；`paths.rs` 解目录（Production `~/Library/Logs/WTMedia/Desktop`，Development `<manifest>/.local/logs`）；`rolling.rs` 按日期与 20MB 分档、按天与总量删、单条截断标 `truncate=true original_size=<n>`；`targets.rs` 的 `OWNED_TARGETS` 恰 3 个（`agent.supervisor`/`desktop.startup`/`webview`，外来 target 一律不进文件）；`redact.rs` 是**唯一**脱敏落点（在 sink，记录成形后、离开进程前） | 改日志目录、级别、轮转、脱敏、target |
+| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback`/`logging.*`（`level = "auto"`、20MB/14 天/100MB——出货值由测试与 `rolling::SHIPPED` 逐字对齐） | 改发布默认值 |
 | `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、devUrl 5174、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
 | `src-tauri/build.rs`、`src-tauri/gen/`、`src-tauri/icons/` | 构建脚本、生成内容、图标 | 改打包资源 |
 
@@ -22,7 +23,7 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（18 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`logging.rs`、`public_config.rs` | 改命令接口 |
+| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（18 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关 | 改命令接口 |
 | `src-tauri/src/dto/` | 按消费方分组的 serde 结构体。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象 | 改命令载荷 |
 | `src-tauri/src/http/` | 两个**分开的**客户端类型：`local_agent.rs`（回环、带运行 token）、`cloud.rs`（地址与凭据都是逐请求事实）。分开是因为可信级别不同——合在一起会让「这次调用带没带本机 token」无法从类型上回答 | 改出站客户端 |
 | `src-tauri/src/preflight.rs` | 敏感流程共用的 Cloud 预检与守卫。原先在 account/cookie 各抄一份；错误文案由 `tests::message_parity` 钉住 | 改预检、改错误文案 |
@@ -40,7 +41,7 @@
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
 | `src-tauri/src/sidecar/mod.rs` | sidecar 的启停。两条 spawn 路径都在这里，且**注入同一组四个环境变量**（`WT_MEDIA_LOCAL_API_HOST`/`_PORT`、`WT_MEDIA_AGENT_RUNTIME_TOKEN`、`WT_MEDIA_AGENT_DATA_DIR`）。返回的标签（`sidecar_started`/`started`/`already_running`/`not_running`）逐字保持，Vue 按它分支 | 改 Sidecar 启停 |
-| `src-tauri/src/sidecar/drain.rs` | 保留 sidecar 的输出（原先绑给 `_events` 再不消费，等于全丢）。**只在内存环形缓冲，不落盘/不轮转/不脱敏**——脱敏归 CHG-057 | 改侧车日志处理 |
+| `src-tauri/src/sidecar/drain.rs` | 保留 sidecar 的输出（原先绑给 `_events` 再不消费，等于全丢）。缓冲仍是**内存环形 200 行**，Agent 的 stdout **不落盘、不轮转**；但它的**去向已经分层**（CHG-057 T-16）：进程存活期间的普通输出**一条记录都不产生**（AC-09 的口径），退出时由 `report_exit` 发**恰一条** `agent.supervisor` 记录并带**末 20 行**尾，读失败（`CommandEvent::Error`）另发一条。那两条记录会落盘、会被轮转、会在 sink 里脱敏——脱敏落点在 `src-tauri/src/logging/redact.rs`，不在本文件 | 改侧车日志处理 |
 | `src-tauri/src/local_agent/` | 只余一个纯契约类型 `BoundNodeFacts`（绑定后交给 Vue 的非敏感事实） | 改绑定返回 |
 | `src-tauri/binaries/` | Sidecar 二进制组件（当前含 `wt-media-agent-aarch64-apple-darwin`） | 改 Sidecar 集成 |
 
