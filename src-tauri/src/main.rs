@@ -25,6 +25,7 @@ mod updater;
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
 use std::path::PathBuf;
+use tauri::Manager;
 use token::RuntimeToken;
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
@@ -73,37 +74,53 @@ fn main() {
     // Generated before logging is installed because the sink needs it: the token
     // is named by no key and matches no shape rule, so the only way it can be
     // kept out of a log line is for the mask to hold the value itself.
+    //
+    // The value is copied out here rather than read at the sink, because the
+    // builder below hands the token itself to the client and the sink is only
+    // installed after the builder's plugin phase has run.
     let token = RuntimeToken::generate();
+    let secret = token.expose().to_string();
 
-    // Logging comes up before anything can want to say anything, so the launch
-    // summary below is the **first record** in `desktop.log`. The environment is
-    // the build's, not `startup.config.environment`'s: the two disagree on every
-    // ordinary debug launch (the shipped file says production and `load_with`
-    // takes the stricter of the two), and the directory has to follow the build
-    // or the development layout would never be used. Both are named in the
-    // summary, which is the line a reader starts from.
-    let plan = logging::setup::plan(
-        &startup.config,
-        bootstrap::build_environment(),
-        // `HOME` is read here and injected downward: `logging::paths` never
-        // touches the environment, so its layout rules stay askable.
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-    );
-    let installed = logging::setup::install(plan, vec![token.expose().to_string()]);
-    let summary = format!("{}；{}", startup.summary(), installed.summary());
-    if installed.installed {
-        // stderr as before: `assemble` always attaches the terminal layer, and
-        // the file is where the same line becomes a record.
-        tracing::info!(target: "desktop.startup", "{summary}");
-    } else {
-        // A subscriber was already installed, so the record would go nowhere.
-        // The summary is the one line a launch must not lose, so it falls back
-        // to the plain write this replaces.
-        eprintln!("[wt-media-desktop] {summary}");
-    }
-
-    tauri::Builder::default()
+    // ---- The builder, up to and including its plugin phase ----
+    //
+    // This is a `build` and not a `run`, and the single-instance guard below is
+    // the reason (CHG-058 §6 D-04). Plugins are initialised inside
+    // `Builder::build` — tauri 2.11.5 `app.rs:2440`, `initialize_plugins` — and
+    // this plugin answers a second launch with `std::process::exit(0)` from its
+    // own `setup`. So a one-call `Builder::run(context)` would let a *doomed*
+    // process get all the way to the logging sink below and write a record
+    // before the guard ever ran, which is precisely the damage the guard is
+    // here to prevent:
+    //
+    // `desktop.log` is a stable name that `file-rotate` renames on every hourly
+    // roll, on its documented assumption that no other process moves files in
+    // the log directory. A second instance breaks that assumption badly — it
+    // appends to the same live file, and when its write lands in an hour other
+    // than the file's mtime it *rolls*: it renames `desktop.log` to the archive
+    // and creates a fresh one, while the first instance's handle still points at
+    // the inode that just moved. The first instance then keeps writing real
+    // records into an archive, and the file named `desktop.log` holds one stray
+    // line. There is no multi-instance scenario we want: the guard forbids a bad
+    // state, it does not enable a capability.
+    //
+    // Splitting the chain puts the guard in front of everything that touches the
+    // log directory. `run`'s own doc names the split as the supported way to get
+    // at this seam ("for more flexibility, consider using those functions
+    // manually"). The residual race is the plugin's and is its own: two launches
+    // inside the same instant can both find no socket and both claim singleton
+    // (`macos.rs` says as much). Sequential launches — what a user does — are
+    // the case this covers.
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The second launch raises the running window instead of starting a
+            // second copy. A window the user has closed is destroyed rather than
+            // hidden, so `get_webview_window` finds nothing and there is nothing
+            // to raise.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(LocalAgentClient::new(&startup.config, token))
         .manage(CloudClient::new(&startup.config))
         // The config is managed as its own state as well as being consumed
@@ -151,6 +168,43 @@ fn main() {
             commands::public_config::get_public_config,
         ])
         .plugin(tauri_plugin_shell::init())
-        .run(context)
-        .expect("error while running wt-media-desktop tauri application");
+        .build(context)
+        .expect("error while building wt-media-desktop tauri application");
+
+    // ---- Past the guard: this process is the only one ----
+    //
+    // Nothing has been logged before this point and nothing wants to: the
+    // config layer reports through the summary it returns, and there is no
+    // `log`-crate bridge for Tauri's own internals to arrive through. So the
+    // launch summary below is still the **first record** in `desktop.log` —
+    // now from a process that is also the only one writing that file.
+    //
+    // The environment in the plan is the build's, not
+    // `startup.config.environment`'s: the two disagree on every ordinary debug
+    // launch (the shipped file says production and `load_with` takes the
+    // stricter of the two), and the directory has to follow the build or the
+    // development layout would never be used. Both are named in the summary,
+    // which is the line a reader starts from.
+    let plan = logging::setup::plan(
+        &startup.config,
+        bootstrap::build_environment(),
+        // `HOME` is read here and injected downward: `logging::paths` never
+        // touches the environment, so its layout rules stay askable.
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
+    let installed = logging::setup::install(plan, vec![secret]);
+    let summary = format!("{}；{}", startup.summary(), installed.summary());
+    if installed.installed {
+        // stderr as before: `assemble` always attaches the terminal layer, and
+        // the file is where the same line becomes a record.
+        tracing::info!(target: "desktop.startup", "{summary}");
+    } else {
+        // A subscriber was already installed, so the record would go nowhere.
+        // The summary is the one line a launch must not lose, so it falls back
+        // to the plain write this replaces.
+        eprintln!("[wt-media-desktop] {summary}");
+    }
+
+    app.run(|_app, _event| {});
 }
