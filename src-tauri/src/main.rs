@@ -201,6 +201,15 @@ fn main() {
             commands::cleanup::local_log_cleanup,
             // T-07's export, appended for the same reason as the five above.
             commands::diagnostic::local_diagnostic_export,
+            // T-08's three openings for the 本机设置 page and the log viewer,
+            // appended for the same reason as the eight above: `local_settings_set`
+            // takes the operator's choice, `local_settings_get` reads it back, and
+            // `local_open_place` shows one of this app's own folders in the file
+            // manager. None of them takes a path from the page; the log viewer's
+            // 「打开日志文件夹」 passes a place label, which is resolved here.
+            commands::settings::local_settings_get,
+            commands::settings::local_settings_set,
+            commands::reveal::local_open_place,
         ])
         .plugin(tauri_plugin_shell::init())
         .build(context)

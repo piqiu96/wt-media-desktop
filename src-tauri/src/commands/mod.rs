@@ -10,5 +10,7 @@ pub mod cleanup;
 pub mod diagnostic;
 pub mod profile;
 pub mod public_config;
+pub mod reveal;
+pub mod settings;
 pub mod storage;
 pub mod webview;

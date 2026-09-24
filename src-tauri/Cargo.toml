@@ -84,3 +84,12 @@ flate2 = "1"
 # what `cargo` requires before they can be named in this crate's own code.
 sha2 = "0.10"
 hex = "0.4"
+# Opening one of this app's own folders in the file manager (CHG-058 T-08, the
+# log viewer's 「打开日志文件夹」 and the settings page's way to reach an
+# unreadable `settings.toml`). Already in the lockfile as a dependency of
+# `tauri-plugin-shell`, so this adds no new crate to the graph -- it makes an
+# existing one direct, which is what `cargo` requires before our own code may
+# name it. Chosen over a `match` on three platforms' openers: the differences
+# (`open`, `explorer`, `xdg-open`, and the quoting each needs) are exactly what a
+# wheel is for, and this machine can only ever test one arm of such a `match`.
+open = "5"

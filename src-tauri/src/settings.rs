@@ -55,6 +55,14 @@
 //! is not supposed to hold one — into a log. Only the span-free message is kept,
 //! and `an_error_never_echoes_the_files_contents` fails if that is undone.
 //!
+//! ## One rule that is *not* the writer's
+//!
+//! [`check_save_dir`] says whether a directory a person picked is one a task
+//! could write into. [`save`] does not call it, on purpose: a validator inside
+//! the writer would make a temporarily unmounted disk mean 「设置存不下来」. The
+//! rule sits here so it has one home and one test; the command that can say
+//! something to a person is what enforces it.
+//!
 //! Windows coverage is inherited from `app_paths` and absent for the same reason.
 
 use serde::{Deserialize, Serialize};
@@ -132,6 +140,54 @@ pub fn temp_path(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_os_string();
     name.push(TEMP_SUFFIX);
     PathBuf::from(name)
+}
+
+/// Why a directory the user picked is not one a task could write into.
+///
+/// The rule lives here, beside the field it is about, and is called by the
+/// command rather than by [`save`]. That split is deliberate: `save`'s job is to
+/// keep what the user chose, and a validator inside the writer would turn 「这块
+/// 盘现在没挂载」into 「设置根本存不下来」— which is the failure T-04 registered as
+/// boundary 4. So the writer stays permissive and the caller, which can say
+/// something to a person, is the one that refuses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SaveDirProblem {
+    /// A relative path resolves against this process's working directory, which
+    /// is not a place a task's output belongs and not the same place twice.
+    Relative,
+    /// Nothing is there, or something that is not a directory is.
+    NotADirectory,
+}
+
+impl SaveDirProblem {
+    /// The sentence the page shows. It names the rule the value broke.
+    pub const fn message(self) -> &'static str {
+        match self {
+            SaveDirProblem::Relative => "请选择绝对路径（例如 /Users/…/Movies/WTMedia）",
+            SaveDirProblem::NotADirectory => "这个位置现在不是一个目录：请先创建它，或换一个位置",
+        }
+    }
+}
+
+/// Whether a chosen save directory is one a task could write into.
+///
+/// Existence is checked; **createdness deliberately is not**. Creating the
+/// directory here would mean a mistyped path leaves an empty tree wherever the
+/// user happened to be pointing, and the honest place for that tree to appear is
+/// wherever they point at on purpose.
+///
+/// A directory that exists but cannot be written to **passes**: probing it would
+/// write a file into a place the user picked to keep their own material, as a
+/// side effect of opening a settings page. A task that later fails to write there
+/// reports the permission itself, where the failure actually happened.
+pub fn check_save_dir(path: &Path) -> Result<(), SaveDirProblem> {
+    if !path.is_absolute() {
+        return Err(SaveDirProblem::Relative);
+    }
+    if !path.is_dir() {
+        return Err(SaveDirProblem::NotADirectory);
+    }
+    Ok(())
 }
 
 /// Why a settings file could not be used. The path is named; the contents never.
@@ -813,5 +869,91 @@ mod tests {
         // `cache` would sit inside the one directory tree the cleanup command is
         // allowed to empty.
         assert_ne!(path(&installed.data), path(&installed.cache));
+    }
+
+    /// The picker's rule, in both directions, with the accepting case **first**.
+    ///
+    /// The positive control is the load-bearing half: two refusals on their own
+    /// would also pass for a checker that refuses everything, which is a page
+    /// that can never save a choice. It runs on a real directory this test made,
+    /// so "absolute and exists" is the case a person actually produces.
+    #[test]
+    fn an_existing_absolute_directory_is_accepted() {
+        let root = scratch("accepted");
+        let result = check_save_dir(&root);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            result,
+            Ok(()),
+            "a directory this test just made was refused"
+        );
+    }
+
+    /// A relative path is refused, whatever it happens to resolve to here.
+    ///
+    /// Both spellings a person can produce: a bare name, and one that climbs.
+    /// Neither is judged by whether something exists at the joined path — a
+    /// relative path that *does* exist is still refused, which is why the test
+    /// uses one (`"."` and this crate's own directory) rather than only names
+    /// that are absent.
+    #[test]
+    fn a_relative_save_dir_is_refused() {
+        for relative in [".", "..", "Movies/WTMedia", "./build"] {
+            assert_eq!(
+                check_save_dir(Path::new(relative)),
+                Err(SaveDirProblem::Relative),
+                "{relative:?}"
+            );
+        }
+        // The same directory, named absolutely, is accepted: what is refused is
+        // the relative *spelling*, not the place.
+        let here = std::env::current_dir().expect("a working directory");
+        assert_eq!(check_save_dir(&here), Ok(()), "{here:?}");
+    }
+
+    /// A path that names no directory is refused — absent, and a file.
+    ///
+    /// The two are one variant because one sentence covers both, and the test
+    /// asserts both so that "is not a directory" is not quietly an "is not
+    /// there": a regular file is the case a person reaches by picking the wrong
+    /// thing in a picker that showed files.
+    #[test]
+    fn a_path_that_is_not_a_directory_is_refused() {
+        let root = scratch("nondir");
+
+        let missing = root.join("not-yet");
+        assert_eq!(
+            check_save_dir(&missing),
+            Err(SaveDirProblem::NotADirectory),
+            "an absent path must be refused rather than created"
+        );
+        assert!(!missing.exists(), "the checker must not create it");
+
+        let file = root.join("a-file");
+        std::fs::write(&file, b"x").expect("write a file");
+        assert_eq!(check_save_dir(&file), Err(SaveDirProblem::NotADirectory));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every refusal has a sentence, and the sentences are not the same one.
+    ///
+    /// A page that showed one message for both would tell a person who picked a
+    /// file that their path was relative.
+    #[test]
+    fn each_problem_says_something_of_its_own() {
+        let problems = [SaveDirProblem::Relative, SaveDirProblem::NotADirectory];
+        let messages: Vec<&str> = problems.iter().map(|problem| problem.message()).collect();
+        assert_eq!(
+            messages
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            problems.len(),
+            "{messages:?}"
+        );
+        for message in messages {
+            assert!(!message.is_empty(), "an empty message is not a message");
+        }
     }
 }

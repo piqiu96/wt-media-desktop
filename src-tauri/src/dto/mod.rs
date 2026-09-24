@@ -5,7 +5,8 @@
 //! configuration the page may see), `storage` (the machine's free space, what
 //! this app occupies, and the log files it can read back), `cleanup` (what a
 //! cleanup did, including what it deliberately did not do), `diagnostic` (what a
-//! support bundle holds, and what it left out).
+//! support bundle holds, and what it left out), `settings` (the operator's own
+//! choice of save location, as the 本机设置 page reads and writes it).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -19,6 +20,7 @@ mod cleanup;
 mod config;
 mod diagnostic;
 mod profile;
+mod settings;
 mod storage;
 
 pub use account::*;
@@ -28,6 +30,7 @@ pub use cleanup::*;
 pub use config::*;
 pub use diagnostic::*;
 pub use profile::*;
+pub use settings::*;
 pub use storage::*;
 
 use serde::Deserialize;

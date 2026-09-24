@@ -5265,6 +5265,7 @@ dependencies = [
  "file-rotate",
  "flate2",
  "hex",
+ "open",
  "reqwest 0.12.28",
  "rustix",
  "serde",
