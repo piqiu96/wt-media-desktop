@@ -25,3 +25,5 @@ pub mod redact;
 pub mod rolling;
 pub mod setup;
 pub mod targets;
+#[cfg(test)]
+pub(crate) mod test_support;

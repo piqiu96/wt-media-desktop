@@ -316,83 +316,14 @@ impl Drop for LineSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::time::Duration;
     use tracing::level_filters::LevelFilter;
     use tracing::subscriber::with_default;
     use tracing::Level;
 
+    use crate::logging::test_support::{clock, options, scratch, written};
+
     use crate::config::Environment;
-
-    /// A clock that does not move, so a stamp can be asserted to the second.
-    struct Fixed(SystemTime);
-
-    impl rolling::Clock for Fixed {
-        fn now(&self) -> SystemTime {
-            self.0
-        }
-    }
-
-    /// 2026-09-24T10:11:12Z, so the expected line can be written out in full.
-    fn clock() -> Arc<dyn rolling::Clock + Send + Sync> {
-        let date = rolling::Date::from_ymd(2026, 9, 24).expect("a real date");
-        let seconds = date.days() as u64 * 86_400 + 10 * 3_600 + 11 * 60 + 12;
-        Arc::new(Fixed(UNIX_EPOCH + Duration::from_secs(seconds)))
-    }
-
-    /// A path of this test's own, removed when the guard drops.
-    struct Scratch(PathBuf);
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).ok();
-        }
-    }
-
-    fn scratch(label: &str) -> Scratch {
-        let path = std::env::temp_dir().join(format!(
-            "wt-media-backend-{}-{}-{}",
-            label,
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|elapsed| elapsed.subsec_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::remove_dir_all(&path).ok();
-        Scratch(path)
-    }
-
-    fn options(directory: Option<&Path>) -> Options {
-        Options {
-            levels: Levels::shipped(Environment::Development),
-            secrets: Vec::new(),
-            directory: directory.map(Path::to_path_buf),
-            limits: rolling::Limits::SHIPPED,
-            clock: clock(),
-        }
-    }
-
-    /// Everything the file layer has written, in order. The writer flushes per
-    /// record, so the file is readable while the subscriber is still alive. A
-    /// directory that was never created reads as no records, which is what a
-    /// launch that logged nothing produces.
-    fn written(directory: &Path) -> String {
-        let mut text = String::new();
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return text;
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "log"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            text.push_str(&std::fs::read_to_string(&path).expect("the log file"));
-        }
-        text
-    }
+    use std::time::Duration;
 
     /// The targets emitted below, one literal each: `target:` is expanded into
     /// a constant, so the list cannot be iterated at the call site. The

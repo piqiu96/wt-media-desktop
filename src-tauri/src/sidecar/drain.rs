@@ -6,14 +6,18 @@
 //! failed a few seconds later. This keeps the last [`CAPACITY`] lines in memory
 //! and reports the tail when the process exits.
 //!
-//! In memory only — nothing is written to disk, nothing is rotated, nothing is
-//! redacted. Redaction belongs to CHG-057, and this is deliberately not a
-//! logger.
+//! Where the lines go is the whole point of the split (ruling 八 / D-07): the
+//! Agent's own records belong to the Agent's own log, so what arrives here is
+//! **buffered and not logged**, with two deliberate exceptions — a read failure,
+//! which is Desktop's problem and not the Agent's, and the exit report, which is
+//! Desktop managing the process. Put the ordinary case in the log and every line
+//! the Agent writes appears twice, burying the lifecycle records that are
+//! Desktop's business under the Agent's own output.
 //!
 //! What this does **not** cover:
 //!
 //! - The buffer dies with Desktop. A sidecar that outlives Desktop leaves
-//!   nothing behind.
+//!   nothing behind on its way out.
 //! - The shell plugin splits output on newlines rather than into one line per
 //!   event, so a single very long line can arrive as several entries and count
 //!   against the capacity more than once.
@@ -97,8 +101,67 @@ fn kept(bytes: &[u8]) -> Option<String> {
     Some(line.to_string())
 }
 
-/// Follow a sidecar's output until it exits, then report the tail on Desktop's
-/// own stderr.
+/// One command event, reduced to what this module actually acts on.
+///
+/// The reduction exists so the decisions below are reachable from a test:
+/// `CommandEvent` is `#[non_exhaustive]`, so a test cannot build one, and
+/// everything inside `follow` would otherwise only be observable by running a
+/// real sidecar. What stays there is the three-arm match and nothing else.
+enum Heard {
+    /// A line the sidecar printed.
+    Line(String),
+    /// The event stream itself failed.
+    Failure(String),
+    /// The process is gone.
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+}
+
+/// What one event means, or `None` for one this module ignores.
+fn classify(event: CommandEvent) -> Option<Heard> {
+    match event {
+        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+            kept(&bytes).map(Heard::Line)
+        }
+        CommandEvent::Error(reason) => Some(Heard::Failure(reason)),
+        CommandEvent::Terminated(TerminatedPayload { code, signal }) => {
+            Some(Heard::Exited { code, signal })
+        }
+        // `CommandEvent` is `#[non_exhaustive]`: a variant added by a future
+        // plugin version must not break this build.
+        _ => None,
+    }
+}
+
+/// Act on one event; `true` when the sidecar is done and the loop can end.
+fn heard(event: Heard, log: &SidecarLog, path: &str) -> bool {
+    match event {
+        // The ordinary case, and the one the ruling is about: buffered, and
+        // **not** logged. This is where D-07 and AC-09 are kept.
+        Heard::Line(line) => {
+            push(log, line);
+            false
+        }
+        Heard::Failure(reason) => {
+            let line = format!("[读取 sidecar 输出失败] {reason}");
+            push(log, line.clone());
+            // Also a record, unlike an ordinary line: a read failure is
+            // Desktop's problem, not the Agent's, and one that happens while the
+            // process is still alive would otherwise stay invisible until it
+            // exits — which it may never do.
+            tracing::warn!(target: "agent.supervisor", "{line}");
+            false
+        }
+        Heard::Exited { code, signal } => {
+            report_exit(path, code, signal, log);
+            true
+        }
+    }
+}
+
+/// Follow a sidecar's output until it exits, then report the tail as a record.
 ///
 /// Runs on a detached task: the spawn path is synchronous and must return the
 /// child immediately, while reading events is not.
@@ -106,22 +169,10 @@ pub fn follow(events: Receiver<CommandEvent>, log: SidecarLog, path: &'static st
     tauri::async_runtime::spawn(async move {
         let mut events = events;
         while let Some(event) = events.recv().await {
-            match event {
-                CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-                    if let Some(line) = kept(&bytes) {
-                        push(&log, line);
-                    }
-                }
-                CommandEvent::Error(reason) => {
-                    push(&log, format!("[读取 sidecar 输出失败] {reason}"));
-                }
-                CommandEvent::Terminated(TerminatedPayload { code, signal }) => {
-                    report_exit(path, code, signal, &log);
+            if let Some(event) = classify(event) {
+                if heard(event, &log, path) {
                     return;
                 }
-                // `CommandEvent` is `#[non_exhaustive]`: a variant added by a
-                // future plugin version must not break this build.
-                _ => {}
             }
         }
     });
@@ -129,7 +180,12 @@ pub fn follow(events: Receiver<CommandEvent>, log: SidecarLog, path: &'static st
 
 /// The text of the exit report.
 ///
-/// Split from printing it so the wording is testable — `eprintln!` is not.
+/// Split from emitting it so the wording is testable.
+///
+/// The wording is unchanged from the `eprintln!` this replaces, `[wt-media-desktop]`
+/// prefix and all: three tests pin it to the character, and a reader grepping
+/// for it is grepping for the same string as before. What changed is where it
+/// goes — the record's own stamp, level and target now frame it.
 ///
 /// It reports both how many lines were **held** and how many are shown. The two
 /// differ exactly when the buffer overflowed, and that difference is a fact
@@ -154,13 +210,29 @@ pub fn exit_report(path: &str, code: Option<i32>, signal: Option<i32>, log: &Sid
     out
 }
 
+/// Say the sidecar is gone, once, as Desktop's own record.
+///
+/// The tail is the one place the last [`TAIL_ON_EXIT`] lines of the Agent's
+/// output reach Desktop's log (ruling 五): a command error carries the same
+/// window back to the caller, and the health path deliberately does not put it
+/// in a record at all. One exit, one record, so a reader counting them gets
+/// one per sidecar rather than one per health poll.
+///
+/// `single_line` in the sink turns the report's newlines into `\n` escapes, so
+/// the whole report stays a single record however much the sidecar printed.
 fn report_exit(path: &str, code: Option<i32>, signal: Option<i32>, log: &SidecarLog) {
-    eprintln!("{}", exit_report(path, code, signal, log));
+    tracing::info!(
+        target: "agent.supervisor",
+        "{}",
+        exit_report(path, code, signal, log)
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::test_support::{capture, written};
+    use tracing::subscriber::with_default;
 
     fn log_with(lines: &[&str]) -> SidecarLog {
         let log = SidecarLog::default();
@@ -259,6 +331,115 @@ mod tests {
         );
         assert!(report.contains("| l199"), "the newest line must be shown");
         assert!(!report.contains("| l0"), "the oldest must have been evicted");
+    }
+
+    /// Ordinary output is buffered and **not** logged (AC-09, D-07).
+    ///
+    /// The control arm is the point: the same fifty lines must be *in the
+    /// buffer*, or "no record" could equally be "the lines never arrived" and
+    /// the assertion would hold for a drain that does nothing at all.
+    #[test]
+    fn ordinary_output_reaches_the_buffer_and_no_record() {
+        let (directory, subscriber) = capture("drain-quiet");
+        let log = SidecarLog::default();
+        with_default(subscriber, || {
+            for i in 0..50 {
+                let done = heard(Heard::Line(format!("l{i}")), &log, "sidecar_started");
+                assert!(!done, "only the exit ends the loop");
+            }
+        });
+
+        assert_eq!(len(&log), 50, "the control: the lines really are buffered");
+        assert_eq!(tail(&log, 1), vec!["l49"]);
+        assert_eq!(
+            written(&directory.0),
+            "",
+            "the Agent's own output must not become Desktop's records"
+        );
+    }
+
+    /// The exit is one record, and it carries the tail (ruling 五).
+    ///
+    /// `report_exit` is the only place those twenty lines reach the file, which
+    /// is what makes "one exit, one record" checkable by counting lines.
+    #[test]
+    fn the_exit_is_one_record_carrying_the_tail() {
+        let (directory, subscriber) = capture("drain-exit");
+        let log = SidecarLog::default();
+        with_default(subscriber, || {
+            for i in 0..50 {
+                heard(Heard::Line(format!("l{i}")), &log, "sidecar_started");
+            }
+            assert!(heard(
+                Heard::Exited {
+                    code: Some(1),
+                    signal: None
+                },
+                &log,
+                "sidecar_started"
+            ));
+        });
+
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 1, "exactly one record: {text}");
+        assert!(text.contains("[INFO] agent.supervisor"), "{text}");
+        assert!(
+            text.contains("缓冲共 50 行，末 20 行输出："),
+            "the held and shown counts are both there: {text}"
+        );
+        // The tail is the newest twenty, and the whole report is one line: the
+        // newlines became escapes rather than ending the record early.
+        assert!(text.contains("| l30"), "{text}");
+        assert!(text.contains("| l49"), "{text}");
+        assert!(!text.contains("| l29"), "the window is twenty: {text}");
+    }
+
+    /// A read failure is logged as well as buffered — it is Desktop's problem,
+    /// and the process it failed on may still be running.
+    #[test]
+    fn a_read_failure_is_buffered_and_logged() {
+        let (directory, subscriber) = capture("drain-read-failure");
+        let log = SidecarLog::default();
+        with_default(subscriber, || {
+            assert!(!heard(
+                Heard::Failure("channel closed".to_string()),
+                &log,
+                "sidecar_started"
+            ));
+        });
+
+        assert_eq!(tail(&log, 1), vec!["[读取 sidecar 输出失败] channel closed"]);
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 1, "one failure, one record: {text}");
+        assert!(text.contains("[WARN] agent.supervisor"), "{text}");
+        assert!(text.contains("channel closed"), "{text}");
+    }
+
+    /// The classifier ignores what the module does not act on.
+    ///
+    /// `CommandEvent` cannot be built from here (`#[non_exhaustive]`), so the
+    /// mapping itself is out of a test's reach by construction: what can be
+    /// pinned is that the two directions this module does act on are the two it
+    /// names, and that the loop's `None` arm stays a no-op.
+    #[test]
+    fn the_two_directions_are_named_and_the_rest_is_ignored() {
+        // `Heard` is what `classify` produces; this is its wording, so a
+        // renamed variant cannot silently become a different case.
+        let line = Heard::Line("out".to_string());
+        assert!(matches!(line, Heard::Line(ref text) if text == "out"));
+        let failure = Heard::Failure("why".to_string());
+        assert!(matches!(failure, Heard::Failure(ref text) if text == "why"));
+        let exited = Heard::Exited {
+            code: None,
+            signal: Some(9),
+        };
+        assert!(matches!(
+            exited,
+            Heard::Exited {
+                code: None,
+                signal: Some(9)
+            }
+        ));
     }
 
     /// The exit report and the error suffix show the same window, so the plan's
