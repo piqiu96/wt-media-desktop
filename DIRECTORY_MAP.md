@@ -8,14 +8,19 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、18 个命令的 `generate_handler!`（约 115 行；AC-04 上限 300） | 改客户端生命周期、增删命令 |
+| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、单实例守卫、27 个命令的 `generate_handler!`（254 行；AC-04 上限 300） | 改客户端生命周期、增删命令（**新命令追加在末尾**） |
 | `src-tauri/src/bootstrap.rs` | 配置 → 启动所需物件的引导，以及**必须在 Tauri 构建任何东西之前**完成的 CSP 注入 | 改启动顺序 |
 | `src-tauri/src/config.rs` | 配置模式：一个 schema、一条解析路径、两条只往更严方向走的叠加规则（production 忽略整个 `WT_MEDIA_DESKTOP_*` 命名空间） | 改配置键、改优先级 |
 | `src-tauri/src/paths.rs` | 配置文件定位：打包版看资源目录，开发树看 crate `resources/`，两条路都以编译进二进制的 `PRODUCTION_TOML` 兜底 | 改配置定位 |
 | `src-tauri/src/token.rs` | 每次启动生成的本机运行 token。**无 `Debug`/`Display`/`Serialize`**——这是它作为类型而非 `String` 存在的全部理由 | 改本地鉴权 |
 | `src-tauri/src/state.rs` | Tauri 管理的原生状态（绑定凭据、sidecar 句柄）。**不越过 IPC 到 Vue** | 改原生状态 |
-| `src-tauri/src/logging/` | Desktop 自己的日志（CHG-057）。`setup.rs` 是**唯一**装配入口（`plan()` 决定一切、`install(plan, secrets)` 只装配；在 `main.rs` 的 CSP 注入与启动摘要之间调用）；`paths.rs` 解目录（Production `~/Library/Logs/WTMedia/Desktop`，Development `<manifest>/.local/logs`）；`rolling.rs` 按日期与 20MB 分档、按天与总量删、单条截断标 `truncate=true original_size=<n>`；`targets.rs` 的 `OWNED_TARGETS` 恰 3 个（`agent.supervisor`/`desktop.startup`/`webview`，外来 target 一律不进文件）；`redact.rs` 是**唯一**脱敏落点（在 sink，记录成形后、离开进程前） | 改日志目录、级别、轮转、脱敏、target |
-| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback`/`logging.*`（`level = "auto"`、20MB/14 天/100MB——出货值由测试与 `rolling::SHIPPED` 逐字对齐） | 改发布默认值 |
+| `src-tauri/src/logging/` | Desktop 自己的日志（CHG-057；轮转口径由 CHG-058 T-02 改写）。`setup.rs` 是**唯一**装配入口（`plan()` 决定一切、`install(plan, secrets)` 只装配；在 `main.rs` 的 CSP 注入与启动摘要之间调用）；`paths.rs` 解目录（Production `~/Library/Logs/WTMedia/Desktop`，Development `<manifest>/.local/logs`）并解 Agent 那棵树；`rolling.rs` 是 `file-rotate` 的**薄壳**——活文件恒为 `desktop.log`、归档为 `desktop.log.<YYYY-MM-DD-HH>`（本机时区）、**越保留天数的归档由 crate 按天删**，**没有单文件上限也没有总量预算**，单条超长截断标 `truncate=true original_size=<n>`；`reader.rs`（CHG-058 T-05）是读取面——列两棵树的文件（**列表即白名单**）、读尾部、按级别筛（该级别及以上）；`targets.rs` 的 `OWNED_TARGETS` 恰 3 个（`agent.supervisor`/`desktop.startup`/`webview`，外来 target 一律不进文件）；`redact.rs` 是**唯一**脱敏落点（在 sink，记录成形后、离开进程前） | 改日志目录、级别、轮转、脱敏、target、读取面 |
+| `src-tauri/src/app_paths.rs` | Desktop 自己的四个运行目录（CHG-058 T-03）：数据根、`versions`、日志根、缓存根。装机态 `~/Library/Application Support/WTMedia/Desktop{,/versions}` + `~/Library/Logs/WTMedia/Desktop` + **`~/Library/Caches/WTMedia/Desktop`**，开发态 `<repo>/.local/{data,data/versions,logs,cache}`。`directory` 是纯函数、`resolve` 收拢（装机态缺 `HOME` 即 `Err`）、`prepare` 是**唯一**碰盘的那个（建目录 + 真写探针）——**读方只用 `directory`，写方才 `prepare`**；logs 一根本模块不复述、委托 `logging/paths.rs` | 改运行目录、加第五个根 |
+| `src-tauri/src/settings.rs` | 数据根下的 `settings.toml`：`schema_version` + 同级临时文件 + `sync_all` + `rename` 的原子替换；坏形态（不可读 / 解析失败 / 版本不认识）一律 `Err` 且**原文件一个字节不动**；`save` **读得通才写**（想重置要自己删文件）；`check_save_dir` 只判路径合法性，**放行「存在但不可写」**（探针会在用户自己的素材目录里写字） | 改用户设置的键或写盘方式 |
+| `src-tauri/src/storage.rs` | 容量与占用（CHG-058 T-05）：`available_bytes_for` 用 `statvfs` 的 `f_bavail`（`f_bfree` 在有人保留块时会把不能用的空间算进来），`directory_bytes` 是一次独立 walk（清理命令用它**对账**释放字节） | 改占用与可用空间的口径 |
+| `src-tauri/src/cleanup.rs` | 清理规则本体（CHG-058 T-06）：只删可安全再生的文件与**已轮转归档**；活文件、数据根下的素材/成片/SQLite/检查点/待回传结果、符号链接与特殊文件永不删；`FileKind::Other`（读者不认识的日志名）是**显示**类目、不是删除类目；`freed_bytes` 是**被删文件的逻辑大小之和**，不是可用空间差值；单个 `remove_file` 失败只记一行、不中断整次 | 改「删什么 / 留什么」 |
+| `src-tauri/src/diagnostic.rs` | 脱敏诊断包（CHG-058 T-07）：一个 gzip tar + 一棵目录树（`summary.json` + `manifest.txt` + `logs/{desktop,agent}/…`），摘要值是**归档外的兄弟 `.sha256`**（放进包里会自指）；**每条进包的字符串都过 `mask`**，日志条目两次（写它的那层一次、`bundle_files` 再一次，靠幂等钉着）；「不含用户媒体」由**布局**保证（每棵树只读一层），不靠名字过滤 | 改包的内容边界或上限 |
+| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback`/`logging.*`（`level = "auto"`、`retention_days = 14`、`max_record_bytes = 1048576`——**没有单文件上限与总量键**，出货值由测试与 `rolling::DEFAULT_RETENTION_DAYS` 钉着不许漂） | 改发布默认值 |
 | `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、devUrl 5174、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
 | `src-tauri/build.rs`、`src-tauri/gen/`、`src-tauri/icons/` | 构建脚本、生成内容、图标 | 改打包资源 |
 
@@ -23,8 +28,8 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（18 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关 | 改命令接口 |
-| `src-tauri/src/dto/` | 按消费方分组的 serde 结构体。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象 | 改命令载荷 |
+| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（27 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`，以及 CHG-058 的五个——`storage.rs`（`local_storage_usage` / `local_log_files` / `local_log_tail`）、`cleanup.rs`（`local_cache_cleanup` / `local_log_cleanup`）、`diagnostic.rs`（`local_diagnostic_export`）、`settings.rs`（`local_settings_get` / `local_settings_set`）、`reveal.rs`（`local_open_place`）。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关。**新命令追加在 `generate_handler!` 末尾**——前端的 `localAgentService.test.js` 按精确参数对象断言既有命令 | 改命令接口 |
+| `src-tauri/src/dto/` | 按消费方分组的 serde 结构体，含 CHG-058 的 `storage.rs`/`cleanup.rs`/`diagnostic.rs`/`settings.rs`（线上形状）。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象；前端传 camelCase、Rust 收 snake_case | 改命令载荷 |
 | `src-tauri/src/http/` | 两个**分开的**客户端类型：`local_agent.rs`（回环、带运行 token）、`cloud.rs`（地址与凭据都是逐请求事实）。分开是因为可信级别不同——合在一起会让「这次调用带没带本机 token」无法从类型上回答 | 改出站客户端 |
 | `src-tauri/src/preflight.rs` | 敏感流程共用的 Cloud 预检与守卫。原先在 account/cookie 各抄一份；错误文案由 `tests::message_parity` 钉住 | 改预检、改错误文案 |
 | `src-tauri/src/filesystem/` | 文件/目录选择等受控本地文件能力 | 改文件桥 |

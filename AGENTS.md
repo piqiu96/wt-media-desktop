@@ -14,7 +14,7 @@ Desktop 是客户端控制壳，不是第二套业务系统。
 
 ## Structure
 
-- `src-tauri/src/main.rs`: 只剩启动序列（`mod` 声明、配置引导、CSP 注入、Builder 装配、`generate_handler!` 的 18 个命令）。
+- `src-tauri/src/main.rs`: 只剩启动序列（`mod` 声明、配置引导、CSP 注入、Builder 装配、单实例守卫、`generate_handler!` 的 27 个命令）。
 - `src-tauri/src/config.rs`、`paths.rs`、`bootstrap.rs`、`token.rs`、`state.rs`: 启动期配置与安全（schema 与解析路径、配置文件定位、引导顺序与 CSP 注入、每次启动的运行 token、不进 IPC 的原生状态）。
 - `src-tauri/src/commands/`、`dto/`、`preflight.rs`: 暴露给 Vue 的命令、按消费方分组的载荷结构体（字段名即契约）、敏感流程共用的 Cloud 预检。`webview.rs` 原名 `logging.rs`（纯重命名，命令名 `log_js_error` 不变），它报的是 webview 的 JS 错误，不是日志子系统的入口。
 - `src-tauri/src/http/`: 两个分开的客户端——`local_agent.rs`（回环、带运行 token）与 `cloud.rs`（地址与凭据逐请求给）。
