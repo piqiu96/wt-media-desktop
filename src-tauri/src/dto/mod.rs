@@ -3,7 +3,8 @@
 //! registration), `account` (account check and cookie read), `profile`
 //! (BitBrowser profile operations), `config` (the narrow slice of Desktop's own
 //! configuration the page may see), `storage` (the machine's free space, what
-//! this app occupies, and the log files it can read back).
+//! this app occupies, and the log files it can read back), `cleanup` (what a
+//! cleanup did, including what it deliberately did not do).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -13,6 +14,7 @@
 mod account;
 mod agent;
 mod bind;
+mod cleanup;
 mod config;
 mod profile;
 mod storage;
@@ -20,6 +22,7 @@ mod storage;
 pub use account::*;
 pub use agent::*;
 pub use bind::*;
+pub use cleanup::*;
 pub use config::*;
 pub use profile::*;
 pub use storage::*;

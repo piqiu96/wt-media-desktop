@@ -7,6 +7,7 @@
 
 mod app_paths;
 mod bootstrap;
+mod cleanup;
 mod commands;
 mod config;
 mod dto;
@@ -174,6 +175,9 @@ fn main() {
             commands::storage::local_storage_usage,
             commands::storage::local_log_files,
             commands::storage::local_log_tail,
+            // T-06's pair, appended for the same reason as the three above.
+            commands::cleanup::local_cache_cleanup,
+            commands::cleanup::local_log_cleanup,
         ])
         .plugin(tauri_plugin_shell::init())
         .build(context)

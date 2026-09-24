@@ -73,26 +73,45 @@ use tauri::State;
 /// lines than a viewer shows.
 const MAX_TAIL_LINES: usize = 5000;
 
-/// The directories this launch reads, resolved once per command.
+/// The directories this launch reads or cleans, resolved once per command.
+///
+/// Shared with `commands::cleanup` rather than resolved a second time there: the
+/// cleanup deletes in the same directories this module reads, and two resolvers
+/// would be two rules nothing makes agree — a page could list one tree and clean
+/// another.
 #[derive(Debug)]
-struct Resolved {
-    paths: AppPaths,
-    agent_logs: PathBuf,
+pub(crate) struct Resolved {
+    pub(crate) paths: AppPaths,
+    pub(crate) agent_logs: PathBuf,
 }
 
 impl Resolved {
     /// This component's tree first, then the Agent's — the order the page shows
     /// them in, and the order both commands use.
-    fn trees(&self) -> [(Source, &Path); 2] {
+    pub(crate) fn trees(&self) -> [(Source, &Path); 2] {
         [
             (Source::Desktop, self.paths.logs.as_path()),
             (Source::Agent, self.agent_logs.as_path()),
         ]
     }
+
+    /// The tree one source labels, for a command that takes a source rather than
+    /// a path.
+    ///
+    /// Every label the reader knows has a tree here (`trees` covers both), so the
+    /// lookup cannot fail — but a `Source` with no tree would be a new source
+    /// added to one list and not the other, which is what this refuses to hide.
+    pub(crate) fn tree(&self, source: Source) -> PathBuf {
+        self.trees()
+            .into_iter()
+            .find(|(candidate, _)| *candidate == source)
+            .map(|(_, directory)| directory.to_path_buf())
+            .expect("every label the reader knows has a tree here")
+    }
 }
 
 /// Resolve every root this module reads, or say which input was unusable.
-fn resolve(config: &DesktopConfig) -> Result<Resolved, String> {
+pub(crate) fn resolve(config: &DesktopConfig) -> Result<Resolved, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -283,13 +302,7 @@ pub fn local_log_tail(
 
     let source = Source::from_label(&source)
         .ok_or_else(|| format!("未知的日志来源 {source:?}：只认识 desktop 与 agent"))?;
-    let directory = resolved
-        .trees()
-        .into_iter()
-        .find(|(candidate, _)| *candidate == source)
-        .map(|(_, directory)| directory.to_path_buf())
-        .expect("every label the reader knows has a tree here");
-
+    let directory = resolved.tree(source);
     let file = listed_file(&directory, source, &name)?;
     tail_of(source, &file, lines, min_level.as_deref())
 }
