@@ -3,21 +3,20 @@
 //! The vocabulary and the shapes are the Agent's (`runtime/logging.py`): the two
 //! halves of one product must not disagree about what a credential looks like,
 //! because a record the Agent masks and Desktop prints is a leak with extra
-//! steps. What is deliberately *not* copied is a defect found while mirroring
-//! it -- the Agent's keyed pass replaces the whole rest of the line in one
-//! match, so a second credential on the same line is never examined:
+//! steps. Mirroring it turned up two Agent-side defects -- a second credential
+//! on the same line was never examined, and a plural `cookies:` key was masked
+//! as a single value -- and both have since been fixed there (CHG-057 T-20), so
+//! these lines read the same on both sides today, measured on both:
 //!
 //! ```text
-//! redact("token=aaa password=bbb") -> "token=*** password=bbb"   (measured)
+//! redact("token=aaa password=bbb") -> "token=*** password=***"
+//! redact("cookies: a=1; b=2")      -> "cookies: a=***; b=***"
 //! ```
 //!
-//! Here the scan resumes just after the value it masked, so every credential on
-//! the line is seen. Registered in the CHG evidence as an Agent-side finding.
-//!
-//! Two further differences, both stricter and both registered: the boundary in
-//! front of a key is ASCII here where the Agent's `\b` is Unicode-aware (so a
-//! key written straight after a non-ASCII character is caught here and missed
-//! there), and `cookies:` is masked as a cookie header rather than as one value.
+//! One difference remains, and it is stricter here: the boundary in front of a
+//! key is ASCII here where the Agent's `\b` is Unicode-aware, so a key written
+//! straight after a non-ASCII character is caught here and missed there -- the
+//! same input is masked here and left alone there, measured on both.
 //!
 //! The mask is applied to the **finished line** on its way to the writer
 //! (`backend::LineWriter`), so the message, the fields and whatever a future
@@ -562,9 +561,10 @@ mod tests {
         }
     }
 
-    /// The line the Agent's shipped redactor gets wrong, measured there first:
-    /// its keyed pass replaces the whole tail in one match, so the second
-    /// credential is never looked at.
+    /// The line the Agent's shipped redactor got wrong until CHG-057 T-20:
+    /// measured there first, and its keyed pass replaced the whole tail in one
+    /// match, so the second credential was never looked at. The rule below is
+    /// what this side did about it, and the Agent now answers the same.
     #[test]
     fn every_credential_on_a_line_is_masked_and_not_just_the_first() {
         assert_eq!(
