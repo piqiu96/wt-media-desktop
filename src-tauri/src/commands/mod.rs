@@ -6,6 +6,6 @@
 pub mod account;
 pub mod agent;
 pub mod bind;
-pub mod logging;
 pub mod profile;
 pub mod public_config;
+pub mod webview;

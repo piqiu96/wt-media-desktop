@@ -141,7 +141,7 @@ fn main() {
             commands::profile::local_agent_profile_close,
             commands::profile::local_agent_profile_create,
             commands::profile::local_agent_profile_restore,
-            commands::logging::log_js_error,
+            commands::webview::log_js_error,
             // Appended, not inserted: `localAgentService.test.js` asserts on exact
             // argument objects, and the existing seventeen keep their positions.
             commands::public_config::get_public_config,
