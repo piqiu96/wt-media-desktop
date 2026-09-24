@@ -12,6 +12,14 @@
 //! manifest directory, a clock — and the code that touches the filesystem is
 //! thin enough to read in one sitting. A logging system that cannot be tested
 //! without writing files ends up tested only by the launch that needed it.
+//!
+//! The pieces, in the order a record meets them: [`targets`] decides whether
+//! the record is Desktop's at all, [`backend`] renders it as one line and
+//! hands it to a sink, [`redact`] masks what may not be printed on the way, and
+//! [`rolling`] bounds what the files may occupy. [`paths`] says where they are.
 
+pub mod backend;
 pub mod paths;
+pub mod redact;
 pub mod rolling;
+pub mod targets;
