@@ -12,6 +12,7 @@ mod dto;
 mod filesystem;
 mod http;
 mod local_agent;
+mod logging;
 mod paths;
 mod preflight;
 mod secure_store;
