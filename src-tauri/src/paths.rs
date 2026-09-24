@@ -58,6 +58,26 @@ pub enum Source {
     CompiledIn,
 }
 
+impl Source {
+    /// The spelling a machine reads: which candidate supplied the config.
+    ///
+    /// Beside `bootstrap::Startup::summary`, which spells the same five in
+    /// Chinese for the line an operator reads at launch. Two mappings rather than
+    /// one because the two readers want different things — a person wants 「安装包的
+    /// 资源目录」, a diagnostic bundle wants a value that survives being pasted into
+    /// an issue — and the compiler holds them together from the other side: a new
+    /// variant does not build until both matches have an arm for it.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Source::EnvOverride => "env_override",
+            Source::BundledResource => "bundled_resource",
+            Source::BesideExecutable => "beside_executable",
+            Source::DevelopmentTree => "development_tree",
+            Source::CompiledIn => "compiled_in",
+        }
+    }
+}
+
 /// The candidates in the order they are tried.
 ///
 /// Ordering rationale, one step each: the operator's override beats everything
@@ -91,7 +111,10 @@ pub fn candidates(
             out.push((dir.join(RESOURCE_NAME), Source::BesideExecutable));
         }
     } else {
-        out.push((manifest_dir.join("resources").join(RESOURCE_NAME), Source::DevelopmentTree));
+        out.push((
+            manifest_dir.join("resources").join(RESOURCE_NAME),
+            Source::DevelopmentTree,
+        ));
     }
 
     out
@@ -127,7 +150,9 @@ pub fn file_text(
     exe_dir: Option<&Path>,
     manifest_dir: &Path,
 ) -> (String, Source) {
-    match locate(env, environment, resource_dir, exe_dir, manifest_dir, |p| p.is_file()) {
+    match locate(env, environment, resource_dir, exe_dir, manifest_dir, |p| {
+        p.is_file()
+    }) {
         Some((path, source)) => match std::fs::read_to_string(&path) {
             Ok(text) => (text, source),
             // The file existed when it was looked for and could not be read —
@@ -143,6 +168,7 @@ pub fn file_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -153,6 +179,33 @@ mod tests {
 
     fn manifest() -> PathBuf {
         PathBuf::from("/crate")
+    }
+
+    /// Every source has its own code, and every code is a word a machine reads.
+    ///
+    /// The property is distinctness, not a spelling: a bundle that said two
+    /// sources were the same file would send a reader to the wrong one, and that
+    /// is exactly the failure a copy-paste slip in the `match` above produces.
+    #[test]
+    fn every_source_has_its_own_code() {
+        let sources = [
+            Source::EnvOverride,
+            Source::BundledResource,
+            Source::BesideExecutable,
+            Source::DevelopmentTree,
+            Source::CompiledIn,
+        ];
+        let codes: Vec<&str> = sources.iter().map(|source| source.code()).collect();
+        let distinct: BTreeSet<&str> = codes.iter().copied().collect();
+        assert_eq!(distinct.len(), sources.len(), "{codes:?}");
+        for code in &codes {
+            assert!(!code.is_empty(), "a code nobody can read is not a code");
+            assert_eq!(
+                *code,
+                code.to_ascii_lowercase(),
+                "the codes are the lowercase words the rest of the wire uses"
+            );
+        }
     }
 
     /// A production build honours no `WT_MEDIA_DESKTOP_*` variable, and the
@@ -185,13 +238,7 @@ mod tests {
         // The same variable *is* honoured in development — otherwise the test
         // above would also pass for a locator that never reads the variable at
         // all, which is a different (and broken) behaviour.
-        let got = candidates(
-            &env,
-            Environment::Development,
-            None,
-            None,
-            &manifest(),
-        );
+        let got = candidates(&env, Environment::Development, None, None, &manifest());
         assert_eq!(
             got.first(),
             Some(&(PathBuf::from("/operator/agent.toml"), Source::EnvOverride)),
@@ -214,8 +261,14 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (PathBuf::from("/app/Resources").join(RESOURCE_NAME), Source::BundledResource),
-                (PathBuf::from("/app/MacOS").join(RESOURCE_NAME), Source::BesideExecutable),
+                (
+                    PathBuf::from("/app/Resources").join(RESOURCE_NAME),
+                    Source::BundledResource
+                ),
+                (
+                    PathBuf::from("/app/MacOS").join(RESOURCE_NAME),
+                    Source::BesideExecutable
+                ),
             ]
         );
     }
@@ -237,7 +290,10 @@ mod tests {
             got,
             vec![
                 (PathBuf::from("/operator/agent.toml"), Source::EnvOverride),
-                (manifest().join("resources").join(RESOURCE_NAME), Source::DevelopmentTree),
+                (
+                    manifest().join("resources").join(RESOURCE_NAME),
+                    Source::DevelopmentTree
+                ),
             ],
             "a development tree never consults the bundle's resource directory"
         );
@@ -262,9 +318,14 @@ mod tests {
     #[test]
     fn locate_takes_the_first_candidate_that_exists() {
         // Production: the resource directory beats the executable's own.
-        let found = locate(&BTreeMap::new(), Environment::Production,
-                           Some(Path::new("/app/Resources")),
-                           Some(Path::new("/app/MacOS")), &manifest(), |_| true);
+        let found = locate(
+            &BTreeMap::new(),
+            Environment::Production,
+            Some(Path::new("/app/Resources")),
+            Some(Path::new("/app/MacOS")),
+            &manifest(),
+            |_| true,
+        );
         assert_eq!(
             found,
             Some((
@@ -295,13 +356,29 @@ mod tests {
     #[test]
     fn no_candidate_existing_falls_through_to_the_compiled_default() {
         assert_eq!(
-            locate(&BTreeMap::new(), Environment::Production, None, None, &manifest(), |_| false),
+            locate(
+                &BTreeMap::new(),
+                Environment::Production,
+                None,
+                None,
+                &manifest(),
+                |_| false
+            ),
             None
         );
 
-        let (text, source) = file_text(&BTreeMap::new(), Environment::Production, None, None, &manifest());
+        let (text, source) = file_text(
+            &BTreeMap::new(),
+            Environment::Production,
+            None,
+            None,
+            &manifest(),
+        );
         assert_eq!(source, Source::CompiledIn);
-        assert_eq!(text, PRODUCTION_TOML, "the fallback must be the shipped config");
+        assert_eq!(
+            text, PRODUCTION_TOML,
+            "the fallback must be the shipped config"
+        );
     }
 
     /// A file that exists but cannot be read must fall back, not panic.
@@ -319,11 +396,16 @@ mod tests {
         let path = resources.join(RESOURCE_NAME);
         std::fs::write(&path, [0xff, 0xfe, 0x00]).expect("write non-UTF-8 config");
 
-        let (text, source) = file_text(&BTreeMap::new(), Environment::Development, None, None, &dir);
+        let (text, source) =
+            file_text(&BTreeMap::new(), Environment::Development, None, None, &dir);
 
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(source, Source::CompiledIn, "an unreadable file must not be reported as used");
+        assert_eq!(
+            source,
+            Source::CompiledIn,
+            "an unreadable file must not be reported as used"
+        );
         assert_eq!(text, PRODUCTION_TOML);
     }
 
@@ -331,13 +413,18 @@ mod tests {
     /// for another. This is the only assertion here that reaches `config`.
     #[test]
     fn the_compiled_default_is_a_usable_config() {
-        let (text, source) = file_text(&BTreeMap::new(), Environment::Production, None, None, &manifest());
-        assert_eq!(source, Source::CompiledIn);
-        let parsed = crate::config::load_with(
+        let (text, source) = file_text(
             &BTreeMap::new(),
-            &text,
             Environment::Production,
+            None,
+            None,
+            &manifest(),
         );
-        assert!(parsed.is_ok(), "the fallback must parse and validate: {parsed:?}");
+        assert_eq!(source, Source::CompiledIn);
+        let parsed = crate::config::load_with(&BTreeMap::new(), &text, Environment::Production);
+        assert!(
+            parsed.is_ok(),
+            "the fallback must parse and validate: {parsed:?}"
+        );
     }
 }

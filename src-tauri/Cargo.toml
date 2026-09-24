@@ -65,3 +65,22 @@ tauri-plugin-single-instance = "2"
 # `unsafe` statvfs: this crate has no `unsafe` in it, and rustix's wrapper is the
 # same call with the layout differences already handled.
 rustix = { version = "1", features = ["fs"] }
+# The support bundle's container (CHG-058 T-07, ruling Q-06: `tar` + `flate2`).
+# `flate2` is already in the lockfile as a dependency of `png`; `tar` is new to
+# the graph but nothing else is -- see the T-07 evidence for the measured delta.
+# A gzipped tar rather than a zip because the bundle is one directory tree and
+# nothing here needs zip's per-entry metadata (Q-06).
+#
+# `default-features = false` drops `xattr`, which tar only reaches for when
+# **unpacking** (extended attributes on the way out). This crate only ever
+# builds an archive, so the feature would be a crate in the graph for a code path
+# that cannot run. `filetime`, tar's other unix dependency, is not optional --
+# measured: dropping it is not available.
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+# The bundle's integrity line, beside it as `<name>.sha256`. Both are already in
+# the lockfile as transitive dependencies (`sha2` through `tauri-codegen`, `hex`
+# through `serde_with`), so this adds no crate -- it makes them direct, which is
+# what `cargo` requires before they can be named in this crate's own code.
+sha2 = "0.10"
+hex = "0.4"

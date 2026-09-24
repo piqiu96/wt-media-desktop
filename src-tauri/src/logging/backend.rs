@@ -167,8 +167,19 @@ where
 /// beside it is the other half of the same agreement: the two must spell the
 /// same clock.
 fn stamp(time: SystemTime) -> String {
+    stamp_with(rolling::STAMP_FORMAT, time)
+}
+
+/// The same clock, in whatever format a caller needs.
+///
+/// One function for "a moment, in the machine's own time zone" so that the three
+/// stamps this product writes — a log line's, an archive name's, a diagnostic
+/// bundle's — cannot end up on three different clocks. They are different
+/// formats of one reading, which is exactly the property an operator relies on
+/// when they line up a bundle beside the file it came from.
+pub(crate) fn stamp_with(format: &str, time: SystemTime) -> String {
     let local: chrono::DateTime<chrono::Local> = time.into();
-    local.format(rolling::STAMP_FORMAT).to_string()
+    local.format(format).to_string()
 }
 
 /// One record, one line.
@@ -334,6 +345,35 @@ mod tests {
     /// comparison inside the test is what keeps the two in step -- a target
     /// added to the vocabulary without a record emitted under it fails here.
     const EMITTED_TARGETS: [&str; 3] = ["agent.supervisor", "desktop.startup", "webview"];
+
+    /// Every stamp this product writes comes off the same clock.
+    ///
+    /// The property is not the format — the formats differ on purpose, and the
+    /// archive names avoid `:` because a file name reads better without one. It
+    /// is that the *reading* is one reading: the same `SystemTime`, converted to
+    /// local time once, spelled three ways. A helper that took a different clock
+    /// would put a bundle's `created_at` in a time zone its own log lines are not
+    /// in, and the two are always read side by side.
+    #[test]
+    fn every_stamp_is_the_same_moment_the_same_way() {
+        let moment = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_787_000_000);
+
+        let line = stamp(moment);
+        assert_eq!(line, stamp_with("%Y-%m-%dT%H:%M:%S", moment));
+        assert_eq!(line.len(), 19, "{line}");
+
+        let archive = stamp_with("%Y-%m-%d-%H", moment);
+        assert!(
+            line.starts_with(&archive[..10]),
+            "the day agrees: {line} vs {archive}"
+        );
+        assert_eq!(
+            &line[11..13],
+            &archive[11..13],
+            "and so does the hour: {line} vs {archive}"
+        );
+        assert!(!archive.contains(':'), "a file name: {archive}");
+    }
 
     #[test]
     fn every_target_desktop_owns_produces_a_record_in_the_file() {

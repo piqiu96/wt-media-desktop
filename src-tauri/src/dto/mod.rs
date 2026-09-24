@@ -4,7 +4,8 @@
 //! (BitBrowser profile operations), `config` (the narrow slice of Desktop's own
 //! configuration the page may see), `storage` (the machine's free space, what
 //! this app occupies, and the log files it can read back), `cleanup` (what a
-//! cleanup did, including what it deliberately did not do).
+//! cleanup did, including what it deliberately did not do), `diagnostic` (what a
+//! support bundle holds, and what it left out).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -16,6 +17,7 @@ mod agent;
 mod bind;
 mod cleanup;
 mod config;
+mod diagnostic;
 mod profile;
 mod storage;
 
@@ -24,6 +26,7 @@ pub use agent::*;
 pub use bind::*;
 pub use cleanup::*;
 pub use config::*;
+pub use diagnostic::*;
 pub use profile::*;
 pub use storage::*;
 

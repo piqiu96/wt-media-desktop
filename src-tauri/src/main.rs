@@ -10,6 +10,7 @@ mod bootstrap;
 mod cleanup;
 mod commands;
 mod config;
+mod diagnostic;
 mod dto;
 mod filesystem;
 mod http;
@@ -85,6 +86,16 @@ fn main() {
     let token = RuntimeToken::generate();
     let secret = token.expose().to_string();
 
+    // **One list, two readers.** The sink that masks every record and the
+    // diagnostic bundle that masks every entry are handed the *same* list, built
+    // here once. Two `vec![secret]` literals would be two places to remember, and
+    // the one that got forgotten would be the one that writes a credential out.
+    // Whether `install` and `DiagnosticHost` between them cover everything that
+    // needs masking is not something this file can assert — the launch's own
+    // token reaching this list is a wiring line, registered as a boundary in the
+    // T-07 evidence rather than claimed as tested.
+    let secrets = vec![secret];
+
     // ---- The builder, up to and including its plugin phase ----
     //
     // This is a `build` and not a `run`, and the single-instance guard below is
@@ -131,6 +142,16 @@ fn main() {
         // during startup: `get_public_config` answers from this copy, so the
         // page and `apply_csp` can never be reading two different configs.
         .manage(startup.config.clone())
+        // The facts about this launch that only startup knows: which config
+        // candidate was used, why a located file was refused, and the values the
+        // diagnostic export must mask. Managed here rather than re-derived in the
+        // command, for the reason `commands::storage` calls the launch's own
+        // resolvers: a second resolution is a second answer.
+        .manage(commands::diagnostic::DiagnosticHost::new(
+            startup.source,
+            startup.rejected.clone(),
+            secrets.clone(),
+        ))
         .manage(AgentProcess::default())
         // Beside the process handle, because the two answer the same question:
         // `start` sets the id when it stores a child, `stop` clears it when it
@@ -178,6 +199,8 @@ fn main() {
             // T-06's pair, appended for the same reason as the three above.
             commands::cleanup::local_cache_cleanup,
             commands::cleanup::local_log_cleanup,
+            // T-07's export, appended for the same reason as the five above.
+            commands::diagnostic::local_diagnostic_export,
         ])
         .plugin(tauri_plugin_shell::init())
         .build(context)
@@ -205,7 +228,7 @@ fn main() {
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
     );
-    let installed = logging::setup::install(plan, vec![secret]);
+    let installed = logging::setup::install(plan, secrets);
     let summary = format!("{}；{}", startup.summary(), installed.summary());
     if installed.installed {
         // stderr as before: `assemble` always attaches the terminal layer, and

@@ -39,6 +39,22 @@ pub enum Environment {
     Production,
 }
 
+impl Environment {
+    /// The same lowercase word, as a `&str`.
+    ///
+    /// `PublicConfig` puts the enum itself on the wire and serde writes this
+    /// word; a document this crate builds by hand (the diagnostic bundle) needs
+    /// the word without a serializer in the middle. `code_agrees_with_serde`
+    /// holds the two together, so a change to one that missed the other fails
+    /// there rather than in an archive somebody has already sent.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Environment::Development => "development",
+            Environment::Production => "production",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopConfig {
@@ -309,6 +325,25 @@ fn parse_http_url(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hand-written word and the serialized one are the same word.
+    ///
+    /// Two spellings of one value is the shape of bug that only shows up in a
+    /// document somebody has already sent, so the agreement is asserted rather
+    /// than intended. `serde_json` is used because it is the format the two
+    /// readers that matter here (the page's config and the bundle's summary) are
+    /// both written in.
+    #[test]
+    fn code_agrees_with_serde() {
+        for environment in [Environment::Development, Environment::Production] {
+            let serialized = serde_json::to_value(environment).expect("a serializable enum");
+            assert_eq!(
+                serialized,
+                serde_json::Value::String(environment.code().to_string()),
+                "{environment:?} spells itself two ways"
+            );
+        }
+    }
 
     fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

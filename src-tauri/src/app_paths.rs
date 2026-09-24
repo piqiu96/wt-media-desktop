@@ -426,6 +426,41 @@ mod tests {
         }
     }
 
+    /// Neither log tree is inside a data root, in either layout.
+    ///
+    /// The diagnostic export reads **exactly** the two log trees and nothing
+    /// else, which is what makes "the bundle holds no user media" a property of
+    /// the layout rather than of a filter being right — the same argument
+    /// `cache_is_never_inside_the_data_root` makes for the cleanup. This is the
+    /// half that belongs to this module: *this* component's log root against
+    /// *this* component's data root.
+    ///
+    /// The other half is the Agent's tree, which is **not** asserted to be
+    /// disjoint and must not be: `logging::paths::agent_directory` puts it at
+    /// `<agent data_dir>/logs` when that setting is present — inside the Agent's
+    /// data root by the Agent's own design. What makes the export safe there is
+    /// that it reads that one directory without descending, which
+    /// `diagnostic::a_media_file_inside_a_subdirectory_of_the_tree_is_not_reachable`
+    /// pins.
+    #[test]
+    fn the_log_root_is_never_inside_the_data_root() {
+        for environment in [Environment::Development, Environment::Production] {
+            let data = directory(Root::Data, &home(), environment, &manifest());
+            let logs = directory(Root::Logs, &home(), environment, &manifest());
+
+            assert!(
+                !logs.starts_with(&data),
+                "the log tree must not be reachable by walking down from data: {logs:?}"
+            );
+            if environment == Environment::Production {
+                assert!(
+                    !logs.starts_with(&manifest()),
+                    "an installed layout must not keep its logs in a checkout: {logs:?}"
+                );
+            }
+        }
+    }
+
     /// Which input decides the layout, asserted as an *absence* on both sides.
     ///
     /// Shape alone cannot tell these apart: `directory` could read the home in

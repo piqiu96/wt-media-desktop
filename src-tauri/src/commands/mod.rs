@@ -7,6 +7,7 @@ pub mod account;
 pub mod agent;
 pub mod bind;
 pub mod cleanup;
+pub mod diagnostic;
 pub mod profile;
 pub mod public_config;
 pub mod storage;
