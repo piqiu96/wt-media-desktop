@@ -28,14 +28,20 @@
 //!   no UTC switch, so an archive is named in the operator's own clock. The
 //!   record's own stamp follows it (see `backend::stamp`) -- a UTC stamp on a
 //!   local-named file disagrees with itself for eight hours a day.
-//! - **The clock cannot be injected.** `mock_time` is `#[cfg(test)]` inside the
-//!   crate, so a test cannot stand on an hour boundary. What it can do is set
-//!   the live file's mtime: the hourly trigger compares *that* against the wall
-//!   clock, which is deterministic enough to test and is what the tests here use.
+//! - **The clock cannot be injected, and the trigger is read once.** `mock_time`
+//!   is `#[cfg(test)]` inside the crate, so a test cannot stand on an hour
+//!   boundary. What it can do is leave a live file whose mtime is an hour old
+//!   *before* the writer is built, which is exactly what the crate reads: it
+//!   seeds its remembered instant from that mtime in `new()` and overwrites it
+//!   on every write, so backdating afterwards does nothing at all. That is why
+//!   every rotation test here builds the previous hour's file first -- not a
+//!   convenience, but the only shape in which this path can be driven.
 //! - **The archive set is scanned once, at construction.** A file that appears
-//!   afterwards is never deleted by this writer -- pinned by
-//!   `an_archive_that_appears_after_the_writer_did_is_not_deleted`, because a
-//!   reader who assumes otherwise would believe a real gap was a bug.
+//!   afterwards is not deleted by *this* writer, and is picked up by the next
+//!   one -- both halves are pinned by
+//!   `an_archive_is_deleted_by_the_next_writer_and_not_by_the_one_that_missed_it`,
+//!   because a reader who assumes either one alone would believe a real gap was
+//!   a bug.
 //! - **One live file means one writer.** Two instances share `desktop.log` and
 //!   the crate renames it out from under whichever handle is still writing. That
 //!   is why the single-instance guard is load-bearing rather than a nicety
@@ -62,6 +68,16 @@ pub const LOG_FILE_NAME: &str = "desktop.log";
 /// ended, in local time. Zero-padded, so lexicographic order is chronological
 /// order -- which is what the crate's age comparison relies on.
 pub const ARCHIVE_FORMAT: &str = "%Y-%m-%d-%H";
+
+/// How a record's own stamp is spelled (`backend::stamp`), in local time.
+///
+/// Kept beside [`ARCHIVE_FORMAT`] on purpose: one is the name of the file and
+/// the other is the first field of every line in it, and a reader who has to
+/// hold two modules in their head to see that the two agree about the clock will
+/// eventually stop checking. The difference between them is only the hour
+/// separator, because a name may not contain a colon on Windows and a record is
+/// free to.
+pub const STAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// How many days of history survive, as shipped. A 14-day window is today plus
 /// the 13 days before it. Raised or lowered by `[logging] retention_days`; the
@@ -473,18 +489,22 @@ mod tests {
         assert_eq!(Limits::SHIPPED.max_record_bytes, 1024 * 1024);
     }
 
-    /// The spellings the user's ruling fixes, written out as literals.
+    /// The four spellings the user's ruling fixes, written out as literals.
     ///
     /// Every other test in this module builds its expectation from these
     /// constants or from the file names they produce, which is what makes them
     /// read as tests of behaviour — and what would let a wrong constant sail
     /// through all of them at once. This is the one place the values themselves
-    /// are the subject: `desktop.log` is the ruling's stable name and the
-    /// archives are that name plus the local hour.
+    /// are the subject: `desktop.log` is the ruling's stable name, the archives
+    /// are that name plus the local hour, and a record's stamp is the same clock
+    /// with a colon in the middle (`file-rotate` formats `chrono::Local` and has
+    /// no UTC switch, so a UTC stamp here would disagree with the file it sits
+    /// in).
     #[test]
     fn the_names_and_the_formats_are_the_ones_the_ruling_names() {
         assert_eq!(LOG_FILE_NAME, "desktop.log");
         assert_eq!(ARCHIVE_FORMAT, "%Y-%m-%d-%H");
+        assert_eq!(STAMP_FORMAT, "%Y-%m-%dT%H:%M:%S");
         assert_eq!(
             TRUNCATION_MARKER, " truncate=true original_size=",
             "the marker is byte-for-byte the Agent's, so one reader learns one spelling"

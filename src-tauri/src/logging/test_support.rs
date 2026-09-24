@@ -10,8 +10,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::TimeZone;
 use tracing::subscriber::Subscriber;
 
 use crate::config::Environment;
@@ -28,19 +29,20 @@ impl Clock for Fixed {
     }
 }
 
-/// 2026-09-24T10:11:12Z, so an expected line can be written out in full.
+/// The local time 2026-09-24 10:11:12, so an expected line can be written out in
+/// full.
 ///
-/// Built from civil fields rather than from the hand-rolled `rolling::Date` the
-/// previous implementation counted days with (T-02): `chrono` does that half
-/// now, and the instant it produces is the same one.
+/// Built from local fields rather than as a fixed UTC second, because a stamp is
+/// now local: a `Fixed` holding `UNIX_EPOCH + n` would render differently on
+/// every machine and the expected line would have to carry this machine's offset
+/// (CHG-058 D-09). The instant is the same fact either way — what changes is that
+/// the *assertion* is now portable.
 pub(crate) fn clock() -> Arc<dyn Clock + Send + Sync> {
-    let time = chrono::NaiveDate::from_ymd_opt(2026, 9, 24)
-        .expect("a real date")
-        .and_hms_opt(10, 11, 12)
-        .expect("a real time")
-        .and_utc()
-        .timestamp() as u64;
-    Arc::new(Fixed(UNIX_EPOCH + Duration::from_secs(time)))
+    let when = chrono::Local
+        .with_ymd_and_hms(2026, 9, 24, 10, 11, 12)
+        .single()
+        .expect("an unambiguous local time");
+    Arc::new(Fixed(when.into()))
 }
 
 /// A path of this test's own, removed when the guard drops.

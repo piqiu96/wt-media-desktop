@@ -122,9 +122,12 @@ pub fn assemble(options: Options) -> impl Subscriber + Send + Sync {
 ///   feature is off and nothing here opens one), so there is none to lose; a
 ///   future span would have to come back to this line and say how to print it.
 ///
-/// The stamp is **UTC** and marked with a `Z`, until the next commit: the
-/// archive names come from `file-rotate`, which formats `chrono::Local` and has
-/// no UTC switch, so the two cannot stay apart for long.
+/// The stamp used to be UTC with a `Z` (CHG-057 T-12), and that is superseded by
+/// CHG-058's ruling: the archive names come from `file-rotate`, which formats
+/// `chrono::Local` and offers no UTC switch, so a UTC stamp would disagree with
+/// the name of the file it sits in for eight hours a day. Both sides of the
+/// product now stamp and name in local time -- which is what the Agent always
+/// did, so this change *removes* the last difference rather than adding one.
 #[derive(Clone)]
 struct LineFormat {
     clock: Arc<dyn Clock + Send + Sync>,
@@ -156,17 +159,16 @@ where
     }
 }
 
-/// The UTC stamp, `%Y-%m-%dT%H:%M:%S` with a `Z` on the end.
+/// The stamp, `%Y-%m-%dT%H:%M:%S`, in **local** time and unmarked.
 ///
-/// It used to be assembled by hand from `rolling::date_of`, which went with the
-/// hand-rolled rotator (T-02); the arithmetic and the output are unchanged, and
-/// `chrono` -- now a direct dependency -- does the civil-date half of it. The
-/// zone is the part the next commit changes: `file-rotate` names the archives in
-/// `chrono::Local` and offers no UTC switch, so a UTC stamp and a local file name
-/// disagree with each other for eight hours a day.
+/// The Agent's `%(asctime)s` is local and unmarked, and the archive names are
+/// local (see [`LineFormat`]), so this is the shape that agrees with both. It is
+/// `rolling::STAMP_FORMAT` and not a literal because the archive-name format
+/// beside it is the other half of the same agreement: the two must spell the
+/// same clock.
 fn stamp(time: SystemTime) -> String {
-    let utc: chrono::DateTime<chrono::Utc> = time.into();
-    utc.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    let local: chrono::DateTime<chrono::Local> = time.into();
+    local.format(rolling::STAMP_FORMAT).to_string()
 }
 
 /// One record, one line.
@@ -462,7 +464,7 @@ mod tests {
         );
         assert_eq!(
             written(&directory.0),
-            "2026-09-24T10:11:12Z [INFO] desktop.startup: hello\n"
+            "2026-09-24T10:11:12 [INFO] desktop.startup: hello\n"
         );
     }
 
@@ -511,17 +513,70 @@ mod tests {
         std::fs::remove_file(&blocked.0).ok();
     }
 
+    /// The local-time stamp, which supersedes CHG-057's UTC one.
+    ///
+    /// The instant is built **from local fields**, so its local spelling is
+    /// known by construction and the expected string is not a second reading of
+    /// the same clock (which would make the test a tautology). A UTC stamp fails
+    /// this on any machine that is not on UTC; on a machine that is, the `Z`
+    /// assertion is what is left, and the mutation that restores `Z` is caught
+    /// there too. Registered limit: a UTC-zone machine cannot tell the two
+    /// apart.
     #[test]
-    fn the_stamp_is_the_day_and_the_time_utc() {
+    fn the_stamp_is_the_local_day_and_time_with_no_zone_mark() {
         use chrono::TimeZone;
-        // The clock is the only input, so a wrong hour is a wrong field rather
-        // than a wrong zone: the machine running this test is not on UTC.
-        let when: SystemTime = chrono::Utc
+        let when: SystemTime = chrono::Local
             .with_ymd_and_hms(2026, 12, 31, 23, 59, 59)
             .single()
-            .expect("a real instant")
+            .expect("an unambiguous local time")
             .into();
-        assert_eq!(stamp(when), "2026-12-31T23:59:59Z");
+
+        assert_eq!(stamp(when), "2026-12-31T23:59:59");
+        assert!(
+            !stamp(when).contains('Z'),
+            "local time carries no zone mark: {}",
+            stamp(when)
+        );
+        assert_eq!(
+            stamp(when).len(),
+            "2026-12-31T23:59:59".len(),
+            "and nothing else was appended to it"
+        );
+    }
+
+    /// The stamp is local at the two moments where local and UTC disagree about
+    /// the **date**, which is the whole reason it moved (CHG-058 D-09).
+    ///
+    /// Midnight and 23:00 local: a UTC stamp puts the first in the previous day
+    /// and the second in the next one. The expected strings are literals, so the
+    /// implementation cannot move them -- and the format's own spelling is
+    /// pinned by `rolling::tests::the_names_and_the_formats_are_the_ones_the_ruling_names`,
+    /// which is where the archive-name format beside it is pinned too.
+    ///
+    /// Registered limit: on a machine whose zone *is* UTC this test and its
+    /// sibling cannot tell the two implementations apart. Measured on the
+    /// machine this was written on, where the zone is UTC+8.
+    #[test]
+    fn the_stamp_is_local_at_the_edges_of_the_day() {
+        use chrono::TimeZone;
+        for (month, day, hour) in [(1, 1, 0), (6, 30, 23), (12, 31, 23)] {
+            let when: SystemTime = chrono::Local
+                .with_ymd_and_hms(2026, month, day, hour, 0, 0)
+                .single()
+                .expect("an unambiguous local time")
+                .into();
+            let stamped = stamp(when);
+            assert_eq!(
+                &stamped[5..10],
+                format!("{month:02}-{day:02}"),
+                "the date is the local one: {stamped}"
+            );
+            assert_eq!(
+                &stamped[11..13],
+                format!("{hour:02}"),
+                "the hour is the local one: {stamped}"
+            );
+        }
     }
 
     #[test]
