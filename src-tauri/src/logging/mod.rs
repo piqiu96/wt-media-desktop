@@ -18,9 +18,17 @@
 //! hands it to a sink, [`redact`] masks what may not be printed on the way, and
 //! [`rolling`] bounds what the files may occupy. [`paths`] says where they are,
 //! and [`setup`] is the one function that puts it all together for the process.
+//!
+//! [`reader`] is the way back: it lists what a directory holds and reads the end
+//! of a file. It is not the mirror of [`rolling`] — the writer's own crate
+//! decides which files are its, and the reader has to agree with *that*, not
+//! with an idea of its own about names. Both components' walls of text are read
+//! by the same parser, which is why this module owns the read face even though
+//! half of what it reads is the Agent's.
 
 pub mod backend;
 pub mod paths;
+pub mod reader;
 pub mod redact;
 pub mod rolling;
 pub mod setup;

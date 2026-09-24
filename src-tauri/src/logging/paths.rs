@@ -28,6 +28,39 @@
 //!
 //! Windows is **not** covered: `home/Library/Logs/...` is a macOS shape, and no
 //! Windows layout has been measured. Registered as untested rather than guessed.
+//!
+//! ## The Agent's tree, which Desktop only mirrors
+//!
+//! The log viewer shows both components' files, and the Agent's are not in
+//! Desktop's directory — they are wherever the Agent decided to put them
+//! (`runtime/paths.py`, which is the Agent's to own). Desktop therefore mirrors
+//! **the inputs the Agent uses**, not its own: [`agent_directory`] takes a home
+//! and the configured data directory and takes *no* `Environment`, because a
+//! Desktop development build says nothing about where the Agent writes while the
+//! Agent's own `environment` and frozen-ness say everything.
+//!
+//! Two of the Agent's three branches are mirrored:
+//!
+//! | the Agent's rule | mirrored as |
+//! | --- | --- |
+//! | a non-empty `data_dir` override wins, logs beside it | [`agent_directory`] expands a leading `~/` and appends `logs` |
+//! | frozen *or* production ⇒ `~/Library/Logs/WTMedia/Agent` | the arm an unset `data_dir` takes |
+//!
+//! The third — not frozen, not production ⇒ the Agent's own checkout
+//! (`<repo>/.local/logs`) — is **not** mirrored and is not guessed at. Desktop
+//! cannot see either input: `frozen` is a property of a process it did not start
+//! from here, and the Agent's `environment` comes from the Agent's own config
+//! file, which is the Agent's to read (the shipped one says `production`; the
+//! built-in default is `development`, so the branch is reachable by editing that
+//! file rather than by anything Desktop does). Pointing at the installed tree
+//! when the Agent logs elsewhere costs an empty list and a visible path — the
+//! page shows the directory it read — whereas guessing the checkout would point
+//! a reader at somebody else's `.local/logs`.
+//!
+//! Measured on the machine this was written on: `~/Library/Logs/WTMedia/Agent`
+//! holds the Agent's three live files and the Agent repo's `.local/logs` is
+//! empty, so the runs that produced them took the installed branch — which is
+//! the arm an unset `data_dir` predicts.
 
 use crate::config::Environment;
 use std::path::{Path, PathBuf};
@@ -39,6 +72,15 @@ pub const APPLICATION_DIR: &str = "WTMedia";
 /// subdirectory and "which of these files is Desktop's" should never be a
 /// question asked of a shared directory listing.
 pub const COMPONENT_DIR: &str = "Desktop";
+
+/// The Agent's component directory, one level over in the same application
+/// directory. Not a courtesy: it is the other half of the name the Agent chose
+/// in `runtime/paths.py` (`INSTALLED_LOGS_DIR`).
+pub const AGENT_COMPONENT_DIR: &str = "Agent";
+
+/// The subdirectory an Agent data directory keeps its logs in, taken from the
+/// Agent's own override branch (`logs_dir = base / "logs"`).
+pub const AGENT_DATA_LOGS_SUBDIR: &str = "logs";
 
 /// The development layout, as path components relative to the crate.
 pub const DEVELOPMENT_DIR: [&str; 2] = [".local", "logs"];
@@ -76,6 +118,118 @@ pub fn directory(home: &Path, environment: Environment, manifest_dir: &Path) -> 
 pub struct LogDirectoryError {
     pub path: PathBuf,
     pub reason: std::io::Error,
+}
+
+/// Why an Agent log directory could not be determined from here.
+///
+/// Not an [`std::io::Error`]: nothing was read. This is a refusal to answer,
+/// which is a different thing from a failure to read, and a page that showed the
+/// two the same way would let "configured in a way I cannot follow" look like
+/// "the directory is broken".
+#[derive(Debug)]
+pub enum AgentDirectoryError {
+    /// The Agent's default tree is under the user's home and this process has no
+    /// home to build it from — the same input `app_paths::resolve` refuses to
+    /// guess at for the installed layout, refused for the same reason.
+    NoHome,
+    /// A configured value that cannot be resolved from this process.
+    Unresolvable {
+        /// The value, quoted back so whoever set it sees what was refused. It
+        /// comes from Desktop's own config, not from a log file, and it is a
+        /// directory rather than a secret.
+        configured: String,
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for AgentDirectoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentDirectoryError::NoHome => write!(
+                f,
+                "the Agent's log directory is under the user's home ({}), and this process has no \
+                 home directory set",
+                AGENT_COMPONENT_DIR
+            ),
+            AgentDirectoryError::Unresolvable { configured, reason } => write!(
+                f,
+                "the Agent's log directory cannot be determined from the configured data \
+                 directory {configured:?}: {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentDirectoryError {}
+
+/// Where the Agent put its log files, as far as Desktop can determine it.
+///
+/// Mirrors `RuntimePaths.resolve`'s override and installed branches — see this
+/// module's header for the branch that is deliberately not mirrored.
+///
+/// The `data_dir` input is Desktop's own config value (`[agent] data_dir`),
+/// which is passed to the child as `WT_MEDIA_AGENT_DATA_DIR` when it is set:
+/// reading the same setting the Agent was told means the two cannot disagree
+/// about which directory to look in.
+///
+/// A relative or `~user`-shaped value is refused rather than resolved. The
+/// Agent would resolve such a path against *its* working directory, which
+/// Desktop does not know, so any answer given here would be about a different
+/// directory than the one being written to — and a listing of the wrong
+/// directory presented as the Agent's logs is worse than no listing.
+///
+/// `home` is the same optional input `app_paths::resolve` takes, and for the same
+/// reason: the installed tree cannot be built without it while a configured
+/// absolute `data_dir` needs no home at all. A home that is not absolute is
+/// treated as absent — an empty or relative `HOME` would produce a relative
+/// answer that resolves against whatever directory this process happens to be in.
+pub fn agent_directory(
+    home: Option<&Path>,
+    data_dir: Option<&str>,
+) -> Result<PathBuf, AgentDirectoryError> {
+    let configured = data_dir.unwrap_or("").trim();
+
+    if configured.is_empty() {
+        // The Agent's own default, and the arm a non-frozen production Agent
+        // takes: `INSTALLED_LOGS_DIR`, beside this component's directory.
+        let home = real_home(home)?;
+        return Ok(home
+            .join("Library")
+            .join("Logs")
+            .join(APPLICATION_DIR)
+            .join(AGENT_COMPONENT_DIR));
+    }
+
+    let base = if let Some(rest) = configured.strip_prefix("~/") {
+        real_home(home)?.join(rest)
+    } else if configured == "~" {
+        // Python's `expanduser` maps a bare `~` to the home as well, so this arm
+        // is the same rule and not a special case.
+        real_home(home)?.to_path_buf()
+    } else if configured.starts_with('~') {
+        // `~someone/…`: refused rather than left to name a directory literally
+        // called `~someone`, which is what it would be if not expanded.
+        return Err(AgentDirectoryError::Unresolvable {
+            configured: configured.to_string(),
+            reason: "`~` is expanded only for this user's home (`~` and `~/…`); another \
+                     user's home needs the password database, which is not this side's to read",
+        });
+    } else if Path::new(configured).is_absolute() {
+        PathBuf::from(configured)
+    } else {
+        return Err(AgentDirectoryError::Unresolvable {
+            configured: configured.to_string(),
+            reason: "it is not absolute, so the Agent's own working directory would decide \
+                     where its logs are",
+        });
+    };
+    Ok(base.join(AGENT_DATA_LOGS_SUBDIR))
+}
+
+/// The home to build the Agent's installed path from, if this process has one.
+fn real_home(home: Option<&Path>) -> Result<&Path, AgentDirectoryError> {
+    home.filter(|path| path.is_absolute())
+        .ok_or(AgentDirectoryError::NoHome)
 }
 
 impl std::fmt::Display for LogDirectoryError {
@@ -160,6 +314,144 @@ mod tests {
         ));
         std::fs::remove_dir_all(&path).ok();
         path
+    }
+
+    /// The arm an unset `data_dir` takes: the Agent's installed tree, spelled out
+    /// rather than asserted as a suffix so the component directory is pinned too.
+    #[test]
+    fn an_unset_agent_data_dir_lands_in_the_agents_installed_tree() {
+        let installed = PathBuf::from("/home/operator/Library/Logs/WTMedia/Agent");
+        assert_eq!(
+            agent_directory(Some(&home()), None).expect("determinable"),
+            installed
+        );
+        // The shipped default is the empty string, not an absent key, and the two
+        // mean the same thing to the Agent (`(data_dir or "").strip()`).
+        assert_eq!(
+            agent_directory(Some(&home()), Some("")).expect("determinable"),
+            installed
+        );
+        assert_eq!(
+            agent_directory(Some(&home()), Some("   ")).expect("determinable"),
+            installed,
+            "the Agent strips the setting before using it, and so does this"
+        );
+    }
+
+    /// The Agent's tree is not Desktop's, and the two names differ for real.
+    ///
+    /// A mirror that returned this module's own directory would show the Agent's
+    /// page Desktop's files — which a shared parent would make look plausible.
+    #[test]
+    fn the_agent_tree_is_not_desktops_tree() {
+        let desktop = directory(&home(), Environment::Production, &manifest());
+        let agent = agent_directory(Some(&home()), None).expect("determinable");
+
+        assert_ne!(desktop, agent);
+        assert_eq!(
+            desktop.parent(),
+            agent.parent(),
+            "the two components share the application directory"
+        );
+    }
+
+    /// A configured data directory wins, and the logs sit beside it.
+    ///
+    /// Both `~` spellings Python's `expanduser` resolves: a leading `~/` and a
+    /// bare `~`. The first is what the Agent's own config comment recommends, the
+    /// second is what the same function would do with it.
+    #[test]
+    fn a_configured_agent_data_dir_puts_the_logs_beside_it() {
+        assert_eq!(
+            agent_directory(Some(&home()), Some("/Volumes/Scratch/agent-data"))
+                .expect("determinable"),
+            PathBuf::from("/Volumes/Scratch/agent-data/logs")
+        );
+        assert_eq!(
+            agent_directory(Some(&home()), Some("~/agent-data")).expect("determinable"),
+            PathBuf::from("/home/operator/agent-data/logs")
+        );
+        assert_eq!(
+            agent_directory(Some(&home()), Some(" ~/agent-data ")).expect("determinable"),
+            PathBuf::from("/home/operator/agent-data/logs")
+        );
+        assert_eq!(
+            agent_directory(Some(&home()), Some("~")).expect("determinable"),
+            PathBuf::from("/home/operator/logs"),
+            "a bare `~` is the home, and its logs subdirectory is the Agent's rule"
+        );
+    }
+
+    /// Values the Agent would resolve against *its* working directory, or through
+    /// another user's home, are refused rather than resolved here — and the
+    /// refusal quotes the value back.
+    #[test]
+    fn a_data_dir_that_cannot_be_resolved_from_here_is_refused() {
+        for configured in [
+            "agent-data",
+            "./agent-data",
+            "../agent-data",
+            "~someone/agent-data",
+        ] {
+            let refused = agent_directory(Some(&home()), Some(configured))
+                .expect_err("must not resolve a path this process cannot know");
+            match &refused {
+                AgentDirectoryError::Unresolvable {
+                    configured: quoted, ..
+                } => {
+                    assert_eq!(quoted, configured.trim(), "{configured}")
+                }
+                other => panic!("expected an unresolvable value, got {other:?}"),
+            }
+            assert!(
+                refused.to_string().contains(configured.trim()),
+                "the message must name what was refused: {refused}"
+            );
+        }
+    }
+
+    /// Without a home the installed tree cannot be built, and that is a refusal
+    /// rather than a path that starts without a root.
+    ///
+    /// The two arms that read the home are the ones that refuse; a configured
+    /// absolute path does not need it and still answers, which is what makes this
+    /// a per-input rule instead of a blanket "no HOME, no answer".
+    #[test]
+    fn no_home_refuses_the_arms_that_need_one() {
+        assert!(matches!(
+            agent_directory(None, None),
+            Err(AgentDirectoryError::NoHome)
+        ));
+        assert!(matches!(
+            agent_directory(None, Some("~/agent-data")),
+            Err(AgentDirectoryError::NoHome)
+        ));
+        // A relative HOME is as unusable as none: it would resolve against this
+        // process's working directory rather than the user's home.
+        assert!(matches!(
+            agent_directory(Some(Path::new("")), None),
+            Err(AgentDirectoryError::NoHome)
+        ));
+
+        assert_eq!(
+            agent_directory(None, Some("/Volumes/Scratch/agent-data")).expect("needs no home"),
+            PathBuf::from("/Volumes/Scratch/agent-data/logs"),
+            "an absolute data directory is answerable without a home"
+        );
+    }
+
+    /// The refusal is a refusal and not a fallback: what it must not do is quietly
+    /// answer with the installed tree, which would list a directory that is not
+    /// the one the Agent is writing to.
+    #[test]
+    fn the_refusal_does_not_fall_back_to_the_installed_tree() {
+        let refused = agent_directory(Some(&home()), Some("agent-data"));
+        let installed = agent_directory(Some(&home()), None).expect("determinable");
+
+        assert!(
+            matches!(&refused, Err(error) if !error.to_string().contains(&installed.display().to_string())),
+            "a refusal must not name the tree it did not read: {refused:?}"
+        );
     }
 
     #[test]

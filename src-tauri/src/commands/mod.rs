@@ -8,4 +8,5 @@ pub mod agent;
 pub mod bind;
 pub mod profile;
 pub mod public_config;
+pub mod storage;
 pub mod webview;

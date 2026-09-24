@@ -20,6 +20,7 @@ mod secure_store;
 mod settings;
 mod sidecar;
 mod state;
+mod storage;
 mod system;
 mod token;
 mod updater;
@@ -168,6 +169,11 @@ fn main() {
             // Appended, not inserted: `localAgentService.test.js` asserts on exact
             // argument objects, and the existing seventeen keep their positions.
             commands::public_config::get_public_config,
+            // T-05's read-only pair for the 本机设置 page, appended for the same
+            // reason: inserting any of them would renumber the assertions above.
+            commands::storage::local_storage_usage,
+            commands::storage::local_log_files,
+            commands::storage::local_log_tail,
         ])
         .plugin(tauri_plugin_shell::init())
         .build(context)

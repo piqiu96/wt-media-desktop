@@ -2,7 +2,8 @@
 //! them: `agent` (Local Agent status and runtime facts), `bind` (Cloud node
 //! registration), `account` (account check and cookie read), `profile`
 //! (BitBrowser profile operations), `config` (the narrow slice of Desktop's own
-//! configuration the page may see).
+//! configuration the page may see), `storage` (the machine's free space, what
+//! this app occupies, and the log files it can read back).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -14,12 +15,14 @@ mod agent;
 mod bind;
 mod config;
 mod profile;
+mod storage;
 
 pub use account::*;
 pub use agent::*;
 pub use bind::*;
 pub use config::*;
 pub use profile::*;
+pub use storage::*;
 
 use serde::Deserialize;
 

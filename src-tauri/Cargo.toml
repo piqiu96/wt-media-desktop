@@ -59,3 +59,9 @@ chrono = "0.4"
 # means two instances share one live file, and the crate renames it out from
 # under whichever handle is still writing.
 tauri-plugin-single-instance = "2"
+# Free space (`storage::available_bytes`). Already in the lockfile as a transitive
+# dependency of the tauri stack, so this adds no new crate -- it asks for the
+# `fs` feature, which is off by default. Chosen over `libc` + a hand-written
+# `unsafe` statvfs: this crate has no `unsafe` in it, and rustix's wrapper is the
+# same call with the layout differences already handled.
+rustix = { version = "1", features = ["fs"] }
