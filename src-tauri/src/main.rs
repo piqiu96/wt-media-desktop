@@ -23,7 +23,7 @@ mod token;
 mod updater;
 
 use http::{CloudClient, LocalAgentClient};
-use state::{AgentProcess, RuntimeBindingState, SidecarLog};
+use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
 use std::path::PathBuf;
 use token::RuntimeToken;
 
@@ -111,6 +111,10 @@ fn main() {
         // page and `apply_csp` can never be reading two different configs.
         .manage(startup.config.clone())
         .manage(AgentProcess::default())
+        // Beside the process handle, because the two answer the same question:
+        // `start` sets the id when it stores a child, `stop` clears it when it
+        // takes the child away. In-process only (D-10).
+        .manage(OperationId::default())
         .manage(RuntimeBindingState::default())
         .manage(SidecarLog::default())
         .setup(|_app| {

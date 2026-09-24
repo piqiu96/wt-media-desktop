@@ -13,35 +13,65 @@
 //! reason — `health` and `stop` take plain references and are exercised against a
 //! real socket; what still needs a running app is the spawn in `start`, and that
 //! is the one thing left where it was rather than faked.
+//!
+//! Every record carries the session id when there is one, as a **field** rather
+//! than as part of the message. A session is one Agent, from the start that made
+//! it to the stop that ended it; the id is what makes those lines greppable as a
+//! group, and it stays inside this process (`state::OperationId`, ruling D-10).
 
 use crate::config::DesktopConfig;
 use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
 use crate::sidecar::{self, drain};
-use crate::state::{AgentProcess, SidecarLog};
+use crate::state::{AgentProcess, OperationId, SidecarLog};
 use tauri::State;
 
+/// One lifecycle record, carrying the session id when there is one.
+///
+/// Two `event!` calls rather than one field of type `Option`: `tracing` prints
+/// every field it is given, so `operation_id = %option` would write `None` on
+/// every record made outside a session. The field has to be *absent* there —
+/// both so "which session was this?" cannot be answered wrongly, and so those
+/// records stay byte-identical to the shape a reader already knows.
+macro_rules! lifecycle {
+    ($level:ident, $session:expr, $($args:tt)*) => {
+        match $session {
+            Some(id) => tracing::event!(
+                target: "agent.supervisor",
+                tracing::Level::$level,
+                operation_id = %id,
+                $($args)*
+            ),
+            None => tracing::event!(
+                target: "agent.supervisor",
+                tracing::Level::$level,
+                $($args)*
+            ),
+        }
+    };
+}
+
 /// The Agent started, with the label the caller also receives back.
-fn started(label: &str) {
-    tracing::info!(target: "agent.supervisor", "Local Agent 已启动（{label}）");
+fn started(label: &str, session: Option<&str>) {
+    lifecycle!(INFO, session, "Local Agent 已启动（{label}）");
 }
 
 /// A start request while one is already running: nothing happened, and that is
 /// worth a record precisely because nothing did — the caller still gets
 /// `already_running` back, and a second Agent is not started.
-fn already_running() {
-    tracing::info!(target: "agent.supervisor", "Local Agent 已在运行，忽略本次启动请求");
+fn already_running(session: Option<&str>) {
+    lifecycle!(INFO, session, "Local Agent 已在运行，忽略本次启动请求");
 }
 
 /// The Agent was killed at Desktop's request.
-fn stopped() {
-    tracing::info!(target: "agent.supervisor", "Local Agent 已停止");
+fn stopped(session: Option<&str>) {
+    lifecycle!(INFO, session, "Local Agent 已停止");
 }
 
 /// A stop request with nothing to stop.
 fn not_running() {
-    tracing::info!(target: "agent.supervisor", "Local Agent 未在运行，忽略本次停止请求");
+    lifecycle!(INFO, None::<&str>, "Local Agent 未在运行，忽略本次停止请求");
 }
 
 /// The health check answered, body and all — at DEBUG.
@@ -49,8 +79,15 @@ fn not_running() {
 /// The body is the Agent's own status, already written to the Agent's own files;
 /// keeping it out of the production log is ruling 四, and it has to stay
 /// reachable somehow or the level is decoration rather than a policy.
-fn healthy(text: &str) {
-    tracing::debug!(target: "agent.supervisor", "健康检查成功：{text}");
+fn healthy(text: &str, session: Option<&str>) {
+    lifecycle!(DEBUG, session, "健康检查成功：{text}");
+}
+
+/// The kill failed. The session is **not** over — the child was taken out of the
+/// managed slot before the kill was attempted, and a kill that failed leaves a
+/// process that may still be running — so the id stays where it is.
+fn stop_failed(reason: &str, session: Option<&str>) {
+    lifecycle!(WARN, session, "{reason}");
 }
 
 /// A failed Agent command: the caller gets the tail, the record does not.
@@ -63,8 +100,8 @@ fn healthy(text: &str) {
 ///
 /// The message is passed through unchanged, so the string the frontend sees is
 /// exactly what it saw before this existed — the record is the only new thing.
-fn failed(message: String, log: &SidecarLog) -> String {
-    tracing::warn!(target: "agent.supervisor", "{message}");
+fn failed(message: String, log: &SidecarLog, session: Option<&str>) -> String {
+    lifecycle!(WARN, session, "{message}");
     message + &drain::summary(log)
 }
 
@@ -89,17 +126,24 @@ pub async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<L
 /// launch does not reach it here either, because the front end does not boot in
 /// this environment (the window opens blank; see the T-16 evidence). What stays
 /// in the command is the argument unpacking.
-async fn health(client: &LocalAgentClient, log: &SidecarLog) -> Result<String, String> {
+async fn health(
+    client: &LocalAgentClient,
+    log: &SidecarLog,
+    session: &OperationId,
+) -> Result<String, String> {
+    // Read once, at the top: a health check belongs to the session that was
+    // open when it was asked, whichever line it ends up writing.
+    let id = session.current();
     let resp = client
         .get("/healthz")
         .send()
         .await
-        .map_err(|e| failed(format!("agent unreachable: {e}"), log))?;
+        .map_err(|e| failed(format!("agent unreachable: {e}"), log, id.as_deref()))?;
     let text = resp
         .text()
         .await
-        .map_err(|e| failed(format!("read error: {e}"), log))?;
-    healthy(&text);
+        .map_err(|e| failed(format!("read error: {e}"), log, id.as_deref()))?;
+    healthy(&text, id.as_deref());
     Ok(text)
 }
 
@@ -113,6 +157,7 @@ async fn start(
     client: &LocalAgentClient,
     config: &DesktopConfig,
     process: &AgentProcess,
+    session: &OperationId,
     log: &SidecarLog,
 ) -> Result<String, String> {
     if process
@@ -121,9 +166,14 @@ async fn start(
         .map_err(|_| "agent process lock poisoned")?
         .is_some()
     {
-        already_running();
+        already_running(session.current().as_deref());
         return Ok("already_running".into());
     }
+    // One id per **start request**, generated before the spawn and used by every
+    // record this attempt writes. A failed attempt has an id but no session: the
+    // id is not stored until there is a child to go with it, so a later start
+    // does not inherit the id of a start that never happened.
+    let id = OperationId::generate();
     // Release builds must run only the bundled sidecar. Development can opt into
     // a Python fallback explicitly when iterating without a frozen binary.
     //
@@ -137,36 +187,60 @@ async fn start(
         config,
         client.token(),
     )
-    .map_err(|e| failed(e, log))?;
+    .map_err(|e| failed(e, log, Some(&id)))?;
     process
         .0
         .lock()
         .map_err(|_| "agent process lock poisoned")?
         .replace(child);
-    started(label);
+    begin(session, &id, label);
     Ok(label.into())
 }
 
+/// A start that succeeded: the session exists from here.
+///
+/// Split out of `start` for the reason the record functions are — everything
+/// after a successful spawn is reachable in a test, and it must not live inside
+/// a function that needs an `AppHandle` to run. Two ordered steps, and the order
+/// is the point: stored before recorded, so a reader never sees a "started" line
+/// for a session that is not held yet.
+fn begin(session: &OperationId, id: &str, label: &str) {
+    session.set(id.to_string());
+    started(label, Some(id));
+}
+
+/// A stop that succeeded: the session ends here, not at the next start.
+///
+/// The mirror of `begin`, for the same reason and with the opposite ordering —
+/// read, then recorded, then cleared. An id that outlived its Agent would label
+/// the next session's records with the previous one's id.
+fn ended(session: &OperationId, label: &str) -> String {
+    stopped(session.current().as_deref());
+    session.clear();
+    label.into()
+}
+
 /// The stop itself, without Tauri.
-fn stop(process: &AgentProcess) -> Result<String, String> {
+fn stop(process: &AgentProcess, session: &OperationId) -> Result<String, String> {
     let child = process
         .0
         .lock()
         .map_err(|_| "agent process lock poisoned")?
         .take();
     match child {
-        Some(child) => match sidecar::stop(child) {
-            Ok(label) => {
-                stopped();
-                Ok(label)
+        Some(child) => {
+            let id = session.current();
+            match sidecar::stop(child) {
+                Ok(label) => Ok(ended(session, &label)),
+                // The kill failed. No tail: nothing here reads the sidecar's
+                // output, and the buffer belongs to a process that is still
+                // alive — which is also why the session stays open.
+                Err(reason) => {
+                    stop_failed(&reason, id.as_deref());
+                    Err(reason)
+                }
             }
-            // The kill failed. No tail: nothing here reads the sidecar's output,
-            // and the buffer belongs to a process that is still alive.
-            Err(reason) => {
-                tracing::warn!(target: "agent.supervisor", "{reason}");
-                Err(reason)
-            }
-        },
+        }
         None => {
             not_running();
             Ok("not_running".into())
@@ -178,8 +252,9 @@ fn stop(process: &AgentProcess) -> Result<String, String> {
 pub async fn local_agent_health(
     client: State<'_, LocalAgentClient>,
     log: State<'_, SidecarLog>,
+    session: State<'_, OperationId>,
 ) -> Result<String, String> {
-    health(&client, &log).await
+    health(&client, &log, &session).await
 }
 #[tauri::command]
 pub async fn local_agent_start(
@@ -187,13 +262,17 @@ pub async fn local_agent_start(
     client: State<'_, LocalAgentClient>,
     config: State<'_, DesktopConfig>,
     process: State<'_, AgentProcess>,
+    session: State<'_, OperationId>,
     log: State<'_, SidecarLog>,
 ) -> Result<String, String> {
-    start(&app, &client, &config, &process, &log).await
+    start(&app, &client, &config, &process, &session, &log).await
 }
 #[tauri::command]
-pub fn local_agent_stop(process: State<'_, AgentProcess>) -> Result<String, String> {
-    stop(&process)
+pub fn local_agent_stop(
+    process: State<'_, AgentProcess>,
+    session: State<'_, OperationId>,
+) -> Result<String, String> {
+    stop(&process, &session)
 }
 /// Fetch task progress as a status snapshot.
 ///
@@ -219,6 +298,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
     use tracing::subscriber::with_default;
 
     fn client_to(port: u16) -> LocalAgentClient {
@@ -227,17 +307,39 @@ mod tests {
         LocalAgentClient::new(&config, RuntimeToken::generate())
     }
 
-    /// A listener answering `body` to one request, on a port the kernel picks.
+    /// A session that is already open, holding `id`.
+    ///
+    /// An id given by the test rather than generated, so every assertion can be
+    /// exact and a value that leaked into the wrong place is recognisable.
+    fn holding(id: &str) -> OperationId {
+        let session = OperationId::default();
+        session.set(id.to_string());
+        session
+    }
+
+    /// A listener answering `body` to one request, on a port the kernel picks,
+    /// **and the bytes it received**.
     ///
     /// Port 0, never a fixed one: the socket is the test's own, and a test that
     /// picked 8765 would fight the developer's running Agent for it.
-    fn answering(body: &'static str) -> u16 {
+    ///
+    /// The request is kept because "the Agent never sees the session id" (D-10)
+    /// is a claim about what left the process, and no assertion on a
+    /// `RequestBuilder` can make it: `host` is added by hyper at send time, so a
+    /// set read before `send()` is a baseline that never matches the wire.
+    fn recording(body: &'static str) -> (u16, Arc<Mutex<Vec<u8>>>) {
         let server = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let port = server.local_addr().expect("the bound address").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
         std::thread::spawn(move || {
             if let Ok((mut socket, _)) = server.accept() {
-                let mut request = [0u8; 1024];
-                let _ = socket.read(&mut request);
+                let mut request = [0u8; 2048];
+                if let Ok(read) = socket.read(&mut request) {
+                    sink.lock()
+                        .expect("the recorder")
+                        .extend_from_slice(&request[..read]);
+                }
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     body.len(),
@@ -246,7 +348,18 @@ mod tests {
                 let _ = socket.write_all(response.as_bytes());
             }
         });
-        port
+        (port, seen)
+    }
+
+    /// The same listener, for the tests that do not look at the request.
+    fn answering(body: &'static str) -> u16 {
+        recording(body).0
+    }
+
+    /// What the stub received, as text.
+    fn received(seen: &Arc<Mutex<Vec<u8>>>) -> String {
+        let bytes = seen.lock().expect("the recorder").clone();
+        String::from_utf8(bytes).expect("an HTTP request is ASCII")
     }
 
     /// A port nothing is listening on: bound, then released.
@@ -266,9 +379,9 @@ mod tests {
         let (directory, subscriber) =
             capture_at(Levels::shipped(Environment::Production), "agent-lifecycle");
         with_default(subscriber, || {
-            started("sidecar_started");
-            already_running();
-            stopped();
+            started("sidecar_started", None);
+            already_running(None);
+            stopped(None);
             not_running();
         });
 
@@ -289,14 +402,14 @@ mod tests {
     #[test]
     fn the_health_body_is_development_only() {
         let (development, subscriber) = capture("agent-health-body-development");
-        with_default(subscriber, || healthy("{\"status\":\"ok\"}"));
+        with_default(subscriber, || healthy("{\"status\":\"ok\"}", None));
         let text = written(&development.0);
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("[DEBUG] agent.supervisor: 健康检查成功：{\"status\":\"ok\"}"), "{text}");
 
         let (production, subscriber) =
             capture_at(Levels::shipped(Environment::Production), "agent-health-body-production");
-        with_default(subscriber, || healthy("{\"status\":\"ok\"}"));
+        with_default(subscriber, || healthy("{\"status\":\"ok\"}", None));
         assert_eq!(
             written(&production.0),
             "",
@@ -317,7 +430,11 @@ mod tests {
         drain::push(&log, "bind: 127.0.0.1:8765".to_string());
 
         let returned = with_default(subscriber, || {
-            failed("agent unreachable: connection refused".to_string(), &log)
+            failed(
+                "agent unreachable: connection refused".to_string(),
+                &log,
+                None,
+            )
         });
 
         assert_eq!(
@@ -343,7 +460,11 @@ mod tests {
     fn a_failure_with_no_output_is_the_message_alone() {
         let (directory, subscriber) = capture("agent-failure-quiet");
         let returned = with_default(subscriber, || {
-            failed("read error: unexpected eof".to_string(), &SidecarLog::default())
+            failed(
+                "read error: unexpected eof".to_string(),
+                &SidecarLog::default(),
+                None,
+            )
         });
 
         assert_eq!(returned, "read error: unexpected eof");
@@ -366,7 +487,11 @@ mod tests {
         let (directory, subscriber) = capture("agent-health-body");
 
         let returned = with_default(subscriber, || {
-            tauri::async_runtime::block_on(health(&client, &SidecarLog::default()))
+            tauri::async_runtime::block_on(health(
+                &client,
+                &SidecarLog::default(),
+                &OperationId::default(),
+            ))
         });
 
         assert_eq!(returned.expect("the stub answers"), "{\"status\":\"ok\"}");
@@ -391,7 +516,7 @@ mod tests {
         drain::push(&log, "uvicorn: started".to_string());
 
         let returned = with_default(subscriber, || {
-            tauri::async_runtime::block_on(health(&client, &log))
+            tauri::async_runtime::block_on(health(&client, &log, &OperationId::default()))
         });
 
         let returned = returned.expect_err("nothing is listening");
@@ -414,12 +539,206 @@ mod tests {
     fn a_stop_with_nothing_running_is_recorded() {
         let (directory, subscriber) = capture("agent-stop-idle");
 
-        let returned = with_default(subscriber, || stop(&AgentProcess::default()));
+        let returned = with_default(subscriber, || {
+            stop(&AgentProcess::default(), &OperationId::default())
+        });
 
-        assert_eq!(returned.expect("stopping nothing is not an error"), "not_running");
+        assert_eq!(
+            returned.expect("stopping nothing is not an error"),
+            "not_running"
+        );
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
     }
 
+    /// A session opens and closes, and both records say which session it was.
+    ///
+    /// `begin`/`ended` are what `start` and `stop` run once the spawn and the
+    /// kill have succeeded — the two halves the suite cannot reach, because one
+    /// needs an `AppHandle` and the other a `CommandChild`. Their ordering is
+    /// asserted here rather than assumed: the session is held before the
+    /// "started" record and cleared after the "stopped" one, so a reader is
+    /// never told about a session that is not held.
+    #[test]
+    fn a_session_is_held_and_released_around_its_two_records() {
+        let session = OperationId::default();
+        let (directory, subscriber) = capture("agent-session-boundaries");
+
+        with_default(subscriber, || {
+            begin(&session, "session-one", "sidecar_started");
+            assert_eq!(
+                session.current().as_deref(),
+                Some("session-one"),
+                "held before the record is written"
+            );
+            assert_eq!(ended(&session, "stopped"), "stopped");
+            assert_eq!(
+                session.current(),
+                None,
+                "released once the stop is recorded"
+            );
+        });
+
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started） operation_id=session-one"), "{text}");
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 已停止 operation_id=session-one"),
+            "{text}"
+        );
+    }
+
+    /// A record made outside a session has **no id field at all**.
+    ///
+    /// Not an empty one, not `None`, not a placeholder: the field is absent, so
+    /// these lines read exactly as they did before the id existed. A value of
+    /// any kind would be a claim about which session a record belongs to, and
+    /// there is no session to name.
+    #[test]
+    fn a_record_outside_a_session_has_no_id_field() {
+        let (directory, subscriber) = capture("agent-session-absent");
+
+        with_default(subscriber, || {
+            started("sidecar_started", None);
+            healthy("{\"status\":\"ok\"}", None);
+            failed(
+                "agent unreachable: connection refused".to_string(),
+                &SidecarLog::default(),
+                None,
+            );
+            not_running();
+        });
+
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(
+            !text.contains("operation_id"),
+            "no session, no field — not an empty one: {text}"
+        );
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）\n"),
+            "{text}"
+        );
+    }
+
+    /// Every record the module can make, inside one session: all of them name it.
+    ///
+    /// The whole table rather than one case per function, because the way this
+    /// goes wrong is a single emit point added without the session — and a spot
+    /// check would not find it. `not_running` is the one record that is never
+    /// made inside a session (nothing to stop), so it is not in the table; it is
+    /// covered by the test above.
+    #[test]
+    fn every_record_a_session_can_make_names_that_session() {
+        let (directory, subscriber) = capture("agent-session-table");
+
+        with_default(subscriber, || {
+            started("sidecar_started", Some("session-one"));
+            already_running(Some("session-one"));
+            healthy("{\"status\":\"ok\"}", Some("session-one"));
+            stopped(Some("session-one"));
+            stop_failed("agent stop failed: no such process", Some("session-one"));
+            failed(
+                "agent unreachable: connection refused".to_string(),
+                &SidecarLog::default(),
+                Some("session-one"),
+            );
+        });
+
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 6, "one record per call: {text}");
+        for line in text.lines() {
+            assert!(
+                line.ends_with("operation_id=session-one"),
+                "every one of them names the session: {line}"
+            );
+        }
+    }
+
+    /// The id is read where the records are made, not handed in from outside: a
+    /// health check asked during a session reports that session.
+    ///
+    /// This is the read point inside the command body. The same assertion for
+    /// `start` needs a real launch (the spawn is unreachable), which is why the
+    /// real-machine arm in the evidence exists as well.
+    #[test]
+    fn a_health_check_reports_the_session_it_was_asked_in() {
+        let port = answering("{\"status\":\"ok\"}");
+        let session = holding("session-one");
+        let (directory, subscriber) = capture("agent-session-health");
+
+        let returned = with_default(subscriber, || {
+            tauri::async_runtime::block_on(health(
+                &client_to(port),
+                &SidecarLog::default(),
+                &session,
+            ))
+        });
+
+        assert_eq!(returned.expect("the stub answers"), "{\"status\":\"ok\"}");
+        let text = written(&directory.0);
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "one record, and it names the session: {text}"
+        );
+        assert!(
+            text.contains("operation_id=session-one"),
+            "the id travels with the record: {text}"
+        );
+    }
+
+    /// The id stays inside this process: it is not on the wire, in any form.
+    ///
+    /// Asserted against the bytes the stub **received**, not against a
+    /// `RequestBuilder`: `host` is added by hyper at send time, so a set read
+    /// before `send()` is a baseline that cannot match what the Agent gets.
+    /// Three separate ways for the id to escape are ruled out here — the request
+    /// line and path (a query string would show up in the first line), the header
+    /// names (a full, sorted list rather than a membership check, so an added
+    /// header cannot hide), and the request as a whole.
+    #[test]
+    fn the_session_id_never_reaches_the_request() {
+        let (port, seen) = recording("{\"status\":\"ok\"}");
+        let session = holding("session-one");
+
+        let returned = tauri::async_runtime::block_on(health(
+            &client_to(port),
+            &SidecarLog::default(),
+            &session,
+        ));
+        assert_eq!(returned.expect("the stub answers"), "{\"status\":\"ok\"}");
+
+        let request = received(&seen);
+        let head = request.split("\r\n\r\n").next().expect("a request head");
+        assert_eq!(
+            head.lines().next(),
+            Some("GET /healthz HTTP/1.1"),
+            "the path is the one the client was given, with nothing appended: {head}"
+        );
+        assert!(
+            !request.contains("session-one"),
+            "the id is not header, query or body: {request}"
+        );
+
+        // Measured, not predicted: this is the list the socket actually saw, in
+        // the order it saw it. `accept: */*` is reqwest's, `host` is hyper's at
+        // send time, and neither is visible on a `RequestBuilder` before `send`.
+        let names: Vec<String> = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split(':').next())
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "authorization".to_string(),
+                "accept".to_string(),
+                "host".to_string()
+            ],
+            "the request carries exactly what it carried before the id existed: {head}"
+        );
+    }
 }

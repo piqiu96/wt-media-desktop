@@ -128,4 +128,42 @@ mod tests {
         }
         assert_ne!(first.expose(), second.expose(), "the two cases must differ to mean anything");
     }
+
+    /// The URL is the base plus the path, and nothing else — no query string.
+    ///
+    /// The session id (D-10) is in-process only, and a query parameter is the
+    /// quiet way it would leave: `?op=<id>` would be invisible to a test that
+    /// only looked at headers, and it would travel to the Agent on every call.
+    /// Asserted on the built request rather than on `url()`, because the request
+    /// is what a caller can change a header on next.
+    #[test]
+    fn a_request_url_is_the_base_and_the_path_with_no_query() {
+        let client =
+            LocalAgentClient::new(&config_with("127.0.0.1", 18999), RuntimeToken::generate());
+
+        // Several paths, because a query appended in `get`/`post` would be
+        // invisible from a single one.
+        for path in [
+            "/healthz",
+            "/api/v1/status",
+            "/api/v1/bind",
+            "/api/v1/health",
+        ] {
+            let request = client.get(path).build().expect("the request must build");
+            assert_eq!(
+                request.url().as_str(),
+                format!("http://127.0.0.1:18999{path}"),
+                "no query, no fragment, nothing appended"
+            );
+        }
+
+        let request = client
+            .post("/api/v1/agent/start")
+            .build()
+            .expect("the request must build");
+        assert_eq!(
+            request.url().as_str(),
+            "http://127.0.0.1:18999/api/v1/agent/start"
+        );
+    }
 }
