@@ -5,6 +5,7 @@
 // `local_agent_task_status` reads a status snapshot.
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
+mod app_paths;
 mod bootstrap;
 mod commands;
 mod config;
