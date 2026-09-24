@@ -17,6 +17,7 @@ mod logging;
 mod paths;
 mod preflight;
 mod secure_store;
+mod settings;
 mod sidecar;
 mod state;
 mod system;
