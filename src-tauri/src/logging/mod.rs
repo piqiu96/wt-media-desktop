@@ -14,3 +14,4 @@
 //! without writing files ends up tested only by the launch that needed it.
 
 pub mod paths;
+pub mod rolling;
