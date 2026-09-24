@@ -404,7 +404,7 @@ mod tests {
             ("python fallback in production", "python_fallback = false", "python_fallback = true"),
             (
                 "empty csp connect-src in production",
-                "csp_connect_src = \"http://127.0.0.1:18080\"",
+                "csp_connect_src = \"ipc: http://ipc.localhost http://127.0.0.1:18080\"",
                 "csp_connect_src = \"\"",
             ),
         ];

@@ -24,9 +24,15 @@ port = 8765
 base_url = "http://127.0.0.1:18080"
 
 [browser]
-# Injected as `connect-src` when the window is created, so the address lives
-# here rather than as a literal in tauri.conf.json.
-csp_connect_src = "http://127.0.0.1:18080"
+# Injected as `connect-src` when the window is created, so the addresses live
+# here rather than as literals in tauri.conf.json.
+#
+# `ipc:` covers the Windows/Linux IPC scheme. On macOS Tauri's IPC transport is
+# an `http:` fetch to `http://ipc.localhost`, so the scheme-source alone does not
+# match it and the explicit host is what clears those refusals; macOS has a
+# `postMessage` fallback, which is why a missing entry costs refusals rather than
+# a dead window. Measured: adding both dropped `ipc://` refusals from 3 to 0.
+csp_connect_src = "ipc: http://ipc.localhost http://127.0.0.1:18080"
 
 [http]
 # Both must be > 0. `reqwest::Client` has no timeout by default, which means a
