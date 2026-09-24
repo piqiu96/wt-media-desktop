@@ -1,6 +1,6 @@
 //! The client for the bundled Local Agent on loopback.
 
-use super::build_client;
+use super::build_client_without_proxy;
 use crate::config::DesktopConfig;
 use crate::token::RuntimeToken;
 use reqwest::{Client, RequestBuilder};
@@ -18,6 +18,17 @@ use reqwest::{Client, RequestBuilder};
 /// `get`/`post` put it on the header, and `token` hands it to the sidecar's
 /// environment. Two holders would be a way for the Agent to be told one secret
 /// and challenged with another.
+///
+/// Every request here goes straight to the sidecar, never through a system
+/// proxy, and that is **unconditional** rather than decided per URL. The
+/// condition would have to be `is_loopback_url(&self.base)`, and `base` is
+/// `format!("http://{}:{}", host, port)` — which for `agent.host = "::1"`, a
+/// value the config validator accepts, produces `http://::1:8765` with no
+/// brackets around the authority. `Url::parse` rejects that, so a conditional
+/// bypass would quietly fall back to the proxied client for a legal
+/// configuration, and the failure would be a loopback call leaving the machine.
+/// Building it this way means "the Local Agent is never proxied" holds by
+/// construction instead of by a string predicate.
 pub struct LocalAgentClient {
     inner: Client,
     base: String,
@@ -27,7 +38,7 @@ pub struct LocalAgentClient {
 impl LocalAgentClient {
     pub fn new(config: &DesktopConfig, token: RuntimeToken) -> Self {
         Self {
-            inner: build_client(config),
+            inner: build_client_without_proxy(config),
             base: format!("http://{}:{}", config.agent.host, config.agent.port),
             token,
         }
