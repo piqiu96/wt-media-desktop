@@ -48,6 +48,7 @@ pub struct DesktopConfig {
     pub browser: Browser,
     pub http: Http,
     pub sidecar: Sidecar,
+    pub logging: Logging,
     pub development: Development,
 }
 
@@ -86,6 +87,39 @@ pub struct Http {
 #[serde(deny_unknown_fields)]
 pub struct Sidecar {
     pub start_timeout_ms: u64,
+}
+
+/// The spellings `logging.level` accepts, in the order the rejection message
+/// lists them.
+///
+/// Exported because the subscriber has to map the accepted token onto a
+/// `LevelFilter`, and a second hand-written list there would be free to accept
+/// a level this one rejects. Lowercase only: one spelling per level, so a file
+/// cannot say `INFO` here and `info` in the message about it.
+pub const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
+
+/// `logging.level = "auto"` means "whatever the environment ships" — production
+/// INFO, development DEBUG (ruling 四). It is a token rather than an absent key
+/// because a comment cannot be validated, and `#[serde(default)]` here would let
+/// the shipped file and this struct drift apart without a word.
+pub const LOG_LEVEL_AUTO: &str = "auto";
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Logging {
+    /// `auto` or one of [`LOG_LEVELS`].
+    pub level: String,
+    /// One file rolls at this size.
+    pub max_file_bytes: u64,
+    /// Days a rolled file survives before the age sweep deletes it.
+    ///
+    /// Signed, because TOML has negative integers and `-1` parses into `i64`
+    /// without complaint; a negative retention would put the cutoff in the
+    /// future and expire every file including today's, so validation rejects
+    /// the sign rather than only zero.
+    pub retention_days: i64,
+    /// The whole directory's budget, across all files.
+    pub total_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -175,6 +209,40 @@ impl DesktopConfig {
         if self.sidecar.start_timeout_ms == 0 {
             return Err(ConfigError::Invalid(
                 "sidecar.start_timeout_ms must be > 0".to_string(),
+            ));
+        }
+        if self.logging.level != LOG_LEVEL_AUTO
+            && !LOG_LEVELS.contains(&self.logging.level.as_str())
+        {
+            return Err(ConfigError::Invalid(format!(
+                "logging.level must be one of {}, {}",
+                LOG_LEVEL_AUTO,
+                LOG_LEVELS.join(", ")
+            )));
+        }
+        // Three zero checks rather than one loop: `retention_days` is the only
+        // signed one, and `<= 0` is what its type makes meaningful.
+        for (key, bytes) in [
+            ("logging.max_file_bytes", self.logging.max_file_bytes),
+            ("logging.total_bytes", self.logging.total_bytes),
+        ] {
+            if bytes == 0 {
+                return Err(ConfigError::Invalid(format!("{} must be > 0", key)));
+            }
+        }
+        if self.logging.retention_days <= 0 {
+            return Err(ConfigError::Invalid(
+                "logging.retention_days must be > 0".to_string(),
+            ));
+        }
+        // Checked beyond the plan's list: a total budget smaller than a single
+        // file's cap is not merely tight, it is unsatisfiable — the writer would
+        // roll to stay under the per-file cap and then have to delete the file it
+        // just wrote to stay under the total, so every record written is also the
+        // one that evicts it. Both keys are named; neither value is echoed.
+        if self.logging.total_bytes < self.logging.max_file_bytes {
+            return Err(ConfigError::Invalid(
+                "logging.total_bytes must be >= logging.max_file_bytes".to_string(),
             ));
         }
         if self.environment == Environment::Production {
@@ -273,19 +341,71 @@ mod tests {
         assert!(!config.development.python_fallback);
     }
 
+    /// The shipped file's three log numbers are the writer's shipped limits —
+    /// the *same* three, not three that happen to agree today.
+    ///
+    /// Two sources, one behaviour: `rolling::Limits::SHIPPED` is what the writer
+    /// uses when nobody hands it a set, and the TOML is what the app hands it
+    /// once startup wires the two together. Neither reads the other, so without
+    /// this the two can drift silently and the app rolls at a size that appears
+    /// in no document.
+    #[test]
+    fn the_shipped_logging_values_are_the_writers_shipped_limits() {
+        let config = load_with(&BTreeMap::new(), PRODUCTION_TOML, Environment::Production)
+            .expect("the shipped production resource must load");
+        let limits = crate::logging::rolling::Limits::SHIPPED;
+
+        assert_eq!(config.logging.max_file_bytes, limits.max_file_bytes);
+        assert_eq!(config.logging.retention_days, limits.retention_days);
+        assert_eq!(config.logging.total_bytes, limits.total_bytes);
+
+        // And the level is pinned to the sentinel: a shipped file naming a level
+        // outright would silently override ruling 四 for every install, which is
+        // exactly the decision the sentinel exists to keep out of the file.
+        assert_eq!(config.logging.level, LOG_LEVEL_AUTO);
+    }
+
     /// `deny_unknown_fields` is what stops a credential from living in a file
     /// that ships with the app — and the error must name the key without
     /// repeating its value.
+    ///
+    /// Every section is listed, because the attribute is written **per struct**:
+    /// the top-level derive guards the top-level keys and nothing else. Measured:
+    /// dropping it from `Logging` alone survived the whole module, so a stray
+    /// `token = "…"` under `[logging]` would have been silently ignored by the
+    /// very file T-14 was adding.
     #[test]
     fn unknown_key_is_rejected_by_name_without_echoing_its_value() {
-        let text = format!("runtime_token = \"do-not-log-me\"\n{PRODUCTION_TOML}");
+        let sections = [
+            ("the top level", String::new()),
+            ("agent", "[agent]\n".to_string()),
+            ("cloud", "[cloud]\n".to_string()),
+            ("browser", "[browser]\n".to_string()),
+            ("http", "[http]\n".to_string()),
+            ("sidecar", "[sidecar]\n".to_string()),
+            ("logging", "[logging]\n".to_string()),
+            ("development", "[development]\n".to_string()),
+        ];
 
-        let error = load_with(&BTreeMap::new(), &text, Environment::Production)
-            .expect_err("an unknown key must be rejected");
+        for (section, header) in sections {
+            let text = if header.is_empty() {
+                format!("runtime_token = \"do-not-log-me\"\n{PRODUCTION_TOML}")
+            } else {
+                PRODUCTION_TOML.replace(
+                    &header,
+                    &format!("{header}runtime_token = \"do-not-log-me\"\n"),
+                )
+            };
 
-        let rendered = error.to_string();
-        assert!(rendered.contains("runtime_token"), "{rendered}");
-        assert!(!rendered.contains("do-not-log-me"), "{rendered}");
+            let error = match load_with(&BTreeMap::new(), &text, Environment::Production) {
+                Err(error) => error,
+                Ok(config) => panic!("an unknown key in {section} must be rejected: {config:?}"),
+            };
+
+            let rendered = error.to_string();
+            assert!(rendered.contains("runtime_token"), "{section}: {rendered}");
+            assert!(!rendered.contains("do-not-log-me"), "{section}: {rendered}");
+        }
     }
 
     #[test]
@@ -393,31 +513,167 @@ mod tests {
 
     /// Each row breaks exactly one requirement; the table keeps a new check
     /// from being added without a case that proves it fires.
+    ///
+    /// The fourth column is the key the message must name, and it is load
+    /// bearing: without it a row also passes when an *earlier* check happens to
+    /// reject the rewritten file, so the row would stop proving its own rule
+    /// the moment the checks are reordered or a new one is inserted above it.
     #[test]
     fn out_of_range_values_are_rejected() {
-        let rows: [(&str, &str, &str); 7] = [
-            ("privileged port", "port = 8765", "port = 80"),
-            ("zero request timeout", "request_timeout_seconds = 30", "request_timeout_seconds = 0"),
-            ("zero connect timeout", "connect_timeout_seconds = 10", "connect_timeout_seconds = 0"),
-            ("zero sidecar start timeout", "start_timeout_ms = 15000", "start_timeout_ms = 0"),
-            ("cloud url without a scheme", "base_url = \"http://127.0.0.1:18080\"", "base_url = \"127.0.0.1:18080\""),
-            ("python fallback in production", "python_fallback = false", "python_fallback = true"),
+        let rows: [(&str, &str, &str, &str); 13] = [
+            ("privileged port", "port = 8765", "port = 80", "agent.port"),
+            (
+                "zero request timeout",
+                "request_timeout_seconds = 30",
+                "request_timeout_seconds = 0",
+                "http.request_timeout_seconds",
+            ),
+            (
+                "zero connect timeout",
+                "connect_timeout_seconds = 10",
+                "connect_timeout_seconds = 0",
+                "http.connect_timeout_seconds",
+            ),
+            (
+                "zero sidecar start timeout",
+                "start_timeout_ms = 15000",
+                "start_timeout_ms = 0",
+                "sidecar.start_timeout_ms",
+            ),
+            (
+                "cloud url without a scheme",
+                "base_url = \"http://127.0.0.1:18080\"",
+                "base_url = \"127.0.0.1:18080\"",
+                "cloud.base_url",
+            ),
+            (
+                "python fallback in production",
+                "python_fallback = false",
+                "python_fallback = true",
+                "development.python_fallback",
+            ),
             (
                 "empty csp connect-src in production",
                 "csp_connect_src = \"ipc: http://ipc.localhost http://127.0.0.1:18080\"",
                 "csp_connect_src = \"\"",
+                "browser.csp_connect_src",
+            ),
+            (
+                "unusable log level",
+                "level = \"auto\"",
+                "level = \"verbose\"",
+                "logging.level",
+            ),
+            (
+                "zero log file cap",
+                "max_file_bytes = 20971520",
+                "max_file_bytes = 0",
+                "logging.max_file_bytes",
+            ),
+            (
+                "zero log retention",
+                "retention_days = 14",
+                "retention_days = 0",
+                "logging.retention_days",
+            ),
+            (
+                "negative log retention",
+                "retention_days = 14",
+                "retention_days = -1",
+                "logging.retention_days",
+            ),
+            (
+                "zero log total budget",
+                "total_bytes = 104857600",
+                "total_bytes = 0",
+                "logging.total_bytes",
+            ),
+            (
+                "log budget smaller than one file",
+                "total_bytes = 104857600",
+                "total_bytes = 1024",
+                "logging.total_bytes",
             ),
         ];
 
-        for (case, from, to) in rows {
-            assert!(PRODUCTION_TOML.contains(from), "row {case:?} matches nothing");
+        for (case, from, to, key) in rows {
+            assert!(
+                PRODUCTION_TOML.contains(from),
+                "row {case:?} matches nothing"
+            );
             let text = PRODUCTION_TOML.replace(from, to);
             let result = load_with(&BTreeMap::new(), &text, Environment::Production);
+            let error = match result {
+                Err(ConfigError::Invalid(message)) => message,
+                other => panic!("{case} must be rejected as invalid, got {other:?}"),
+            };
+            assert!(error.contains(key), "{case} must name {key}, got {error:?}");
+        }
+    }
+
+    /// The other direction of the level rule, and the reason `LOG_LEVELS` is a
+    /// constant rather than a string baked into one message: every spelling the
+    /// message offers must actually load.
+    ///
+    /// A rejection list with no case that passes cannot be told apart from a
+    /// list with a typo in it, and the message is where a user goes to find out
+    /// what they are allowed to write — so it has to name all of them too.
+    #[test]
+    fn every_accepted_log_level_loads_and_is_named_in_the_message() {
+        for level in LOG_LEVELS
+            .iter()
+            .copied()
+            .chain(std::iter::once(LOG_LEVEL_AUTO))
+        {
+            let text = PRODUCTION_TOML.replace("level = \"auto\"", &format!("level = {level:?}"));
+            let config = load_with(&BTreeMap::new(), &text, Environment::Production)
+                .unwrap_or_else(|e| panic!("level {level:?} must be accepted: {e}"));
+            assert_eq!(config.logging.level, level);
+        }
+
+        let rejected = load_with(
+            &BTreeMap::new(),
+            &PRODUCTION_TOML.replace("level = \"auto\"", "level = \"verbose\""),
+            Environment::Production,
+        )
+        .expect_err("`verbose` is not a level");
+        let message = match rejected {
+            ConfigError::Invalid(message) => message,
+            other => panic!("`verbose` must be rejected as invalid, got {other:?}"),
+        };
+        for level in LOG_LEVELS
+            .iter()
+            .copied()
+            .chain(std::iter::once(LOG_LEVEL_AUTO))
+        {
             assert!(
-                matches!(result, Err(ConfigError::Invalid(_))),
-                "{case} must be rejected, got {result:?}"
+                message.contains(level),
+                "the message must offer {level:?}: {message}"
             );
         }
+    }
+
+    /// The list itself, spelled out.
+    ///
+    /// Both directions of the rule — what loads and what the message offers —
+    /// read `LOG_LEVELS`, so a mutation that shrinks the array keeps every other
+    /// case in this module green while the app silently loses a level. Measured:
+    /// dropping `trace` survived the whole module until this test existed. A
+    /// constant that all the assertions are derived from has to be pinned
+    /// somewhere by hand, exactly as `rolling::Limits::SHIPPED` is.
+    ///
+    /// Compared as joined text rather than as an array, so a mutation here is a
+    /// failing assertion rather than a compile error — a mutation that cannot
+    /// build proves nothing about behaviour.
+    #[test]
+    fn the_accepted_log_levels_are_these_six_spellings() {
+        assert_eq!(LOG_LEVELS.len(), 6);
+        assert_eq!(LOG_LEVELS.join(" "), "off error warn info debug trace");
+
+        // The sentinel is a word, not a level: it must not also be in the list,
+        // or `auto` would be read as the literal level `auto` by anything that
+        // maps the list onto a `LevelFilter`.
+        assert!(!LOG_LEVELS.contains(&LOG_LEVEL_AUTO));
     }
 
     /// The other half of the "name, never value" rule that
