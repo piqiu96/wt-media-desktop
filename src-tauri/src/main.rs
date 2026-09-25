@@ -30,7 +30,7 @@ mod updater;
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
 use std::path::PathBuf;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 use token::RuntimeToken;
 
 fn python_fallback_allowed(debug_build: bool, explicitly_enabled: bool) -> bool {
@@ -250,5 +250,14 @@ fn main() {
         eprintln!("[wt-media-desktop] {summary}");
     }
 
-    app.run(|_app, _event| {});
+    app.run(|app, event| {
+        // The one hook. `Exit` rather than `ExitRequested`: it fires after the
+        // windows are gone and the loop is ending, so there is nothing left to
+        // veto -- which is what makes it safe to wait inside. Quitting Desktop
+        // used to leave the Agent running, still holding its port and unknown to
+        // the next launch that would meet it (CHG-059 T-03).
+        if let RunEvent::Exit = event {
+            commands::agent::stop_at_exit(app);
+        }
+    });
 }

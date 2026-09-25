@@ -44,6 +44,14 @@ connect_timeout_seconds = 10
 # How long to wait for the freshly spawned sidecar to answer before reporting
 # the start as failed.
 start_timeout_ms = 15000
+# How long the Agent is given to leave on its own after it is asked to stop --
+# `SIGTERM`, then this window, then `SIGKILL`. It is not a nicety: the Agent
+# answers the ask by finishing the requests already in flight and closing its
+# socket, so a window that is too short silently turns every exit back into the
+# kill this replaced. Five seconds is a request that is still running, plus the
+# half-second the Agent's own loop takes to notice; the cost of the upper bound
+# is a quit that can take this long.
+stop_timeout_ms = 5000
 
 [logging]
 # `auto` follows the environment the app is *running as* in the build sense

@@ -80,6 +80,7 @@ mod tests {
         config.http.request_timeout_seconds = 4242;
         config.http.connect_timeout_seconds = 4243;
         config.sidecar.start_timeout_ms = 4244;
+        config.sidecar.stop_timeout_ms = 4245;
         config
     }
 
@@ -146,6 +147,7 @@ mod tests {
             "4242",                      // http.request_timeout_seconds
             "4243",                      // http.connect_timeout_seconds
             "4244",                      // sidecar.start_timeout_ms
+            "4245",                      // sidecar.stop_timeout_ms
         ] {
             assert!(!text.contains(private), "{private:?} must not reach the page: {text}");
         }

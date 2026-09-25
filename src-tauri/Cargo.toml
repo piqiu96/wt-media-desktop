@@ -64,7 +64,14 @@ tauri-plugin-single-instance = "2"
 # `fs` feature, which is off by default. Chosen over `libc` + a hand-written
 # `unsafe` statvfs: this crate has no `unsafe` in it, and rustix's wrapper is the
 # same call with the layout differences already handled.
-rustix = { version = "1", features = ["fs"] }
+#
+# `process` (CHG-059 T-03) adds the two calls the exit protocol is built on:
+# `kill_process` for the ask and `test_kill_process` for the liveness reading
+# between the ask and the deadline. It is **not** in rustix's default features --
+# `default = ["std"]` only -- so it is asked for here, and the `unsafe` argument
+# above carries over: `process/kill.rs` is a safe wrapper over `kill(2)`, and
+# this crate still contains no `unsafe` of its own.
+rustix = { version = "1", features = ["fs", "process"] }
 # The support bundle's container (CHG-058 T-07, ruling Q-06: `tar` + `flate2`).
 # `flate2` is already in the lockfile as a dependency of `png`; `tar` is new to
 # the graph but nothing else is -- see the T-07 evidence for the measured delta.

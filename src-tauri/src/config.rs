@@ -103,6 +103,7 @@ pub struct Http {
 #[serde(deny_unknown_fields)]
 pub struct Sidecar {
     pub start_timeout_ms: u64,
+    pub stop_timeout_ms: u64,
 }
 
 /// The spellings `logging.level` accepts, in the order the rejection message
@@ -234,10 +235,20 @@ impl DesktopConfig {
                 return Err(ConfigError::Invalid(format!("{} must be > 0", key)));
             }
         }
-        if self.sidecar.start_timeout_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "sidecar.start_timeout_ms must be > 0".to_string(),
-            ));
+        // Both ends of the Agent's life, checked the same way. Zero is the only
+        // value the type cannot reject and the only one that would break the
+        // wait: a zero start timeout fails a launch that was going to succeed,
+        // and a zero stop timeout turns the ask into a kill with the grace
+        // window skipped entirely -- the reading CHG-059 T-03 exists to tell
+        // apart from the one where the Agent left on its own. Neither is a
+        // "faster" setting; both are a different behaviour.
+        for (key, ms) in [
+            ("sidecar.start_timeout_ms", self.sidecar.start_timeout_ms),
+            ("sidecar.stop_timeout_ms", self.sidecar.stop_timeout_ms),
+        ] {
+            if ms == 0 {
+                return Err(ConfigError::Invalid(format!("{} must be > 0", key)));
+            }
         }
         if self.logging.level != LOG_LEVEL_AUTO
             && !LOG_LEVELS.contains(&self.logging.level.as_str())
@@ -578,7 +589,7 @@ mod tests {
     /// the moment the checks are reordered or a new one is inserted above it.
     #[test]
     fn out_of_range_values_are_rejected() {
-        let rows: [(&str, &str, &str, &str); 11] = [
+        let rows: [(&str, &str, &str, &str); 12] = [
             ("privileged port", "port = 8765", "port = 80", "agent.port"),
             (
                 "zero request timeout",
@@ -597,6 +608,12 @@ mod tests {
                 "start_timeout_ms = 15000",
                 "start_timeout_ms = 0",
                 "sidecar.start_timeout_ms",
+            ),
+            (
+                "zero sidecar stop timeout",
+                "stop_timeout_ms = 5000",
+                "stop_timeout_ms = 0",
+                "sidecar.stop_timeout_ms",
             ),
             (
                 "cloud url without a scheme",

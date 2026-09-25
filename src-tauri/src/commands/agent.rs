@@ -25,7 +25,8 @@ use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
 use crate::sidecar::{self, drain, readiness};
 use crate::state::{AgentProcess, OperationId, SidecarLog};
-use tauri::State;
+use std::time::{Duration, Instant};
+use tauri::{Manager, State};
 
 /// One lifecycle record, carrying the session id when there is one.
 ///
@@ -64,9 +65,45 @@ fn already_running(session: Option<&str>) {
     lifecycle!(INFO, session, "Local Agent 已在运行，忽略本次启动请求");
 }
 
-/// The Agent was killed at Desktop's request.
+/// The Agent was killed at Desktop's request: the session is over.
+///
+/// The last record a stop makes, and it says something the two above do not:
+/// those say *how* the Agent left, this says the session is closed and the
+/// managed slot is empty. It is also the only record a stop makes when there was
+/// nothing to wait for, which is why it stays a separate line.
 fn stopped(session: Option<&str>) {
     lifecycle!(INFO, session, "Local Agent 已停止");
+}
+
+/// The Agent was asked to stop; the window has not run out yet.
+///
+/// The first of the three records that make a stop readable, and it exists so
+/// the other two can be *absent* and still mean something. Without it, "left on
+/// its own" and "had to be killed" would be told apart only by the second record
+/// appearing — which reads exactly like a stop that never got that far. Written
+/// before the signal is sent, so a stop whose `kill(2)` failed is still visible
+/// as an attempted one.
+fn asked(pid: u32, session: Option<&str>) {
+    lifecycle!(INFO, session, "已请 Local Agent（pid {pid}）停止");
+}
+
+/// The Agent left inside the window: the ask was answered.
+///
+/// `ms` is measured, not configured — it is how long the Agent actually took,
+/// which is the reading that says the window is neither too short nor quietly
+/// being skipped.
+fn left_on_its_own(ms: u128, session: Option<&str>) {
+    lifecycle!(INFO, session, "Local Agent 在宽限内自行退出（{ms} ms）");
+}
+
+/// The window ran out and the Agent was killed. WARN, not INFO.
+///
+/// This is the half of the pair that a reader should be able to find without
+/// filtering: work in flight was thrown away, and unlike a crash it was Desktop
+/// that decided to throw it away. A stop that reads as clean and a stop that
+/// lost a task must not look the same in the file.
+fn killed_after_grace(ms: u64, session: Option<&str>) {
+    lifecycle!(WARN, session, "宽限已到，强杀 Local Agent（{ms} ms）");
 }
 
 /// A stop request with nothing to stop.
@@ -250,7 +287,11 @@ fn discard(process: &AgentProcess, session: &OperationId) -> Result<(), String> 
         .take();
     if let Some(child) = child {
         stale(session.current().as_deref());
-        let _ = sidecar::stop(child);
+        // `force`, not the ask: a handle kept past its Agent's death is not
+        // something to negotiate with. Asking would spend the grace window on a
+        // process that is already gone, and the window belongs on the exit path,
+        // where there is something left to wait for.
+        let _ = sidecar::force(child);
     }
     session.clear();
     Ok(())
@@ -329,7 +370,9 @@ async fn start<R: tauri::Runtime>(
             // stopped, so the reader sees "it started, here is why it failed, it
             // was stopped" rather than a stop with no explanation above it.
             let message = failed(reason, log, Some(&id));
-            let _ = stop(process, session);
+            // `kill`, not `stop`: the grace window is for an Agent that is up and
+            // may be mid-request, and this one never became reachable.
+            let _ = kill(process, session);
             Err(message)
         }
     }
@@ -358,8 +401,15 @@ fn ended(session: &OperationId, label: &str) -> String {
     label.into()
 }
 
-/// The stop itself, without Tauri.
-fn stop(process: &AgentProcess, session: &OperationId) -> Result<String, String> {
+/// The stop for a process that was never usable: take the handle and kill it.
+///
+/// `SIGKILL`, with no ask and no window, because both callers are cases where
+/// there is nothing to preserve: `start`'s failure branch, where the Agent never
+/// announced itself ready and so has no work Desktop knows of, and `discard`,
+/// where the handle named a process that had already ended. Waiting a grace
+/// window there would spend it on a process that is either already gone or was
+/// never usable — and the failed start is a failure the user is waiting on.
+fn kill(process: &AgentProcess, session: &OperationId) -> Result<String, String> {
     let child = process
         .0
         .lock()
@@ -368,7 +418,7 @@ fn stop(process: &AgentProcess, session: &OperationId) -> Result<String, String>
     match child {
         Some(child) => {
             let id = session.current();
-            match sidecar::stop(child) {
+            match sidecar::force(child) {
                 Ok(label) => Ok(ended(session, &label)),
                 // The kill failed. No tail: nothing here reads the sidecar's
                 // output, and the buffer belongs to a process that is still
@@ -382,6 +432,75 @@ fn stop(process: &AgentProcess, session: &OperationId) -> Result<String, String>
         None => {
             not_running();
             Ok("not_running".into())
+        }
+    }
+}
+
+/// How often the window is re-read. Small enough that a prompt exit is noticed
+/// promptly — the elapsed time is itself a reading, and a coarse poll would
+/// round it to the poll interval.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// The stop itself, without Tauri: ask, wait out the window, then kill.
+///
+/// The grace window is what CHG-059 T-03 is for. `sidecar::force` alone (what
+/// this used to be) makes every exit a `SIGKILL`: the Agent runs no exit path,
+/// a request in flight is cut off mid-answer, and the log cannot tell an exit
+/// that was asked for from one that was taken. The window is the difference, and
+/// the two records below are how a reader sees which one happened.
+///
+/// `grace_ms` is passed in rather than read from the config here, so a test can
+/// drive both arms without a 5-second suite; the callers pass
+/// `sidecar.stop_timeout_ms`.
+async fn stop(
+    process: &AgentProcess,
+    session: &OperationId,
+    grace_ms: u64,
+) -> Result<String, String> {
+    let child = process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .take();
+    let Some(child) = child else {
+        not_running();
+        return Ok("not_running".into());
+    };
+
+    let id = session.current();
+    let pid = child.pid();
+    let started = Instant::now();
+    asked(pid, id.as_deref());
+    if let Err(reason) = sidecar::ask(pid) {
+        // Not fatal, and deliberately not a `return`: the common cause is
+        // `ESRCH` -- the process is already gone, which is the stop having
+        // already happened -- and the wait below is what tells that apart from
+        // a signal that could not be sent. The outcome decides, not the call.
+        stop_failed(&reason, id.as_deref());
+    }
+
+    let deadline = started + Duration::from_millis(grace_ms);
+    loop {
+        if !sidecar::alive(pid) {
+            left_on_its_own(started.elapsed().as_millis(), id.as_deref());
+            return Ok(ended(session, "stopped"));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        tokio::time::sleep(STOP_POLL.min(left)).await;
+    }
+
+    killed_after_grace(grace_ms, id.as_deref());
+    match sidecar::force(child) {
+        Ok(label) => Ok(ended(session, &label)),
+        // The kill failed. No tail: nothing here reads the sidecar's output, and
+        // the buffer belongs to a process that is still alive — which is also
+        // why the session stays open.
+        Err(reason) => {
+            stop_failed(&reason, id.as_deref());
+            Err(reason)
         }
     }
 }
@@ -406,11 +525,37 @@ pub async fn local_agent_start(
     start(&app, &client, &config, &process, &session, &log).await
 }
 #[tauri::command]
-pub fn local_agent_stop(
+pub async fn local_agent_stop(
+    config: State<'_, DesktopConfig>,
     process: State<'_, AgentProcess>,
     session: State<'_, OperationId>,
 ) -> Result<String, String> {
-    stop(&process, &session)
+    stop(&process, &session, config.sidecar.stop_timeout_ms).await
+}
+
+/// Stop the Agent on the way out of the app (CHG-059 T-03).
+///
+/// The half that was missing entirely: before this, quitting Desktop left the
+/// Agent running. The handle went out of scope with the process and the Agent
+/// stayed up — holding its port, and unknown to the next launch, which would
+/// meet an Agent it had not started. Called from the one place every exit passes
+/// through, `RunEvent::Exit` in `main`, and through the **same** `stop` the
+/// command uses, so quitting by the button and quitting by the window's red dot
+/// leave the same records and the same grace window.
+///
+/// Blocking on the runtime is right here and only here. The future is the grace
+/// window and the event loop it would be yielding to is already over; the wait
+/// is bounded by `sidecar.stop_timeout_ms`, and what it buys is an Agent that
+/// was asked to finish rather than one that was killed. The result needs no
+/// reader: every outcome is already a record, and `stop` failing at exit would
+/// leave nothing for a caller to do about it.
+pub fn stop_at_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let grace_ms = app.state::<DesktopConfig>().sidecar.stop_timeout_ms;
+    let _ = tauri::async_runtime::block_on(stop(
+        &app.state::<AgentProcess>(),
+        &app.state::<OperationId>(),
+        grace_ms,
+    ));
 }
 /// Fetch task progress as a status snapshot.
 ///
@@ -437,7 +582,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
-    use tauri_plugin_shell::process::CommandChild;
+    use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+    use tokio::sync::mpsc::Receiver;
     use tracing::subscriber::with_default;
 
     /// The shipped configuration, pointed at `port`.
@@ -583,6 +729,293 @@ mod tests {
         child
     }
 
+    /// The line the shells below print once their trap is in place.
+    ///
+    /// A trap is installed a moment **after** the process exists — measured
+    /// here, the hard way: the first version of these tests asked immediately
+    /// after the spawn, and both children died of signal 15 with neither trap
+    /// having run. A signal that arrives before the trap does is a test of the
+    /// default disposition, not of the ask. The echo is what the helper below
+    /// waits for, so "it was asked and it answered" is a fact rather than a race.
+    const READY: &str = "trap-set";
+
+    /// A shell that answers `SIGTERM` the way the Agent does: by exiting.
+    ///
+    /// Two details are load-bearing. The trap is on the shell itself — no `exec`,
+    /// or there would be no shell left to run it — and the loop is what makes the
+    /// trap reachable at all: a shell defers a trap until the foreground child
+    /// returns, so `sleep 0.2` bounds how long answering may take.
+    const ANSWERS: &str = "trap 'exit 0' TERM; echo trap-set; while true; do sleep 0.2; done";
+
+    /// A shell that ignores `SIGTERM` outright — the window's reason to exist.
+    ///
+    /// `trap '' TERM` sets the disposition to `SIG_IGN`, which `sleep` inherits
+    /// across `exec`, so nothing in this process tree reacts to the signal and
+    /// only `SIGKILL` ends it.
+    const IGNORES: &str = "trap '' TERM; echo trap-set; while true; do sleep 0.2; done";
+
+    /// A child past its trap, plus the channel that says **how** it ended.
+    ///
+    /// `Terminated`'s own fields carry the distinction these tests are about:
+    /// `code: Some(0)` means the trap ran, `signal: Some(9)` means the process
+    /// was killed without running anything. `live_child` drops this channel
+    /// because nothing there reads it; here it is the reading.
+    fn child_with_trap(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        script: &str,
+    ) -> (CommandChild, Receiver<CommandEvent>) {
+        use tauri_plugin_shell::ShellExt;
+
+        let (mut events, child) = app
+            .shell()
+            .command("sh")
+            .args(["-c", script])
+            .spawn()
+            .expect("a child");
+
+        let mut heard = String::new();
+        while let Some(event) = tauri::async_runtime::block_on(events.recv()) {
+            if let CommandEvent::Stdout(line) = &event {
+                heard.push_str(&String::from_utf8_lossy(line));
+                if heard.contains(READY) {
+                    return (child, events);
+                }
+            }
+        }
+        panic!("the child never reached its trap, so asking it would prove nothing: {heard:?}");
+    }
+
+    /// How the child ended, awaited rather than slept for.
+    ///
+    /// Returns the pair as `Terminated` reported it. `panic!` on a closed channel
+    /// rather than returning `None`: a child that never ends is a test with no
+    /// reading, and it must not read as one.
+    fn how_it_ended(events: &mut Receiver<CommandEvent>) -> (Option<i32>, Option<i32>) {
+        while let Some(event) = tauri::async_runtime::block_on(events.recv()) {
+            if let CommandEvent::Terminated(payload) = event {
+                return (payload.code, payload.signal);
+            }
+        }
+        panic!("the child must end for this test to have a reading");
+    }
+
+    /// A managed slot already holding `child`, as a successful start leaves it.
+    fn holding_child(child: CommandChild) -> AgentProcess {
+        let process = AgentProcess::default();
+        *process.0.lock().expect("the slot") = Some(child);
+        process
+    }
+
+    /// A stop the Agent answers reads as **answered**, and the reading is true.
+    ///
+    /// Both halves are asserted because either alone is satisfied by the wrong
+    /// thing. The records are what a reader of `desktop.log` sees; the exit
+    /// status is what makes them honest — `SIGKILL` leaves the slot empty and the
+    /// session cleared just the same, so "the process is gone" is no evidence
+    /// that anything was asked.
+    #[test]
+    fn a_stop_the_agent_answers_reads_as_it_leaving_on_its_own() {
+        let app = mock_app();
+        let (child, mut events) = child_with_trap(&app, ANSWERS);
+        let process = holding_child(child);
+        let session = holding("session-answered");
+
+        let (directory, subscriber) = capture("agent-stop-answered");
+        let returned = with_default(subscriber, || {
+            tauri::async_runtime::block_on(stop(&process, &session, 5000))
+        });
+
+        assert_eq!(
+            returned.as_deref(),
+            Ok("stopped"),
+            "the label the frontend matches on must not change"
+        );
+        assert_eq!(
+            how_it_ended(&mut events),
+            (Some(0), None),
+            "a signal here would mean it was killed, whatever the records say"
+        );
+
+        let text = written(&directory.0);
+        assert!(text.contains("已请 Local Agent（pid "), "{text}");
+        assert!(text.contains("在宽限内自行退出（"), "{text}");
+        assert!(
+            !text.contains("宽限已到，强杀"),
+            "nothing was killed, so that record has no business here: {text}"
+        );
+        assert!(text.contains("Local Agent 已停止"), "{text}");
+        assert!(
+            text.lines()
+                .all(|line| line.ends_with("operation_id=session-answered")),
+            "every record of a stop names the session it ended: {text}"
+        );
+        assert!(
+            session.current().is_none(),
+            "the stop is what ends the session"
+        );
+    }
+
+    /// A stop the Agent ignores ends in the kill — and says so, in the log.
+    ///
+    /// The record is the whole point of the task: before it, this outcome and the
+    /// one above were the same line, so "the Agent finished what it was doing"
+    /// and "the Agent was killed mid-task" could not be told apart afterwards.
+    /// The exit status is the second witness, and it is the one that says the
+    /// window really expired rather than being skipped.
+    #[test]
+    fn a_stop_the_agent_ignores_reads_as_killed_at_the_deadline() {
+        let app = mock_app();
+        let (child, mut events) = child_with_trap(&app, IGNORES);
+        let process = holding_child(child);
+        let session = holding("session-ignored");
+
+        let (directory, subscriber) = capture("agent-stop-ignored");
+        let started = Instant::now();
+        let returned = with_default(subscriber, || {
+            tauri::async_runtime::block_on(stop(&process, &session, 400))
+        });
+        let took = started.elapsed();
+
+        assert_eq!(returned.as_deref(), Ok("stopped"));
+        assert_eq!(
+            how_it_ended(&mut events),
+            (None, Some(9)),
+            "the child ignores SIGTERM, so only SIGKILL can have ended it"
+        );
+        assert!(
+            took >= Duration::from_millis(400),
+            "the window is not decoration: the kill came at {took:?}"
+        );
+
+        let text = written(&directory.0);
+        assert!(text.contains("已请 Local Agent（pid "), "{text}");
+        assert!(text.contains("宽限已到，强杀 Local Agent（400 ms）"), "{text}");
+        assert!(
+            !text.contains("在宽限内自行退出"),
+            "it never left on its own: {text}"
+        );
+        assert!(
+            session.current().is_none(),
+            "the stop is what ends the session"
+        );
+    }
+
+    /// **The real thing, on this machine — ignored by default.**
+    ///
+    /// Desktop's own stop path against the actual Agent in `../wt-media-agent`:
+    /// the pid its `CommandChild` reports, `SIGTERM` sent by `sidecar::ask`, and
+    /// the Agent's own handler — the one `serve()` installs, which is the Agent
+    /// half of this same task — deciding whether the ask is answered.
+    ///
+    /// Both readings, and the difference between them is the whole point of the
+    /// task: an asked stop where the Agent finished and left, and a deadline that
+    /// ran out while it was still there. Neither is reachable from the tests
+    /// above, which decide the outcome with a shell trap; here it is the real
+    /// Agent's real exit path.
+    ///
+    /// The short window is deliberately **shorter than the Agent's own half-second
+    /// poll**, so the second reading is decided by the deadline rather than by a
+    /// race between two clocks. And each Agent is waited for until it announces
+    /// itself before the ask: a `SIGTERM` delivered before `serve` installs its
+    /// handler would test the default disposition instead, exactly as it did in
+    /// the shell version of these tests.
+    ///
+    /// Ignored because it needs a sibling checkout and a `python3` on `PATH`,
+    /// neither of which a plain `cargo test` may assume — the same reason
+    /// `readiness`'s real-agent test is. Run it with:
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored real_agent
+    /// ```
+    #[test]
+    #[ignore]
+    fn the_real_agent_answers_the_ask_or_is_killed_at_the_deadline() {
+        use tauri_plugin_shell::ShellExt;
+
+        let agent_repo =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../wt-media-agent");
+        assert!(
+            agent_repo.join("src/wt_media_agent").is_dir(),
+            "需要 ../wt-media-agent 的检出：{}",
+            agent_repo.display()
+        );
+        let data_dir = std::env::temp_dir().join("wt-media-stop-probe");
+
+        // Two Agents, one window each. The second window is **shorter than the
+        // Agent's own half-second poll**, so that reading is decided by the
+        // deadline rather than by a race between two clocks.
+        for (id, grace_ms, left) in [
+            ("real-agent-answered", 15_000u64, true),
+            ("real-agent-killed", 1, false),
+        ] {
+            // A port the kernel hands out and takes back, so this never fights
+            // the developer's own Agent for 8765 — the rule the whole suite
+            // follows.
+            let port = silent_port();
+            let app = mock_app();
+
+            let (mut events, child) = app
+                .shell()
+                .command("python3")
+                .args(["-m", "wt_media_agent.local_api.server"])
+                .current_dir(&agent_repo)
+                .env("PYTHONPATH", "src")
+                .env("WT_MEDIA_LOCAL_API_HOST", "127.0.0.1")
+                .env("WT_MEDIA_LOCAL_API_PORT", port.to_string())
+                .env("WT_MEDIA_AGENT_RUNTIME_TOKEN", "real-agent-stop-probe")
+                .env("WT_MEDIA_AGENT_DATA_DIR", data_dir.join(id))
+                .spawn()
+                .expect("python3 must be runnable");
+
+            // The Agent's own announcement, waited for the way `child_with_trap`
+            // waits for its echo: asking before it arrives would be a test of the
+            // default disposition instead of the ask.
+            let announcement = format!("wt-media-agent local API listening on 127.0.0.1:{port}");
+            let mut heard = String::new();
+            while let Some(event) = tauri::async_runtime::block_on(events.recv()) {
+                if let CommandEvent::Stdout(line) = &event {
+                    heard.push_str(&String::from_utf8_lossy(line));
+                    if heard.contains(&announcement) {
+                        break;
+                    }
+                }
+            }
+            assert!(
+                heard.contains(&announcement),
+                "{id}: 真机 Agent 没宣告就绪，就没有读数：{heard:?}"
+            );
+
+            let process = holding_child(child);
+            let session = holding(id);
+
+            let (directory, subscriber) = capture(id);
+            let returned = with_default(subscriber, || {
+                tauri::async_runtime::block_on(stop(&process, &session, grace_ms))
+            });
+
+            assert_eq!(returned.as_deref(), Ok("stopped"), "{id}");
+            let text = written(&directory.0);
+            assert_eq!(text.contains("在宽限内自行退出（"), left, "{id}: {text}");
+            assert_eq!(
+                text.contains("宽限已到，强杀 Local Agent"),
+                !left,
+                "{id}: {text}"
+            );
+            // A `(None, Some(15))` here would not mean the code is wrong: it would
+            // mean the signal reached the Agent before its handler was installed.
+            // The exit status is what says which of the two happened.
+            assert_eq!(
+                how_it_ended(&mut events),
+                if left { (Some(0), None) } else { (None, Some(9)) },
+                "{id}: 真机 Agent 的结束方式"
+            );
+            assert!(
+                session.current().is_none(),
+                "{id}: the stop is what ends the session"
+            );
+        }
+    }
+
     /// Every lifecycle record says what happened, under Desktop's own target,
     /// at a level production keeps.
     ///
@@ -599,17 +1032,25 @@ mod tests {
             already_running(None);
             stale(None);
             stopped(None);
+            asked(4321, None);
+            left_on_its_own(120, None);
+            killed_after_grace(5000, None);
             not_running();
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 6, "one record per outcome: {text}");
+        assert_eq!(text.lines().count(), 9, "one record per outcome: {text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已就绪：wt-media-agent local API listening on 127.0.0.1:8765"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已在运行，忽略本次启动请求"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已停止"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
+        assert!(text.contains("[INFO] agent.supervisor: 已请 Local Agent（pid 4321）停止"), "{text}");
+        assert!(text.contains("[INFO] agent.supervisor: Local Agent 在宽限内自行退出（120 ms）"), "{text}");
+        // WARN, and the level is the point: a stop that threw away work in flight
+        // has to be findable in a production log without a filter.
+        assert!(text.contains("[WARN] agent.supervisor: 宽限已到，强杀 Local Agent（5000 ms）"), "{text}");
     }
 
     /// The health body is DEBUG: kept in development, dropped in production.
@@ -759,7 +1200,11 @@ mod tests {
         let (directory, subscriber) = capture("agent-stop-idle");
 
         let returned = with_default(subscriber, || {
-            stop(&AgentProcess::default(), &OperationId::default())
+            tauri::async_runtime::block_on(stop(
+                &AgentProcess::default(),
+                &OperationId::default(),
+                5000,
+            ))
         });
 
         assert_eq!(
@@ -1030,6 +1475,9 @@ mod tests {
             stale(Some("session-one"));
             healthy("{\"status\":\"ok\"}", Some("session-one"));
             stopped(Some("session-one"));
+            asked(4321, Some("session-one"));
+            left_on_its_own(120, Some("session-one"));
+            killed_after_grace(5000, Some("session-one"));
             stop_failed("agent stop failed: no such process", Some("session-one"));
             failed(
                 "agent unreachable: connection refused".to_string(),
@@ -1039,7 +1487,7 @@ mod tests {
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 8, "one record per call: {text}");
+        assert_eq!(text.lines().count(), 11, "one record per call: {text}");
         for line in text.lines() {
             assert!(
                 line.ends_with("operation_id=session-one"),

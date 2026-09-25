@@ -13,6 +13,8 @@
 use crate::config::DesktopConfig;
 use crate::state::SidecarLog;
 use crate::token::RuntimeToken;
+use rustix::io::Errno;
+use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
@@ -117,10 +119,77 @@ pub fn start<R: Runtime>(
     }
 }
 
-/// Kill a running sidecar. Takes the handle by value because
+/// Turn the pid a handle reports into something `kill(2)` may be pointed at.
+///
+/// `Pid::from_raw(0)` is `None`, and that is not a formality: `kill(0, sig)`
+/// means "every process in my process group", so a zero reaching the kernel is
+/// not a pid that cannot be signalled — it is a request to signal everything
+/// this app is attached to. Refused here rather than passed on.
+fn as_pid(pid: u32) -> Result<Pid, String> {
+    i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| format!("agent pid {pid} 不是一个可以发信号的进程号"))
+}
+
+/// Ask the sidecar to stop: `SIGTERM`, and nothing more.
+///
+/// The counterpart of [`force`], and the first half of the exit protocol
+/// (CHG-059 T-03). `SIGTERM` is what the Agent answers — `local_api.server.serve`
+/// installs a handler for it, stops accepting and waits for the requests already
+/// in flight — so once this returns `Ok`, the process has been asked to leave by
+/// its own exit path rather than killed outright.
+///
+/// **This returning `Ok` is not "it stopped."** `kill(2)` succeeds once the
+/// signal is queued; whether the process does anything about it is a different
+/// question, and a process that ignores `SIGTERM` answers this call just as
+/// successfully as one that obeys it. The answer is [`alive`], and the deadline
+/// belongs to the caller.
+///
+/// An `Err` here is usually not a failure of the stop: it is `ESRCH`, the
+/// process already being gone — which is an outcome the caller should read as
+/// "nothing to wait for", not as "the ask did not work".
+pub fn ask(pid: u32) -> Result<(), String> {
+    kill_process(as_pid(pid)?, Signal::TERM).map_err(|e| format!("agent stop failed: {}", e))
+}
+
+/// Is there still a process at `pid`?
+///
+/// `kill(pid, 0)` — the existence probe, which sends nothing. Used between the
+/// ask and the deadline, so the reading is "it obeyed" rather than "enough time
+/// passed".
+///
+/// The one subtlety is the error that is not a "no": `EPERM` means the process
+/// exists and is not ours to signal, which is still an answer of "there is
+/// something there". Every other error is read as absent, `ESRCH` — the process
+/// is gone — being the one that actually occurs.
+///
+/// **Known limit, and it is the caller's to bound**: a pid is only unique among
+/// the processes alive at one moment. If this one exits and the kernel hands its
+/// number to a new process inside the grace window, this says `true` about a
+/// stranger, and the deadline ends in [`force`] killing something Desktop never
+/// started. Not defended against here — the window is seconds and the id space
+/// is large — but it is why the caller's deadline is short and fixed.
+pub fn alive(pid: u32) -> bool {
+    let Ok(pid) = as_pid(pid) else {
+        return false;
+    };
+    match test_kill_process(pid) {
+        Ok(()) => true,
+        Err(Errno::PERM) => true,
+        _ => false,
+    }
+}
+
+/// Kill a running sidecar, without asking. Takes the handle by value because
 /// `CommandChild::kill(self)` consumes it — the caller has already `take`n it
 /// out of the managed state, so there is nothing left to hold.
-pub fn stop(child: CommandChild) -> Result<String, String> {
+///
+/// `SIGKILL`, so the Agent runs no exit path at all. That is deliberate at the
+/// two places this is called from: the deadline of the exit protocol, where the
+/// ask has already been given its full window and ignored, and `discard`, where
+/// the handle is known to be a leftover and there is nothing left to ask.
+pub fn force(child: CommandChild) -> Result<String, String> {
     child
         .kill()
         .map(|_| "stopped".into())
@@ -132,6 +201,9 @@ mod tests {
     use super::*;
     use crate::config::{load_with, Environment, PRODUCTION_TOML};
     use std::collections::BTreeMap;
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn config_with(host: &str, port: u16, data_dir: Option<&str>) -> DesktopConfig {
         let text = PRODUCTION_TOML
@@ -234,6 +306,119 @@ mod tests {
     /// to fix the test's array length, and the assertion that actually carries
     /// this rule is the one below, which does not care how many arguments there
     /// are.
+    /// A real process whose `SIGTERM` trap is **already installed**.
+    ///
+    /// `std::process` rather than the shell plugin, because `ask` and `alive`
+    /// take a pid — that is the whole reason they are not tied to
+    /// `CommandChild` — so this needs nothing from Tauri, and the control below
+    /// is a statement about a real process rather than about a mock.
+    ///
+    /// Waiting for the ready line is load-bearing, and it was measured the hard
+    /// way: the first version of these tests asked immediately after the spawn,
+    /// and the child died of signal 15 with the trap never having run. A signal
+    /// arriving before the trap tests the default disposition, not the ask —
+    /// `sleep 0.2` in the loop then bounds how long answering may take, since a
+    /// shell defers a trap until the foreground child returns.
+    fn with_trap(trap: &str) -> Child {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                &format!("trap {trap} TERM; echo trap-set; while true; do sleep 0.2; done"),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a shell");
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("a stdout pipe"))
+            .read_line(&mut line)
+            .expect("the ready line");
+        assert!(line.contains("trap-set"), "the trap must be up first: {line:?}");
+        child
+    }
+
+    /// The ask is answered: a real process, a real signal, and it leaves.
+    ///
+    /// The control is at the top — `alive` says `true` before the ask — so the
+    /// `false` afterwards is a change of state rather than something that held
+    /// all along.
+    #[test]
+    fn an_ask_reaches_a_real_process_and_it_leaves() {
+        let mut child = with_trap("'exit 0'");
+        let pid = child.id();
+        assert!(alive(pid), "the control: there is a process to ask");
+
+        assert!(ask(pid).is_ok(), "the ask must reach it");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while Instant::now() < deadline {
+            // `try_wait` is the reap, and it is not incidental: an unreaped
+            // process is still a process, so `kill(pid, 0)` answers `true` for a
+            // zombie and `alive` would keep saying yes about a corpse. In
+            // production the shell plugin's reader thread does this — it is how
+            // `Terminated` exists at all — so this models the real sequence.
+            match child.try_wait().expect("the exit status") {
+                Some(exit) => {
+                    status = Some(exit);
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+
+        let status = status.expect("it must have left the ask");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "an exit code rather than a signal: the trap ran, so it answered"
+        );
+        assert!(!alive(pid), "and with it reaped there is nothing there");
+    }
+
+    /// A process that ignores the ask is **still there** afterwards.
+    ///
+    /// This is the reading the grace window exists for, and it is the control for
+    /// the test above: without it, "`alive` went false after an ask" would hold
+    /// just as well for an `alive` that always answers `false`.
+    ///
+    /// `trap '' TERM` sets the disposition to `SIG_IGN`, which `sleep` inherits
+    /// across `exec`, so nothing in the tree reacts and only `SIGKILL` ends it —
+    /// which is how this test cleans up.
+    #[test]
+    fn a_process_that_ignores_the_ask_is_still_alive() {
+        let mut child = with_trap("''");
+        let pid = child.id();
+
+        assert!(ask(pid).is_ok(), "the signal is delivered — that is all it says");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(alive(pid), "it ignores SIGTERM, so the ask changed nothing");
+        assert!(
+            child.try_wait().expect("the exit status").is_none(),
+            "and it is not merely unreaped: it has not exited"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A pid that is not a process id is refused, not signalled.
+    ///
+    /// `kill(0, sig)` means "every process in my process group", so a zero
+    /// reaching the kernel is not a failed ask — it is an ask aimed at everything
+    /// this app is attached to. The type cannot express it (`Pid::from_raw`
+    /// returns `None` for zero) and these two functions are where that shows.
+    #[test]
+    fn a_pid_of_zero_is_refused_rather_than_signalled() {
+        let refused = ask(0).expect_err("zero must never be signalled");
+        assert!(
+            refused.contains('0'),
+            "the message must name the pid, and nothing else: {refused}"
+        );
+        assert!(!alive(0), "there is nothing at it to report as alive");
+    }
+
     #[test]
     fn the_fallback_command_line_is_only_the_module_name() {
         assert_eq!(
