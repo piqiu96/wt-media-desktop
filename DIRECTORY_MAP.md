@@ -88,3 +88,5 @@ Agent 内部如何执行浏览器操作或 FFmpeg，不属于本仓库（归 `..
 - `target/`（Rust 构建产物）
 - `../.generated/`（前端构建产物快照）
 - `src-tauri/gen/`（生成内容，除非任务就是核对生成结果）
+
+本节是禁止扫描区的**唯一落点**。`AGENT-INDEX.md` 此前在末行另存一份清单，已换成指向本节的指针（CHG-20260925-065 T-07）——**那份清单多出的 `../generated`（无点）实测不存在**：`frontendDist` 是 `../.generated/frontend`，工作区根下也没有 `generated/`，全仓仅该行提到它。按代码实况不再保留该条目。

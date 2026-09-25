@@ -1,8 +1,12 @@
 # wt-media-desktop Agent Index
 
+> 本文件是本仓**全部正式内容**的唯一落点：定位、职责边界、需求路由、**本仓规则**、禁止项与本仓内加载顺序。`CLAUDE.md` 与 `AGENTS.md` 是指针，只声明本文件的位置，不承载任何规则。
+
 ## 依赖
 
-关于文档等事实都在`../wt-media-workspace`，需要执行时优先考虑对应的约束边界
+关于文档等事实都在`../wt-media-workspace`，需要执行时优先考虑对应的约束边界。
+
+治理上下文（当前 CHG、执行契约）在 `../wt-media-workspace`，按其 `.ai/CURRENT_CONTEXT.md` 指引加载。
 
 ## 定位
 
@@ -52,6 +56,25 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 | 改窗口、托盘、退出逻辑 | `src-tauri/src/main.rs` |
 | 改页面权限边界 | `src-tauri/capabilities/default.json` |
 
+## 本仓规则
+
+本仓全部规则的唯一落点。一条一行，写清做什么／不做什么。逐项目录事实与禁止扫描区见 `DIRECTORY_MAP.md`。
+
+### 平台与 UI 边界
+
+- 平台特定行为放 Rust 系统桥模块，不散落在业务 UI 代码。
+- 敏感 Token 走 OS 安全存储，不进 `localStorage`。
+- Rust 代理 Local Agent 的 HTTP。Agent 侧虽有 `text/event-stream` 端点，Desktop **不消费流**（`local_agent_task_status` 取的是状态快照）——**不要在文档或代码注释里把这条写成已实现**。
+
+### 生成内容
+
+- `src-tauri/gen/` 是 Tauri 生成内容，**禁止手改**；除非任务本身就是核对生成结果。
+
+### 前端产物与 Workspace 依赖
+
+- 业务 Vue 页面源码在 `../wt-media-cloud/web`：开发时 `beforeDevCommand` 指向该工程，发布时由 `../wt-media-workspace/scripts/build-desktop.sh` 产出前端到 `../.generated/frontend`（`frontendDist`）。本仓库不维护第二套 Vue 源码，也**没有 `src/` 顶层目录**。
+- 上述是**开发／发布期的工具依赖**；**产物与运行期不依赖 Workspace**——见 `src-tauri/tauri.conf.json` 的 `beforeBuildCommand`。
+
 ## 禁止
 
 - 复制 Cloud 的业务规则、业务数据模型和正式任务管理能力。
@@ -65,11 +88,12 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 - 在 `invoke_handler!` **中间**插入新命令：既有命令的参数对象被前端按**精确相等**断言（`localAgentService.test.js`），新命令一律**追加在末尾**。
 - 给读取或清理命令加**路径参数**：读取面靠「列表即白名单」（先列目录再按名查找），清理靠「根 + 种类」判定；收了路径就等于把保护面交给调用方。
 
-## 上下文加载顺序
+## 本仓内加载顺序
 
-1. 本文件（职责与路由）
-2. `AGENTS.md` 与 `CLAUDE.md`（边界与规则）
-3. `DIRECTORY_MAP.md`（目录导航；含 Vue 产物来源与集成方式）
-4. 只读目标模块的代码、直接依赖与 `tests/`
+本节只写**本仓内**的入口顺序；跨仓读取顺序与全部红线的唯一落点是 `../wt-media-workspace/AGENT-INDEX.md` §4 与 §2，本节不复述。
 
-治理上下文（当前 CHG、契约）在 `../wt-media-workspace`，按其 `.ai/CURRENT_CONTEXT.md` 指引加载。禁止默认扫描 `target/`、`../.generated/`、`src-tauri/gen/`、`../generated`。
+1. 本文件（职责、路由与本仓规则）
+2. `DIRECTORY_MAP.md`（目录导航；含 Vue 产物来源与集成方式）
+3. 只读目标模块的代码、直接依赖与 `tests/`
+
+禁止默认扫描的目录见 `DIRECTORY_MAP.md` 的「禁止扫描区」。
