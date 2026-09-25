@@ -13,24 +13,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Not a Node package toolchain -- there is no `package.json` here. The two
+      # suites under `tests/` call `node` to read JSON (`node -p` / `node -e`),
+      # so the runtime has to be present; nothing is installed from npm, hence
+      # no `cache:` and no `cache-dependency-path:` (there is no lockfile).
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "26"
-          cache: npm
-          cache-dependency-path: package-lock.json
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Bootstrap Desktop
-        run: scripts/bootstrap.sh
-
-      - name: Lint Desktop
-        run: npm run lint
-
       - name: Test Desktop
         run: scripts/test.sh
-
-      - name: Build Desktop
-        run: scripts/build.sh

@@ -18,20 +18,23 @@ This repository owns the native shell only. The business Vue pages are built in
 
 ## Bootstrap
 
-Requires a Rust/Cargo toolchain. `npm` is **not** used: this repository has no
-`package.json`.
+Requires a Rust/Cargo toolchain. There is no Node package toolchain here: this
+repository has no `package.json`, and nothing is installed from `npm`. (A `node`
+binary is still used, as a JSON reader, by the release suites under `tests/`.)
 
 ```bash
-scripts/bootstrap.sh
-scripts/test.sh          # cargo test --workspace
-scripts/build.sh
+scripts/test.sh          # cargo test --workspace, then the suites in tests/
 ```
 
-Some sibling scripts (`build.sh`, `dev.sh`, `start.sh`, `stop.sh`, `health.sh`,
-`bootstrap.sh`, `scripts/*.mjs`) still invoke `npm`/`vite` from the M0 layout,
-and `.github/workflows/m0-desktop.yml` drives them. That mismatch is registered
-in CHG-20260923-056 (T-06) as out of scope: it cannot be fixed by changing the
-reference alone, since the frontend build lives in another repository.
+`scripts/test.sh` writes a placeholder at the bundled-sidecar path when nothing
+is there yet: Tauri's build script refuses to compile unless that path exists,
+and the suite never reads the file's contents. The real sidecar comes from
+`scripts/prepare-release-sidecar.sh`, which needs a sibling `wt-media-agent`
+checkout. The placeholder and its `exit 1` body are described in the script.
+
+The local development shell is started and stopped through `bin/control.sh`; see
+[`scripts/README.md`](scripts/README.md) for the script classification and
+`DIRECTORY_MAP.md` for the directory facts.
 
 ## Key Directories
 
@@ -64,15 +67,11 @@ rather than by application state.
 ## Verification
 
 ```text
-cargo test --workspace
+scripts/test.sh
+bin/control.sh status
 ```
 
-For the full desktop readiness gate:
-
-```text
-cargo test --workspace
-cargo build
-scripts/start.sh
-scripts/health.sh
-scripts/stop.sh
-```
+`scripts/test.sh` runs `cargo test --workspace` and then the release suites under
+`tests/`, which is the whole test surface of this repository. `bin/control.sh
+status` answers the other question — whether the shell is up and the dev server
+is answering — and reports liveness and health as two separate readings.

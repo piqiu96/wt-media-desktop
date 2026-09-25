@@ -21,7 +21,7 @@
 | `src-tauri/src/cleanup.rs` | 清理规则本体（CHG-058 T-06）：只删可安全再生的文件与**已轮转归档**；活文件、数据根下的素材/成片/SQLite/检查点/待回传结果、符号链接与特殊文件永不删；`FileKind::Other`（读者不认识的日志名）是**显示**类目、不是删除类目；`freed_bytes` 是**被删文件的逻辑大小之和**，不是可用空间差值；单个 `remove_file` 失败只记一行、不中断整次 | 改「删什么 / 留什么」 |
 | `src-tauri/src/diagnostic.rs` | 脱敏诊断包（CHG-058 T-07）：一个 gzip tar + 一棵目录树（`summary.json` + `manifest.txt` + `logs/{desktop,agent}/…`），摘要值是**归档外的兄弟 `.sha256`**（放进包里会自指）；**每条进包的字符串都过 `mask`**，日志条目两次（写它的那层一次、`bundle_files` 再一次，靠幂等钉着）；「不含用户媒体」由**布局**保证（每棵树只读一层），不靠名字过滤 | 改包的内容边界或上限 |
 | `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback`/`logging.*`（`level = "auto"`、`retention_days = 14`、`max_record_bytes = 1048576`——**没有单文件上限与总量键**，出货值由测试与 `rolling::DEFAULT_RETENTION_DAYS` 钉着不许漂） | 改发布默认值 |
-| `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、devUrl 5174、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
+| `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、`devUrl`、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
 | `src-tauri/build.rs`、`src-tauri/gen/`、`src-tauri/icons/` | 构建脚本、生成内容、图标 | 改打包资源 |
 
 ## 二、Rust 命令与安全桥
@@ -59,13 +59,14 @@ Agent 内部如何执行浏览器操作或 FFmpeg，不属于本仓库（归 `..
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
 | `src-tauri/src/updater/` | 版本检测、更新 | 改更新逻辑 |
-| `scripts/build.sh`、`scripts/dev.sh` | 常规构建与开发 | 改构建流程 |
+| `bin/control.sh` | 本地开发壳的启停与状态（`cargo tauri dev`）；只有这一个 `bin/` 文件 | 改开发流程 |
+| `scripts/test.sh` | 测试面：`cargo test --workspace` ＋ `tests/` 下的发布套件 | 改测试 |
 | `scripts/build-release-macos.sh`、`scripts/package-release-macos.sh` | macOS 发布构建与打包 | 改安装包 |
-| `scripts/prepare-release-sidecar.sh` | 发布前准备 Sidecar | 改 Sidecar 集成 |
+| `scripts/prepare-release-sidecar.sh`、`scripts/stage-release-config.sh` | 发布前准备 Sidecar 与发布配置入包 | 改 Sidecar 集成 |
 | `scripts/repair-macos-signing.sh` | macOS 签名修复 | 改签名 |
-| `scripts/health.sh`、`health-check.mjs`、`health-dev.mjs` | 健康检查 | 改运行检查 |
-| `scripts/start-dev.mjs`、`stop-dev.mjs`、`start.sh`、`stop.sh` | 开发启停 | 改开发流程 |
-| `packaging` 相关 | 见 `scripts/README.md` 与发布脚本 | — |
+| `scripts/release-versions.sh`、`scripts/verify-release-macos.sh` | 五个版本类别的打戳与核对、发布产物验收 | 改版本口径、改发布验收 |
+| `scripts/dev/`、`scripts/verify/` | 新脚本落位（当前各一枚 `.gitkeep`） | 写新脚本时 |
+| 其余脚本的分类与落位规则 | 见 `scripts/README.md` | — |
 
 支持范围遵循工程基线：Windows x64、macOS Intel、macOS Apple Silicon。
 
@@ -78,7 +79,7 @@ Agent 内部如何执行浏览器操作或 FFmpeg，不属于本仓库（归 `..
 
 ## 六、Vue 构建产物的来源与集成方式
 
-- 开发：`tauri.conf.json` 的 `beforeDevCommand` 进入 `../../wt-media-cloud/web` 跑 `npm run dev:desktop`（devUrl 5174）。
+- 开发：`tauri.conf.json` 的 `beforeDevCommand` 进入 `../../wt-media-cloud/web` 跑 `npm run dev:desktop`（地址由同文件的 `devUrl` 给出，本文不复述其值）。
 - 发布：`beforeBuildCommand` 先 `prepare-release-sidecar.sh`，再调 `../wt-media-workspace/scripts/build-desktop.sh` 产出前端到 `../.generated/frontend`，由 `frontendDist` 加载。
 
 改 Desktop 业务页面 → 去 `../wt-media-cloud/web`（`web/src/apps/desktop` 与 `web/src/modules`）。
