@@ -111,6 +111,14 @@ MEASURED_SIDECAR_SHA="$(shasum -a 256 "$PACKAGED_SIDECAR" | awk '{print $1}')"
 node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({component:"wt-media-agent",version:process.argv[2],target:process.argv[3],filename:"wt-media-agent",sha256:process.argv[4],build_filename:process.argv[5],build_sha256:process.argv[6]}, null, 2) + "\n")' \
   "$PACKAGE_DIR/sidecar-manifest.json" "$SIDECAR_VERSION" "$SIDECAR_TARGET" "$PACKAGED_SIDECAR_SHA" "$SIDECAR_BUILD_FILENAME" "$SIDECAR_BUILD_SHA"
 
+# The five version classes, lifted out of the bundle so a release folder answers
+# "what is in this package" without mounting anything. This is the same record the
+# app carries and the same one `--verify` checks against the DMG; it is copied, not
+# rewritten, so there is no second version of the truth to drift.
+VERSIONS_RECORD="$APP_PATH/Contents/Resources/versions.json"
+[[ -f "$VERSIONS_RECORD" ]] || { echo "the packaged app carries no version record: $VERSIONS_RECORD" >&2; exit 1; }
+cp "$VERSIONS_RECORD" "$PACKAGE_DIR/versions.json"
+
 printf '%s\n' \
   "WT Media ${VERSION} for macOS ${ARTIFACT_ARCH}" \
   '' \
@@ -122,11 +130,15 @@ printf '%s\n' \
   'The app is ad-hoc signed; macOS may require the normal first-open unknown-developer confirmation.' \
   'sidecar-manifest.json records the embedded Agent version, native target, filename, and SHA-256.' \
   'The app checks its sidecar against the copy of that record inside the bundle before starting it.' \
+  'versions.json records the five version classes this package was built from: the Desktop' \
+  'version, the embedded Agent version, the frontend build (package version + source commit),' \
+  'every cross-repository contract revision, and a digest of the components and resources' \
+  'the app carries.' \
   > "$PACKAGE_DIR/README.txt"
 
 (cd "$OUTPUT_DIR" && ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_NAME" "$(basename "$ARCHIVE_PATH")")
 shasum -a 256 "$ARCHIVE_PATH" > "$ARCHIVE_PATH.sha256"
-shasum -a 256 "$PACKAGE_DIR/$(basename "$DMG_PATH")" "$PACKAGE_DIR/sidecar-manifest.json" > "$PACKAGE_DIR/SHA256SUMS"
+shasum -a 256 "$PACKAGE_DIR/$(basename "$DMG_PATH")" "$PACKAGE_DIR/sidecar-manifest.json" "$PACKAGE_DIR/versions.json" > "$PACKAGE_DIR/SHA256SUMS"
 
 echo "release-dir=$PACKAGE_DIR"
 echo "archive=$ARCHIVE_PATH"

@@ -2,10 +2,12 @@
 set -euo pipefail
 
 APP_PATH="${1:?usage: repair-macos-signing.sh /path/to/WT Media.app}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIDECAR_PATH="$APP_PATH/Contents/MacOS/wt-media-agent"
 RESOURCES_DIR="$APP_PATH/Contents/Resources"
 PACKAGED_MANIFEST="$RESOURCES_DIR/sidecar-manifest.json"
-BUILD_MANIFEST="$(cd "$(dirname "$0")/.." && pwd)/target/sidecar-manifest.json"
+BUILD_MANIFEST="$DESKTOP_DIR/target/sidecar-manifest.json"
 
 test -x "$SIDECAR_PATH"
 test -f "$BUILD_MANIFEST"
@@ -50,6 +52,16 @@ SIDECAR_VERSION="$(node -p 'require(process.argv[1]).version' "$BUILD_MANIFEST")
 SIDECAR_TARGET="$(node -p 'require(process.argv[1]).target' "$BUILD_MANIFEST")"
 node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({component:"wt-media-agent",version:process.argv[2],target:process.argv[3],filename:"wt-media-agent",sha256:process.argv[4]}, null, 2) + "\n")' \
   "$PACKAGED_MANIFEST" "$SIDECAR_VERSION" "$SIDECAR_TARGET" "$PACKAGED_SIDECAR_SHA"
+
+# The version record that names all five classes is written in the same window and
+# for the same two reasons: it has to be inside the seal, and it has to be written
+# after every file it describes. `--record` digests `Contents/Resources` as it
+# stands, so running it here rather than in build-release-macos.sh is what makes
+# the digest cover the sidecar manifest above it (`--verify` later recomputes that
+# digest from the mounted DMG). The seal itself writes only `Contents/
+# _CodeSignature/`, which is outside the digested directory -- a digest over the
+# whole bundle could never be reproduced, because signing it changes it.
+bash "$SCRIPT_DIR/release-versions.sh" --record "$APP_PATH"
 
 /usr/bin/codesign --force --sign - --options runtime "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"

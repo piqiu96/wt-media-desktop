@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "agent_version": "0.2.2",
+  "note": "The Agent build this Desktop release is released against. scripts/release-versions.sh --check refuses any package whose sidecar reports a different version, so an Agent upgrade cannot ship silently inside a Desktop release. Bumping this pin IS the review: read the Agent's local API changes since the pinned version and decide whether this Desktop still runs them."
+}

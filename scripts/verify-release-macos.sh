@@ -55,4 +55,10 @@ if ! diff -r "$agent_config_dir" "$product_config_dir"; then
 fi
 echo "Agent configuration in the DMG is a ${expected_files}-file mirror of config_online/: $product_config_dir"
 
+# The five version classes, checked in the shipped artifact rather than in the
+# source tree: `--verify` recomputes the digest of the mounted app's resources and
+# compares it with the record the app carries, so a DMG assembled from a tree that
+# moved on after the build says so here instead of after installation.
+bash "$SCRIPT_DIR/release-versions.sh" --verify "$mount_dir/WT Media.app"
+
 echo "macOS DMG contains a complete ad-hoc-signed app: $dmg_path"
