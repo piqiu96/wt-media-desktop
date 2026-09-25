@@ -94,7 +94,20 @@ cp "$SIDECAR_MANIFEST" "$PACKAGE_DIR/agent-build-manifest.json"
 codesign --verify --deep --strict --verbose=2 "$PACKAGE_DIR/WT Media.app"
 
 PACKAGED_SIDECAR="$PACKAGE_DIR/WT Media.app/Contents/MacOS/wt-media-agent"
-PACKAGED_SIDECAR_SHA="$(shasum -a 256 "$PACKAGED_SIDECAR" | awk '{print $1}')"
+PACKAGED_MANIFEST="$PACKAGE_DIR/WT Media.app/Contents/Resources/sidecar-manifest.json"
+[[ -f "$PACKAGED_MANIFEST" ]] || { echo "the packaged app carries no sidecar record: $PACKAGED_MANIFEST" >&2; exit 1; }
+PACKAGED_SIDECAR_SHA="$(node -p 'require(process.argv[1]).sha256' "$PACKAGED_MANIFEST")"
+
+# The record the app verifies against has to describe the file that actually
+# shipped, and measuring it here is the only place that can be said before a
+# customer's launch: the app refuses to start a sidecar that disagrees with its
+# record, so a package built with a stale record would install and then not run.
+MEASURED_SIDECAR_SHA="$(shasum -a 256 "$PACKAGED_SIDECAR" | awk '{print $1}')"
+[[ "$MEASURED_SIDECAR_SHA" == "$PACKAGED_SIDECAR_SHA" ]] || {
+  echo "the in-bundle sidecar record does not describe the packaged file:" >&2
+  echo "  record=$PACKAGED_SIDECAR_SHA measured=$MEASURED_SIDECAR_SHA" >&2
+  exit 1
+}
 node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({component:"wt-media-agent",version:process.argv[2],target:process.argv[3],filename:"wt-media-agent",sha256:process.argv[4],build_filename:process.argv[5],build_sha256:process.argv[6]}, null, 2) + "\n")' \
   "$PACKAGE_DIR/sidecar-manifest.json" "$SIDECAR_VERSION" "$SIDECAR_TARGET" "$PACKAGED_SIDECAR_SHA" "$SIDECAR_BUILD_FILENAME" "$SIDECAR_BUILD_SHA"
 
@@ -108,6 +121,7 @@ printf '%s\n' \
   'The package embeds a native Local Agent sidecar. No customer Python installation is required.' \
   'The app is ad-hoc signed; macOS may require the normal first-open unknown-developer confirmation.' \
   'sidecar-manifest.json records the embedded Agent version, native target, filename, and SHA-256.' \
+  'The app checks its sidecar against the copy of that record inside the bundle before starting it.' \
   > "$PACKAGE_DIR/README.txt"
 
 (cd "$OUTPUT_DIR" && ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_NAME" "$(basename "$ARCHIVE_PATH")")

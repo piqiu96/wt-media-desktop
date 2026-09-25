@@ -1581,4 +1581,330 @@ mod tests {
             "the request carries exactly what it carried before the id existed: {head}"
         );
     }
+
+    /// Wait for `marker` to appear, and say whether it did before `within`.
+    ///
+    /// The bound is a parameter because the two arms need different ones and the
+    /// difference is honest: "a process ran" can be waited out, while "no process
+    /// ran" can only ever be "not in this window". The positive arm below is what
+    /// makes the negative one mean anything — it is the same probe, pointed at a
+    /// start that does happen.
+    fn ran_within(marker: &std::path::Path, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if marker.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A `cargo test` run is not a package — the half of the rule that keeps a
+    /// developer's tree working.
+    ///
+    /// The rule has two halves: `Location::check` refuses an unrecorded sidecar
+    /// when `bundled` is set, and `Location::of` sets that flag from the
+    /// executable's path. Each half has a test of its own; this is the one that
+    /// ties them together, and without it a mutation making every launch look like
+    /// a package leaves the whole suite green while a developer's tree refuses to
+    /// start. (The other direction — a real `.app` reading as one — is what
+    /// `the_bundled_sidecar_is_resolved_from_the_app_and_checked_against_its_record`
+    /// below pins, from inside a fabricated bundle, since it cannot run in this
+    /// directory at all: it asserts the flag it needs is set.)
+    #[test]
+    fn a_cargo_test_run_is_not_a_package() {
+        use crate::sidecar::integrity::Location;
+
+        let app = mock_app();
+        let location = Location::of(app.handle()).expect("a location for this executable");
+
+        assert!(
+            !location.bundled(),
+            "an executable under the cargo target directory is not inside a `.app`, \
+             and reading it as one would refuse every launch from a build tree"
+        );
+    }
+
+    /// The packaged shape, on a real `.app` layout — the arm a `cargo test` run
+    /// can never reach.
+    ///
+    /// `#[ignore]`d because it only means anything from inside a bundle, and the
+    /// target directory of an ordinary run is not one: `Location::of` decides
+    /// "is this a package" from the executable's path, so from there the first
+    /// assertion fails and says so. The procedure that runs it, and the reading
+    /// it produced, are in the task's evidence; in short — take the sidecar and
+    /// the record `scripts/repair-macos-signing.sh` wrote into a real package,
+    /// put them at `<x>.app/Contents/{MacOS,Resources}` beside this test binary,
+    /// and run it from there.
+    ///
+    /// Three things are pinned here that nothing else pins:
+    ///
+    /// * `resolve_sidecar` finds a **real file** at the layout Tauri and the
+    ///   signing script install — the one place that derivation is measured
+    ///   instead of compared against the plugin's source.
+    /// * `resource_dir()` is the directory the record was written to.
+    /// * the three answers `check` gives inside a package: the shipped record
+    ///   matches, one byte more does not, and deleting the record does not get
+    ///   past it. The first is the positive control for the other two.
+    #[test]
+    #[ignore]
+    fn the_bundled_sidecar_is_resolved_from_the_app_and_checked_against_its_record() {
+        use crate::sidecar::integrity::{self, Checked, Location};
+
+        let app = mock_app();
+        let location = Location::of(app.handle()).expect("a location");
+        let sidecar = location.sidecar().to_path_buf();
+        let manifest = location.manifest().to_path_buf();
+        println!("sidecar={}", sidecar.display());
+        println!("record={}", manifest.display());
+
+        assert!(
+            location.bundled(),
+            "this arm is only meaningful from inside a `.app`; run it from \
+             Contents/MacOS, per the procedure in this task's evidence"
+        );
+        assert!(
+            sidecar.is_file(),
+            "the sidecar has to be exactly where it was resolved from; if this is \
+             false the derivation disagrees with the layout the packaging script \
+             installs: {}",
+            sidecar.display()
+        );
+        assert!(
+            manifest.is_file(),
+            "the record the signing script wrote is expected at {}",
+            manifest.display()
+        );
+
+        // Arm 1 — the record `repair-macos-signing.sh` wrote for this very file,
+        // which is as far as the packaging half of this task can be checked from
+        // inside the app: the digest it names is re-measured from the file here.
+        let shipped = std::fs::read(&manifest).expect("the shipped record's bytes");
+        let matched = location
+            .check()
+            .expect("the shipped record has to describe the shipped sidecar");
+        let Checked::Matched(record) = matched else {
+            panic!("the shipped record has to match, not just be refused: {matched:?}")
+        };
+        assert_eq!(
+            record.sha256,
+            integrity::digest(&sidecar).expect("the sidecar's own digest")
+        );
+        println!(
+            "arm 1 校验通过 version={} target={} sha256={}",
+            record.version, record.target, record.sha256
+        );
+        let size = std::fs::metadata(&sidecar).expect("metadata").len();
+
+        // Arm 2 — one byte appended to the sidecar itself, the shape the
+        // acceptance criterion names. Re-measuring at the end restores the file
+        // exactly, so arm 4 is about the same bytes arm 1 was.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&sidecar)
+            .expect("append to the sidecar");
+        file.write_all(b"\0").expect("the extra byte");
+        drop(file);
+        let refusal = location
+            .check()
+            .expect_err("one byte more must not pass the shipped record");
+        assert!(
+            refusal.contains("SHA-256 与包内记录不一致"),
+            "the refusal says what is wrong: {refusal}"
+        );
+        println!("arm 2 {refusal}");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&sidecar)
+            .expect("reopen")
+            .set_len(size)
+            .expect("put the sidecar back");
+
+        // Arm 3 — the record deleted, inside a package. This is also the reading
+        // for `bundled` being true in a real bundle: a build tree tolerates an
+        // unrecorded sidecar, a package does not.
+        let moved = manifest.with_extension("json.hold");
+        std::fs::rename(&manifest, &moved).expect("hold the record aside");
+        let refusal = location
+            .check()
+            .expect_err("a packaged sidecar without its record is not usable");
+        assert!(
+            refusal.contains("包内缺少记录文件")
+                && refusal.contains(&manifest.display().to_string()),
+            "the refusal has to name the missing record: {refusal}"
+        );
+        println!("arm 3 {refusal}");
+        std::fs::rename(&moved, &manifest).expect("put the record back");
+
+        // Arm 4 — back to the shipped bytes, back to a matching answer. Without
+        // this the three answers above would also be consistent with a check that
+        // refuses everything after the first call.
+        assert!(matches!(
+            location.check().expect("restored"),
+            Checked::Matched(_)
+        ));
+        assert_eq!(
+            std::fs::read(&manifest).expect("read back"),
+            shipped,
+            "the record has to be the one that shipped"
+        );
+        println!("arm 4 复原后仍为「校验通过」");
+    }
+
+    /// T-04: a sidecar the package disagrees with is refused, and never started.
+    ///
+    /// The file the check is pointed at is a **real executable** — a shell script
+    /// that writes a marker and dumps its environment when it runs — so what the
+    /// two arms are told apart by is whether a process existed, not what a return
+    /// value said. A fake that only returned a value would be a reimplementation
+    /// of the thing under test, and the defect this closes is precisely that
+    /// nothing stood between the check and the spawn.
+    ///
+    /// Three arms: intact (the positive control, and the only one that shows the
+    /// probe can see a process at all), one byte changed, and the record deleted
+    /// inside a bundle. The last two also assert the **environment never
+    /// appeared**, which is the reading that the spawn did not happen — and the
+    /// first one asserts it did, so that file is not merely absent everywhere.
+    ///
+    /// All three point `Location::at` at a scratch directory of this test's own,
+    /// never at `target/debug`, where a real launch looks and a leftover script
+    /// would be a file something later executes.
+    #[test]
+    fn a_tampered_sidecar_is_refused_and_an_intact_one_is_started() {
+        use crate::sidecar::integrity::{self, Location};
+        use crate::sidecar::Attempt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("wt-media-t04-integrity");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let marker = dir.join("ran");
+        let environment = dir.join("environment");
+        let sidecar = dir.join(integrity::SIDECAR_NAME);
+        // The environment file is written **first** and the marker last, because
+        // the marker is what the test waits on: the other order raced with itself
+        // in 2 of 5 runs, and the wait returned between the two writes.
+        std::fs::write(
+            &sidecar,
+            format!(
+                "#!/bin/sh\nenv > {}\necho ran > {}\n",
+                environment.display(),
+                marker.display()
+            ),
+        )
+        .expect("a stand-in for the sidecar, executable in every sense");
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755))
+            .expect("the mode a sidecar is installed with");
+
+        // The package's record, as the packaging script writes it. `sha256` comes
+        // from this module because the unit test above pins that digest against
+        // `shasum`; what this test is about is what happens to the file the record
+        // describes, not the arithmetic.
+        let record = |sha: &str| {
+            format!(
+                "{{\"component\":\"wt-media-agent\",\"version\":\"0.2.5\",\
+                 \"target\":\"aarch64-apple-darwin\",\"filename\":\"wt-media-agent\",\
+                 \"sha256\":\"{sha}\"}}"
+            )
+        };
+        let manifest = dir.join(integrity::MANIFEST_NAME);
+        let app = mock_app();
+        let log = SidecarLog::default();
+        let vars = vec![("WT_MEDIA_T04_PROBE".to_string(), "probe-value".to_string())];
+        let at = |bundled: bool| Location::at(sidecar.clone(), manifest.clone(), bundled);
+
+        // Arm 1 — the file matches its record, so it runs, and the variables
+        // Desktop hands a sidecar reach it. (`start` applies the environment to
+        // the same command it verifies; this is the reading for that half too,
+        // which the wiring had none of before: the only test of `environment` was
+        // of the pure function.)
+        std::fs::write(
+            &manifest,
+            record(&integrity::digest(&sidecar).expect("digest")),
+        )
+        .expect("the package's record");
+        let (directory, subscriber) = capture("t04-integrity-intact");
+        let started = with_default(subscriber, || {
+            sidecar::spawn_verified(app.handle(), &at(true), &vars, &log)
+        });
+        match started {
+            Attempt::Started(label, _child) => assert_eq!(label, "sidecar_started"),
+            Attempt::Refused(reason) => panic!("an intact sidecar has to start: {reason}"),
+            Attempt::Unavailable => panic!("an intact sidecar has to start"),
+        }
+        assert!(
+            ran_within(&marker, std::time::Duration::from_secs(5)),
+            "the sidecar that matches its record is the one a process runs"
+        );
+        let seen = std::fs::read_to_string(&environment).expect("the script's environment");
+        assert!(
+            seen.contains("WT_MEDIA_T04_PROBE=probe-value"),
+            "the variables reach the child on the bundled path: {seen}"
+        );
+
+        // Arm 2 — one byte appended. The script still runs if anything starts it,
+        // which is the point: the only thing standing between these bytes and a
+        // running Agent is the check.
+        let before = std::fs::read(&sidecar).expect("read");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&sidecar)
+            .expect("append");
+        file.write_all(b"# one byte\n").expect("write");
+        drop(file);
+        assert_ne!(
+            before.len() as u64,
+            std::fs::metadata(&sidecar).expect("metadata").len(),
+            "the file under the check has to be a different file now"
+        );
+        std::fs::remove_file(&marker).expect("clear the marker");
+        std::fs::remove_file(&environment).expect("clear the environment file");
+
+        let refused = sidecar::spawn_verified(app.handle(), &at(true), &vars, &log);
+        let Attempt::Refused(reason) = refused else {
+            panic!("a changed byte has to be refused, not started")
+        };
+        assert!(
+            reason.contains("SHA-256 与包内记录不一致"),
+            "the refusal says what is wrong: {reason}"
+        );
+        assert!(
+            !ran_within(&marker, std::time::Duration::from_millis(300)),
+            "the refused sidecar must not be started: {reason}"
+        );
+        assert!(
+            !environment.exists(),
+            "and nothing ran it, so there is no environment to read: {reason}"
+        );
+
+        // Arm 3 — the record deleted, inside a bundle. Deleting the file that
+        // says what the sidecar should be must not be a way past the check.
+        std::fs::remove_file(&manifest).expect("delete the record");
+        let refused = sidecar::spawn_verified(app.handle(), &at(true), &vars, &log);
+        let Attempt::Refused(reason) = refused else {
+            panic!("an unrecorded sidecar in a package has to be refused")
+        };
+        assert!(
+            reason.contains(&manifest.display().to_string()),
+            "the refusal names the record it looked for: {reason}"
+        );
+        assert!(
+            !ran_within(&marker, std::time::Duration::from_millis(300)),
+            "an unrecorded sidecar must not be started either: {reason}"
+        );
+
+        // The first arm's record, read last on purpose: it is about a start that
+        // happened, so asserting it up front would mean a mutation that removes
+        // the record fails *here* instead of at the tamper — and the tamper is
+        // what this task is about. A record is not decoration, but it is not this
+        // test's headline either.
+        let text = written(&directory.0);
+        assert!(
+            text.contains("随应用的 Local Agent 校验通过"),
+            "a packaged start has to be readable as checked afterwards: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

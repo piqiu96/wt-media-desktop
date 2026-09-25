@@ -20,6 +20,7 @@ use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 pub mod drain;
+pub mod integrity;
 pub mod readiness;
 
 /// The fallback's whole command line.
@@ -62,6 +63,13 @@ pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String,
 /// "reinstall" message — which is the message that helps a user either way. The
 /// spawn error itself is deliberately not surfaced, as before.
 ///
+/// The bundled path is checked before it is taken: `integrity` compares the
+/// sidecar against the `sidecar-manifest.json` the package carries, and a
+/// disagreement **ends the start** rather than falling through — see `Attempt`.
+/// A sidecar with no record at all is only refused when this launch came out of a
+/// bundle, which is why a developer's tree still starts (the table in
+/// `integrity`'s header is the whole rule).
+///
 /// Both paths hand their event receiver to `drain`, so whichever one ran, its
 /// output is readable from `log` afterwards — and both are given the same
 /// environment (`environment`), applied through the single `spawn` helper below.
@@ -88,7 +96,6 @@ pub fn start<R: Runtime>(
     config: &DesktopConfig,
     token: &RuntimeToken,
 ) -> Result<(&'static str, CommandChild), String> {
-    const SIDECAR: &str = "sidecar_started";
     const FALLBACK: &str = "started";
 
     let vars = environment(config, token);
@@ -96,26 +103,102 @@ pub fn start<R: Runtime>(
         command.envs(vars.iter().map(|(key, value)| (key.as_str(), value.as_str())))
     };
 
-    match app
-        .shell()
-        .sidecar("wt-media-agent")
-        .map(|cmd| with_vars(cmd).spawn())
-    {
-        Ok(Ok((events, child))) => {
+    let attempt = match integrity::Location::of(app) {
+        Ok(location) => spawn_verified(app, &location, &vars, log),
+        // Nowhere to look for a sidecar at all. The same arm as a spawn that
+        // failed, so a debug build's Python opt-in still covers it — this is not
+        // a refusal, it is the absence of a package to refuse.
+        Err(_) => Attempt::Unavailable,
+    };
+
+    if let Attempt::Started(label, child) = attempt {
+        return Ok((label, child));
+    }
+    if may_fall_back(&attempt, allow_python_fallback) {
+        let shell = app.shell();
+        let (events, child) = with_vars(shell.command("python3").args(FALLBACK_ARGS))
+            .spawn()
+            .map_err(|e| format!("agent launch failed: {}", e))?;
+        drain::follow(events, log.clone(), FALLBACK);
+        return Ok((FALLBACK, child));
+    }
+    Err(match attempt {
+        Attempt::Refused(reason) => reason,
+        _ => "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),
+    })
+}
+
+/// Whether a bundled attempt that did not start may be answered by the Python
+/// path.
+///
+/// Pure and separate on purpose. This is the one place where a **refusal** — "the
+/// sidecar is not what the package records" — could be quietly converted into
+/// "start something else instead", which is the single response that hides a
+/// mismatched package: the app would come up, and every later call would be
+/// answered by an Agent nobody checked. So `Refused` is terminal whatever
+/// `allow_python_fallback` says, and the fallback is for
+/// [`Attempt::Unavailable`] alone.
+///
+/// A function rather than a `match` arm because in a release build the two arms
+/// are indistinguishable by construction (`development.python_fallback` is
+/// rejected in production, `config.rs`), which is exactly the kind of decision
+/// that is otherwise only ever read.
+fn may_fall_back(attempt: &Attempt, allow_python_fallback: bool) -> bool {
+    allow_python_fallback && matches!(attempt, Attempt::Unavailable)
+}
+
+/// What taking the bundled path came to.
+///
+/// Three, not two, because "there is no sidecar here" and "this sidecar is not
+/// the one the package records" call for opposite answers from [`start`]: the
+/// first is what a developer's tree looks like and the fallback exists for it,
+/// the second is never something to work around.
+pub(crate) enum Attempt {
+    /// Running, under this label, with the handle to it.
+    Started(&'static str, CommandChild),
+    /// No usable bundled sidecar: absent, unspawnable, or its path unresolvable.
+    Unavailable,
+    /// The sidecar and the package's record of it disagree. The reason is the
+    /// caller's to report.
+    Refused(String),
+}
+
+/// Check the sidecar at `location`, then start **that file**.
+///
+/// The path comes in as an argument and is used for both halves, which is the
+/// whole reason this is a separate function from [`start`]: the verified bytes and
+/// the spawned bytes are the same bytes by construction, because there is only one
+/// resolution. `start` fills the argument in with [`integrity::Location::of`]; the
+/// tests fill it in with a location of their own, and then check what actually
+/// happens to a process rather than what the code appears to do.
+///
+/// Spawning the resolved path instead of the plugin's `sidecar(name)` is the same
+/// spawn — `Shell::sidecar` *is* `command(relative_command_path(name))`
+/// (`tauri-plugin-shell-2.3.5/src/lib.rs:67`, `:181`) — with the path kept in hand.
+pub(crate) fn spawn_verified<R: Runtime>(
+    app: &AppHandle<R>,
+    location: &integrity::Location,
+    vars: &[(String, String)],
+    log: &SidecarLog,
+) -> Attempt {
+    const SIDECAR: &str = "sidecar_started";
+
+    let checked = match location.check() {
+        Ok(checked) => checked,
+        Err(reason) => return Attempt::Refused(reason),
+    };
+    integrity::note(&checked, location);
+
+    let command = app.shell().command(location.sidecar()).envs(
+        vars.iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    match command.spawn() {
+        Ok((events, child)) => {
             drain::follow(events, log.clone(), SIDECAR);
-            Ok((SIDECAR, child))
+            Attempt::Started(SIDECAR, child)
         }
-        _ if allow_python_fallback => {
-            let shell = app.shell();
-            let (events, child) = with_vars(shell.command("python3").args(FALLBACK_ARGS))
-                .spawn()
-                .map_err(|e| format!("agent launch failed: {}", e))?;
-            drain::follow(events, log.clone(), FALLBACK);
-            Ok((FALLBACK, child))
-        }
-        _ => Err(
-            "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),
-        ),
+        Err(_) => Attempt::Unavailable,
     }
 }
 
@@ -428,6 +511,27 @@ mod tests {
         assert!(
             !FALLBACK_ARGS.iter().any(|arg| arg.to_lowercase().contains("token")),
             "the token must never be an argument: {FALLBACK_ARGS:?}"
+        );
+    }
+
+    /// A refusal is never answered by starting something else.
+    ///
+    /// The three arms are the whole truth table, and the first one is the one
+    /// that matters: with the opt-in **on** — a debug build, which is where a
+    /// refusal is otherwise indistinguishable from "the sidecar would not start"
+    /// — a mismatched package still ends the start. The other two pin the
+    /// fallback's real job so the first cannot be satisfied by removing it.
+    #[test]
+    fn a_refusal_is_never_answered_with_the_python_path() {
+        assert!(
+            !may_fall_back(&Attempt::Refused("校验失败".into()), true),
+            "the opt-in must not reach a refusal: that is how a mismatched \
+             package becomes a running app"
+        );
+        assert!(may_fall_back(&Attempt::Unavailable, true));
+        assert!(
+            !may_fall_back(&Attempt::Unavailable, false),
+            "and the opt-in is still an opt-in"
         );
     }
 }
