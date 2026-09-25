@@ -13,7 +13,7 @@
 use crate::config::DesktopConfig;
 use crate::state::SidecarLog;
 use crate::token::RuntimeToken;
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
@@ -72,8 +72,15 @@ pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String,
 /// site. The environment is *added* to the child's inherited one, not substituted
 /// for it: the bundled sidecar is started by PyInstaller's bootstrap, which needs
 /// `PATH` and `$HOME` to be intact.
-pub fn start(
-    app: &AppHandle,
+///
+/// Generic over the runtime, and only because of that: `Wry` is what ships, and
+/// naming it here would make the one function that *spawns* the Agent reachable
+/// only from a real app. `MockRuntime` (`tauri`'s `test` feature, a test-only
+/// dependency) drives this same code, so a test can hold a real `CommandChild` —
+/// which is what T-02's defect needs and what no fake could stand in for. No call
+/// site changes: every one of them passes a `Wry` handle and infers it.
+pub fn start<R: Runtime>(
+    app: &AppHandle<R>,
     allow_python_fallback: bool,
     log: &SidecarLog,
     config: &DesktopConfig,

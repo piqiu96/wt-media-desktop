@@ -163,11 +163,14 @@ async fn health(
 
 /// The start itself, minus the argument unpacking.
 ///
-/// This one still needs the `AppHandle`, which is exactly what no test can
-/// build: the spawn it feeds (`sidecar::start`) is the only part of the command
-/// layer the suite cannot reach, and it is left alone here rather than faked.
-async fn start(
-    app: &tauri::AppHandle,
+/// Generic over the runtime so the suite can drive it: `start` is the only place
+/// the managed slot is filled, and the defect T-02 closes — a start answered from
+/// a record rather than from the Agent — lives in its guard. A test that could
+/// not reach this would have to reproduce the guard, and a reimplementation is
+/// exactly what would not have the bug. `tauri`'s mock runtime runs the same body
+/// (see `sidecar::start`); the shipped app passes a `Wry` handle and infers it.
+async fn start<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     client: &LocalAgentClient,
     config: &DesktopConfig,
     process: &AgentProcess,
