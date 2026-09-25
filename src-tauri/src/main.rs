@@ -26,6 +26,11 @@ mod storage;
 mod system;
 mod token;
 mod updater;
+// T-07's criterion is a test-only module on purpose: there is no upgrade action
+// to change, so what has to exist is the declaration and the arms, not a guard
+// with no caller. See the module's header.
+#[cfg(test)]
+mod upgrade;
 
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
