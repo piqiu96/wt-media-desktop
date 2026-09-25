@@ -104,6 +104,21 @@ fn stop_failed(reason: &str, session: Option<&str>) {
     lifecycle!(WARN, session, "{reason}");
 }
 
+/// The Agent recorded in the managed slot stopped answering.
+///
+/// The honest end of a session that ended without Desktop asking: this is the
+/// status the app used to get wrong (CHG-057), and it is a record rather than a
+/// warning because the start that follows either succeeds or reports its own
+/// reason — this line explains why a *second* Agent is being started while the
+/// slot still looked occupied.
+fn stale(session: Option<&str>) {
+    lifecycle!(
+        INFO,
+        session,
+        "Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"
+    );
+}
+
 /// A failed Agent command: the caller gets the tail, the record does not.
 ///
 /// The two texts differ on purpose. The frontend shows the returned one, and a
@@ -161,6 +176,86 @@ async fn health(
     Ok(text)
 }
 
+/// What the managed slot has to say about the Agent right now.
+#[derive(Debug, PartialEq, Eq)]
+enum Occupancy {
+    /// No handle is held: there is nothing to ask about.
+    Vacant,
+    /// A handle is held and the Agent answers: it really is running.
+    Running,
+    /// A handle is held and nothing answers: the handle outlived its process.
+    Stale,
+}
+
+/// Ask the Agent, rather than read the record — the whole of T-02.
+///
+/// The record is a `CommandChild`, and a `CommandChild` survives the process it
+/// names: it is `Some` from the spawn until Desktop takes it out, whether or not
+/// anything is on the other end. So "the slot is occupied" answers a question
+/// about Desktop's bookkeeping, and the question the caller is actually asking is
+/// about the Agent. CHG-057 registered the difference as a defect (a dead sidecar
+/// reported as running); this is the function that stops conflating them.
+///
+/// The vacant case is decided **before** the probe, and that order is
+/// load-bearing: probing an empty slot would let an Agent Desktop did not start —
+/// a developer's own on the shipped port — be reported as the one it is
+/// supervising, and a start would be refused with no handle to stop.
+async fn occupancy(process: &AgentProcess, client: &LocalAgentClient) -> Result<Occupancy, String> {
+    let held = process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .is_some();
+    if !held {
+        return Ok(Occupancy::Vacant);
+    }
+    Ok(if answering(client).await {
+        Occupancy::Running
+    } else {
+        Occupancy::Stale
+    })
+}
+
+/// Whether anything on the Agent's port answers at all.
+///
+/// **Any** HTTP answer counts, 401 included: the question is whether something is
+/// listening, and a credential mismatch is an answer. `sidecar::readiness` reads
+/// the same endpoint and treats 401 as fatal — it is asking whether the Agent can
+/// be *used*, which is a different question, and folding the two together would
+/// break one of them.
+///
+/// The wait is the client's own timeout, so a wedged Agent is answered for rather
+/// than waited on forever.
+async fn answering(client: &LocalAgentClient) -> bool {
+    client.get("/healthz").send().await.is_ok()
+}
+
+/// The handle in the managed slot outlived its process: drop it, and the session
+/// with it.
+///
+/// Recorded before the session is cleared, the same order as `ended`, so the
+/// record names the session it is about.
+///
+/// The kill is best effort and its result is deliberately **not** recorded: a
+/// process that has already ended makes `kill` fail (there is nothing to signal)
+/// and a wedged one makes it succeed, so the error is expected in the case that
+/// matters least and absent in the case that matters most. It is attempted anyway,
+/// because the wedged case is exactly the one where dropping the handle would
+/// throw away the only way this app has to stop the process.
+fn discard(process: &AgentProcess, session: &OperationId) -> Result<(), String> {
+    let child = process
+        .0
+        .lock()
+        .map_err(|_| "agent process lock poisoned")?
+        .take();
+    if let Some(child) = child {
+        stale(session.current().as_deref());
+        let _ = sidecar::stop(child);
+    }
+    session.clear();
+    Ok(())
+}
+
 /// The start itself, minus the argument unpacking.
 ///
 /// Generic over the runtime so the suite can drive it: `start` is the only place
@@ -177,14 +272,16 @@ async fn start<R: tauri::Runtime>(
     session: &OperationId,
     log: &SidecarLog,
 ) -> Result<String, String> {
-    if process
-        .0
-        .lock()
-        .map_err(|_| "agent process lock poisoned")?
-        .is_some()
-    {
-        already_running(session.current().as_deref());
-        return Ok("already_running".into());
+    match occupancy(process, client).await? {
+        Occupancy::Running => {
+            already_running(session.current().as_deref());
+            return Ok("already_running".into());
+        }
+        Occupancy::Vacant => {}
+        // The handle is a leftover. Dropped here — **before** anything is spawned
+        // — because the spawn below fills the same slot, and a start that left the
+        // dead handle in place would report the next stop as a failed kill.
+        Occupancy::Stale => discard(process, session)?,
     }
     // One id per **start request**, generated before the spawn and used by every
     // record this attempt writes. A failed attempt has an id but no session: the
@@ -340,12 +437,22 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use tauri_plugin_shell::process::CommandChild;
     use tracing::subscriber::with_default;
 
-    fn client_to(port: u16) -> LocalAgentClient {
+    /// The shipped configuration, pointed at `port`.
+    ///
+    /// Split out of `client_to` so a test that drives `start` can hand **one**
+    /// config to both halves: the client it calls with and the port the Agent
+    /// would bind have to be the same value, or the test would be asserting about
+    /// a different Agent than the one it started.
+    fn config_to(port: u16) -> DesktopConfig {
         let text = PRODUCTION_TOML.replace("port = 8765", &format!("port = {port}"));
-        let config = load_with(&BTreeMap::new(), &text, Environment::Production).expect("test config");
-        LocalAgentClient::new(&config, RuntimeToken::generate())
+        load_with(&BTreeMap::new(), &text, Environment::Production).expect("test config")
+    }
+
+    fn client_to(port: u16) -> LocalAgentClient {
+        LocalAgentClient::new(&config_to(port), RuntimeToken::generate())
     }
 
     /// A session that is already open, holding `id`.
@@ -409,6 +516,73 @@ mod tests {
         server.local_addr().expect("the bound address").port()
     }
 
+    /// An app whose shell plugin is the code the shipped app runs.
+    ///
+    /// `tauri`'s `test` feature (a **dev**-dependency; see `Cargo.toml`) supplies
+    /// `MockRuntime`, and `tauri-plugin-shell` above it is not a mock of anything:
+    /// it is the same crate, spawning the same way. That is what lets a test hold
+    /// a real `CommandChild` — the handle whose staleness is the defect below, and
+    /// the one thing the tests above record as out of reach.
+    ///
+    /// No window and no assets: `mock_context(noop_assets())`.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("a mock app")
+    }
+
+    /// A child that is still running, held by its handle.
+    ///
+    /// For the arms where the slot has to be occupied and nothing else about the
+    /// child matters — the probe reads the port, not the process. It ends on its
+    /// own, so a test that forgets to stop it leaves nothing behind.
+    fn live_child(app: &tauri::App<tauri::test::MockRuntime>) -> CommandChild {
+        use tauri_plugin_shell::ShellExt;
+
+        let (_events, child) = app
+            .shell()
+            .command("sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("a child that stays alive");
+        child
+    }
+
+    /// A child that has already ended, still held by its handle.
+    ///
+    /// **The state CHG-057 registered**: the Agent dies on its own and the
+    /// managed `CommandChild` stays where it is.
+    ///
+    /// Its end is *awaited*, not slept for — the plugin sends `Terminated` when
+    /// the process ends, which is the same event `drain` reads in production. A
+    /// sleep would make this test's premise ("the child has ended") merely
+    /// probable, and the premise is the whole point.
+    fn ended_child(app: &tauri::App<tauri::test::MockRuntime>) -> CommandChild {
+        use tauri_plugin_shell::process::CommandEvent;
+        use tauri_plugin_shell::ShellExt;
+
+        let (mut events, child) = app
+            .shell()
+            .command("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a child that exits at once");
+
+        let mut ended = false;
+        while let Some(event) = tauri::async_runtime::block_on(events.recv()) {
+            if matches!(event, CommandEvent::Terminated(_)) {
+                ended = true;
+                break;
+            }
+        }
+        assert!(
+            ended,
+            "the child must have ended, or this test asserts nothing"
+        );
+        child
+    }
+
     /// Every lifecycle record says what happened, under Desktop's own target,
     /// at a level production keeps.
     ///
@@ -423,15 +597,17 @@ mod tests {
             started("sidecar_started", None);
             ready("wt-media-agent local API listening on 127.0.0.1:8765", None);
             already_running(None);
+            stale(None);
             stopped(None);
             not_running();
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 5, "one record per outcome: {text}");
+        assert_eq!(text.lines().count(), 6, "one record per outcome: {text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已就绪：wt-media-agent local API listening on 127.0.0.1:8765"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已在运行，忽略本次启动请求"), "{text}");
+        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已停止"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
     }
@@ -595,6 +771,174 @@ mod tests {
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
     }
 
+    /// **The defect CHG-057 registered**, asserted at the level the frontend sees
+    /// it: the managed slot keeps its `CommandChild` after the process behind it
+    /// ends, so `start` read that record and answered `already_running` — a dead
+    /// Agent reported as running, and no way to start one, because the slot that
+    /// has to be empty before a spawn never becomes empty.
+    ///
+    /// Nothing here is faked: a real child (via `mock_app`), a real slot, the real
+    /// `start`, and a port that really does not answer. The probe reads the
+    /// **port**, not the child's exit status — this slot and this port together
+    /// are the state the app was found in.
+    ///
+    /// The two assertions are the answer and the record: the answer stops being
+    /// `already_running`, and the stale path is the one that ran, which the log
+    /// says and the slot cannot.
+    ///
+    /// **Not asserted here: that the slot ends up empty.** It does — but this
+    /// test's start fails at the spawn, and the failure branch calls `stop`, which
+    /// takes whatever the slot holds. So an empty slot here does not distinguish
+    /// "the stale handle was discarded" from "it was left and cleaned up later",
+    /// and an assertion that cannot tell those apart would be a claim about
+    /// nothing. That half is pinned in
+    /// `a_stale_handle_is_recorded_dropped_and_released_with_its_session`, where
+    /// `discard` is the only thing that runs.
+    ///
+    /// **The deadline is shortened on purpose, and it is the only thing about this
+    /// test that is not production.** Once the guard lets the start through, the
+    /// spawn happens: `sidecar::start` resolves `binaries/wt-media-agent`, which
+    /// on a developer's machine is a **gitignored 10 MB artifact that may or may
+    /// not have been built** (`.gitignore:9`), and the gate then waits
+    /// `start_timeout_ms` for a sidecar that cannot start inside a `cargo test`
+    /// process. At the shipped 15000 that is 15 s of suite time on a machine that
+    /// has built the sidecar, and none at all on one that has not. The subject
+    /// here is the guard, which decides before any of that, so the wait after it
+    /// is capped.
+    #[test]
+    fn a_start_after_the_agent_died_does_not_answer_already_running() {
+        let app = mock_app();
+        let process = AgentProcess::default();
+        *process.0.lock().expect("the slot") = Some(ended_child(&app));
+
+        let port = silent_port();
+        let mut config = config_to(port);
+        config.sidecar.start_timeout_ms = 300;
+        let client = LocalAgentClient::new(&config, RuntimeToken::generate());
+        let (directory, subscriber) = capture("agent-start-stale-handle");
+
+        let answer = with_default(subscriber, || {
+            tauri::async_runtime::block_on(start(
+                app.handle(),
+                &client,
+                &config,
+                &process,
+                &OperationId::default(),
+                &SidecarLog::default(),
+            ))
+        });
+
+        assert_ne!(
+            answer,
+            Ok("already_running".to_string()),
+            "the slot holds a handle, not an Agent: {answer:?}"
+        );
+        let text = written(&directory.0);
+        assert!(
+            text.contains("Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"),
+            "the stale handle is the reason this start proceeded, and the log has to \
+             say so — without it a second Agent appearing is unexplained: {text}"
+        );
+    }
+
+    /// The other half of the decision, and the control for the test above: an
+    /// Agent that **does** answer is still reported as running, and its handle is
+    /// still held.
+    ///
+    /// Without this, "never answer `already_running`" — a start that always
+    /// spawns a second Agent on an occupied port — would pass. The port is a live
+    /// stub rather than the child: the probe is over the network, and the child's
+    /// own liveness is not what it reads.
+    #[test]
+    fn an_agent_that_answers_is_left_alone() {
+        let app = mock_app();
+        let process = AgentProcess::default();
+        *process.0.lock().expect("the slot") = Some(live_child(&app));
+
+        let port = answering("{\"status\":\"ok\"}");
+        let config = config_to(port);
+        let client = LocalAgentClient::new(&config, RuntimeToken::generate());
+        let session = holding("session-one");
+
+        let answer = tauri::async_runtime::block_on(start(
+            app.handle(),
+            &client,
+            &config,
+            &process,
+            &session,
+            &SidecarLog::default(),
+        ));
+
+        assert_eq!(answer, Ok("already_running".to_string()));
+        assert_eq!(
+            session.current().as_deref(),
+            Some("session-one"),
+            "the session of the Agent that is running is the one that stays open"
+        );
+        assert!(
+            process.0.lock().expect("the slot").is_some(),
+            "a live Agent is not discarded"
+        );
+    }
+
+    /// A start with no handle held asks nobody: `Vacant`, decided without a
+    /// request.
+    ///
+    /// The order matters, and this is what pins it. An Agent Desktop did not start
+    /// — a developer's own, on the shipped port — answers `/healthz` too; if the
+    /// probe ran before the slot was read, that Agent would be reported as the one
+    /// this app supervises, and the start would be refused with no handle to stop.
+    /// The stub answers, so a probe here would come back `Running`.
+    #[test]
+    fn a_vacant_slot_is_decided_without_asking() {
+        let client = client_to(answering("{\"status\":\"ok\"}"));
+
+        let occupancy =
+            tauri::async_runtime::block_on(occupancy(&AgentProcess::default(), &client));
+
+        assert_eq!(
+            occupancy.expect("an empty slot is readable"),
+            Occupancy::Vacant,
+            "no handle held, no question asked"
+        );
+    }
+
+    /// The stale handle is recorded, dropped, and the session released with it.
+    ///
+    /// Both halves of `discard`, in the order it does them: the record names the
+    /// session, then the session ends — an id that outlived its Agent would label
+    /// the next session's records with the previous one's.
+    #[test]
+    fn a_stale_handle_is_recorded_dropped_and_released_with_its_session() {
+        let app = mock_app();
+        let process = AgentProcess::default();
+        *process.0.lock().expect("the slot") = Some(ended_child(&app));
+        let session = holding("session-one");
+        let (directory, subscriber) = capture("agent-stale-handle");
+
+        with_default(subscriber, || {
+            discard(&process, &session).expect("the slot is readable")
+        });
+
+        assert_eq!(
+            session.current(),
+            None,
+            "the session ends when the Agent it named does"
+        );
+        let text = written(&directory.0);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains(
+                "[INFO] agent.supervisor: Local Agent 已不再应答，丢弃记着的句柄并按未运行处理 operation_id=session-one"
+            ),
+            "{text}"
+        );
+        assert!(
+            process.0.lock().expect("the slot").is_none(),
+            "the handle is taken out of the slot"
+        );
+    }
+
     /// A session opens and closes, and both records say which session it was.
     ///
     /// `begin`/`ended` are what `start` and `stop` run once the spawn and the
@@ -683,6 +1027,7 @@ mod tests {
                 Some("session-one"),
             );
             already_running(Some("session-one"));
+            stale(Some("session-one"));
             healthy("{\"status\":\"ok\"}", Some("session-one"));
             stopped(Some("session-one"));
             stop_failed("agent stop failed: no such process", Some("session-one"));
@@ -694,7 +1039,7 @@ mod tests {
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 7, "one record per call: {text}");
+        assert_eq!(text.lines().count(), 8, "one record per call: {text}");
         for line in text.lines() {
             assert!(
                 line.ends_with("operation_id=session-one"),
