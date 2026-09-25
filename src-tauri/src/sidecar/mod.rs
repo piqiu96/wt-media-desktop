@@ -18,6 +18,7 @@ use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 pub mod drain;
+pub mod readiness;
 
 /// The fallback's whole command line.
 ///

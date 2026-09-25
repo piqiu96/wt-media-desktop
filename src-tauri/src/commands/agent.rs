@@ -23,7 +23,7 @@ use crate::config::DesktopConfig;
 use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
-use crate::sidecar::{self, drain};
+use crate::sidecar::{self, drain, readiness};
 use crate::state::{AgentProcess, OperationId, SidecarLog};
 use tauri::State;
 
@@ -81,6 +81,20 @@ fn not_running() {
 /// reachable somehow or the level is decoration rather than a policy.
 fn healthy(text: &str, session: Option<&str>) {
     lifecycle!(DEBUG, session, "健康检查成功：{text}");
+}
+
+/// The Agent said it was listening and then answered: the start is done.
+///
+/// INFO, and the announcement line with it — the port the Agent bound is
+/// Desktop's own knowledge about a process it is managing, not the Agent's record
+/// of itself. The health **body** stays where it already was, at DEBUG
+/// (`healthy`), so ruling 四 still holds for it.
+///
+/// Distinct from `started` on purpose: "a child process exists" and "the app can
+/// be used" used to be the same moment and are now seconds apart, and a reader
+/// looking at a start that went wrong needs to know which of the two happened.
+fn ready(line: &str, session: Option<&str>) {
+    lifecycle!(INFO, session, "Local Agent 已就绪：{line}");
 }
 
 /// The kill failed. The session is **not** over — the child was taken out of the
@@ -194,7 +208,31 @@ async fn start(
         .map_err(|_| "agent process lock poisoned")?
         .replace(child);
     begin(session, &id, label);
-    Ok(label.into())
+    // The child exists; it is not yet answering. Wait for it to report that it is
+    // listening and then to answer, which is what `sidecar.start_timeout_ms` has
+    // always described — until now no code performed that wait.
+    //
+    // The session is opened **before** this wait, not after. The child is in the
+    // managed slot from the moment it exists, so a stop arriving during the wait
+    // can still reach it; opening the session afterwards would leave a window in
+    // which the Agent is running and `local_agent_stop` reports `not_running` —
+    // the orphan CHG-057 measured, reintroduced one layer up.
+    match readiness::gate(config, log, client).await {
+        Ok(ready_agent) => {
+            ready(&ready_agent.line, Some(&id));
+            healthy(&ready_agent.health, Some(&id));
+            Ok(label.into())
+        }
+        Err(reason) => {
+            // A start that never became ready is a start that failed, and the
+            // child must not be left holding the port. Reported first, then
+            // stopped, so the reader sees "it started, here is why it failed, it
+            // was stopped" rather than a stop with no explanation above it.
+            let message = failed(reason, log, Some(&id));
+            let _ = stop(process, session);
+            Err(message)
+        }
+    }
 }
 
 /// A start that succeeded: the session exists from here.
@@ -380,14 +418,16 @@ mod tests {
             capture_at(Levels::shipped(Environment::Production), "agent-lifecycle");
         with_default(subscriber, || {
             started("sidecar_started", None);
+            ready("wt-media-agent local API listening on 127.0.0.1:8765", None);
             already_running(None);
             stopped(None);
             not_running();
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 4, "one record per outcome: {text}");
+        assert_eq!(text.lines().count(), 5, "one record per outcome: {text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）"), "{text}");
+        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已就绪：wt-media-agent local API listening on 127.0.0.1:8765"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已在运行，忽略本次启动请求"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已停止"), "{text}");
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
@@ -635,6 +675,10 @@ mod tests {
 
         with_default(subscriber, || {
             started("sidecar_started", Some("session-one"));
+            ready(
+                "wt-media-agent local API listening on 127.0.0.1:8765",
+                Some("session-one"),
+            );
             already_running(Some("session-one"));
             healthy("{\"status\":\"ok\"}", Some("session-one"));
             stopped(Some("session-one"));
@@ -647,7 +691,7 @@ mod tests {
         });
 
         let text = written(&directory.0);
-        assert_eq!(text.lines().count(), 6, "one record per call: {text}");
+        assert_eq!(text.lines().count(), 7, "one record per call: {text}");
         for line in text.lines() {
             assert!(
                 line.ends_with("operation_id=session-one"),
