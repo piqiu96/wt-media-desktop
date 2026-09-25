@@ -82,14 +82,20 @@ mod tests {
     fn a_loopback_cloud_url_is_sent_without_the_system_proxy() {
         let cloud = client();
 
-        for local in ["http://127.0.0.1:18080/api/v1/nodes", "http://localhost:18080/api/v1/nodes"] {
+        for local in [
+            "http://127.0.0.1:18080/api/v1/nodes",
+            "http://localhost:18080/api/v1/nodes",
+        ] {
             assert!(
                 std::ptr::eq(cloud.client_for(local), &cloud.direct),
                 "{local} is on this machine and must not be proxied"
             );
         }
 
-        for remote in ["https://cloud.example.test/api/v1/nodes", "http://192.168.1.10:18080/api/v1/nodes"] {
+        for remote in [
+            "https://cloud.example.test/api/v1/nodes",
+            "http://192.168.1.10:18080/api/v1/nodes",
+        ] {
             assert!(
                 std::ptr::eq(cloud.client_for(remote), &cloud.proxied),
                 "{remote} leaves this machine and keeps the system proxy"

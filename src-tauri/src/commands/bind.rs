@@ -7,9 +7,7 @@ use crate::dto::{
 };
 use crate::http::{CloudClient, LocalAgentClient};
 use crate::local_agent::BoundNodeFacts;
-use crate::preflight::{
-    self, NO_BINDING_REFRESH, NO_CLOUD_ADDRESS_BIND, NO_CLOUD_ADDRESS_REFRESH,
-};
+use crate::preflight::{self, NO_BINDING_REFRESH, NO_CLOUD_ADDRESS_BIND, NO_CLOUD_ADDRESS_REFRESH};
 use crate::state::{RuntimeBinding, RuntimeBindingState};
 use tauri::State;
 

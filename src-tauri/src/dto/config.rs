@@ -62,7 +62,10 @@ mod tests {
             // validates — which also makes `development` a section whose value
             // differs between the two cases.
             Environment::Development => PRODUCTION_TOML
-                .replace("environment = \"production\"", "environment = \"development\"")
+                .replace(
+                    "environment = \"production\"",
+                    "environment = \"development\"",
+                )
                 .replace("python_fallback = false", "python_fallback = true"),
         };
         load_with(&BTreeMap::new(), &text, environment).expect("the test config must load")
@@ -149,7 +152,10 @@ mod tests {
             "4244",                      // sidecar.start_timeout_ms
             "4245",                      // sidecar.stop_timeout_ms
         ] {
-            assert!(!text.contains(private), "{private:?} must not reach the page: {text}");
+            assert!(
+                !text.contains(private),
+                "{private:?} must not reach the page: {text}"
+            );
         }
     }
 }

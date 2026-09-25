@@ -1,11 +1,11 @@
 //! Sensitive-task flows: account check and cookie read. Both take a Cloud
 //! permit before touching the Local Agent, and both release it afterwards.
 
-use crate::dto::{AccountCheckArgs, AccountCheckResult, CookieReadArgs, CookieReadData, CookieReadResult};
-use crate::http::{CloudClient, LocalAgentClient};
-use crate::preflight::{
-    self, ACCOUNT_CHECK, COOKIE_READ, NO_BINDING_SENSITIVE,
+use crate::dto::{
+    AccountCheckArgs, AccountCheckResult, CookieReadArgs, CookieReadData, CookieReadResult,
 };
+use crate::http::{CloudClient, LocalAgentClient};
+use crate::preflight::{self, ACCOUNT_CHECK, COOKIE_READ, NO_BINDING_SENSITIVE};
 use crate::state::RuntimeBindingState;
 use tauri::State;
 
@@ -37,7 +37,8 @@ pub async fn local_agent_account_check(
     )
     .await?;
 
-    let preflight = preflight::run(&cloud, &cloud_base_url, &task_id, &binding, ACCOUNT_CHECK).await?;
+    let preflight =
+        preflight::run(&cloud, &cloud_base_url, &task_id, &binding, ACCOUNT_CHECK).await?;
 
     let account_check_resp = client
         .post("/api/v1/account-check")
@@ -107,7 +108,8 @@ pub async fn local_agent_cookie_read(
     )
     .await?;
 
-    let preflight = preflight::run(&cloud, &cloud_base_url, &task_id, &binding, COOKIE_READ).await?;
+    let preflight =
+        preflight::run(&cloud, &cloud_base_url, &task_id, &binding, COOKIE_READ).await?;
 
     let cookie_read_resp = client
         .post("/api/v1/cookie-read")

@@ -87,11 +87,16 @@ mod tests {
     /// restricts to loopback.
     #[test]
     fn the_base_url_comes_from_the_config() {
-        let client = LocalAgentClient::new(&config_with("127.0.0.1", 18999), RuntimeToken::generate());
+        let client =
+            LocalAgentClient::new(&config_with("127.0.0.1", 18999), RuntimeToken::generate());
         assert_eq!(client.url("/healthz"), "http://127.0.0.1:18999/healthz");
 
-        let client = LocalAgentClient::new(&config_with("localhost", 8765), RuntimeToken::generate());
-        assert_eq!(client.url("/api/v1/status"), "http://localhost:8765/api/v1/status");
+        let client =
+            LocalAgentClient::new(&config_with("localhost", 8765), RuntimeToken::generate());
+        assert_eq!(
+            client.url("/api/v1/status"),
+            "http://localhost:8765/api/v1/status"
+        );
     }
 
     /// Every request carries its own client's token — the one `token()` hands to
@@ -126,7 +131,11 @@ mod tests {
             assert_eq!(header_of(client.get("/healthz")), expected);
             assert_eq!(header_of(client.post("/api/v1/bind")), expected);
         }
-        assert_ne!(first.expose(), second.expose(), "the two cases must differ to mean anything");
+        assert_ne!(
+            first.expose(),
+            second.expose(),
+            "the two cases must differ to mean anything"
+        );
     }
 
     /// The URL is the base plus the path, and nothing else — no query string.

@@ -122,9 +122,7 @@ enum Heard {
 /// What one event means, or `None` for one this module ignores.
 fn classify(event: CommandEvent) -> Option<Heard> {
     match event {
-        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-            kept(&bytes).map(Heard::Line)
-        }
+        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => kept(&bytes).map(Heard::Line),
         CommandEvent::Error(reason) => Some(Heard::Failure(reason)),
         CommandEvent::Terminated(TerminatedPayload { code, signal }) => {
             Some(Heard::Exited { code, signal })
@@ -253,7 +251,11 @@ mod tests {
 
         assert_eq!(len(&log), CAPACITY, "the buffer must stop growing");
         let held = tail(&log, CAPACITY);
-        assert_eq!(held.first().unwrap(), "line-5", "the five oldest must be gone");
+        assert_eq!(
+            held.first().unwrap(),
+            "line-5",
+            "the five oldest must be gone"
+        );
         assert_eq!(held.last().unwrap(), &format!("line-{}", CAPACITY + 4));
     }
 
@@ -279,8 +281,14 @@ mod tests {
     #[test]
     fn blank_chunks_are_dropped_and_garbled_ones_are_kept() {
         assert_eq!(kept(b"starting\n").as_deref(), Some("starting"));
-        assert_eq!(kept(b"no trailing newline").as_deref(), Some("no trailing newline"));
-        assert_eq!(kept(b"trailing spaces   ").as_deref(), Some("trailing spaces"));
+        assert_eq!(
+            kept(b"no trailing newline").as_deref(),
+            Some("no trailing newline")
+        );
+        assert_eq!(
+            kept(b"trailing spaces   ").as_deref(),
+            Some("trailing spaces")
+        );
         assert_eq!(kept(b"invalid utf8: \xff\xfe").is_some(), true);
 
         for blank in [&b""[..], b"\n", b"\r", b"\r\n", b"   ", b"\t\n"] {
@@ -330,7 +338,10 @@ mod tests {
             "a full buffer must report {CAPACITY} held and {TAIL_ON_EXIT} shown: {report}"
         );
         assert!(report.contains("| l199"), "the newest line must be shown");
-        assert!(!report.contains("| l0"), "the oldest must have been evicted");
+        assert!(
+            !report.contains("| l0"),
+            "the oldest must have been evicted"
+        );
     }
 
     /// Ordinary output is buffered and **not** logged (AC-09, D-07).
@@ -408,7 +419,10 @@ mod tests {
             ));
         });
 
-        assert_eq!(tail(&log, 1), vec!["[读取 sidecar 输出失败] channel closed"]);
+        assert_eq!(
+            tail(&log, 1),
+            vec!["[读取 sidecar 输出失败] channel closed"]
+        );
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 1, "one failure, one record: {text}");
         assert!(text.contains("[WARN] agent.supervisor"), "{text}");
@@ -450,8 +464,14 @@ mod tests {
     /// editing the constant to 10 would leave this test green.
     #[test]
     fn the_reported_window_is_the_same_one_either_way() {
-        assert_eq!(CAPACITY, 200, "the plan fixes this capacity; changing it is a deliberate edit");
-        assert_eq!(TAIL_ON_EXIT, 20, "the plan fixes this tail; changing it is a deliberate edit");
+        assert_eq!(
+            CAPACITY, 200,
+            "the plan fixes this capacity; changing it is a deliberate edit"
+        );
+        assert_eq!(
+            TAIL_ON_EXIT, 20,
+            "the plan fixes this tail; changing it is a deliberate edit"
+        );
 
         let log = SidecarLog::default();
         for i in 0..50 {

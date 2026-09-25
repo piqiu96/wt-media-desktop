@@ -63,7 +63,8 @@ pub const NO_CLOUD_ADDRESS_REFRESH: &str = "Cloud地址为空，无法刷新本�
 /// they ask for different next steps: `refresh_runtime` tells the user to bind,
 /// while the sensitive flows tell them to re-detect and then bind.
 pub const NO_BINDING_SENSITIVE: &str = "当前电脑尚未完成可信绑定，请先到环境状态页重新检测并绑定";
-pub const NO_BINDING_REFRESH: &str = "当前电脑尚未完成可信绑定，请先到环境状态页绑定当前比特浏览器账号";
+pub const NO_BINDING_REFRESH: &str =
+    "当前电脑尚未完成可信绑定，请先到环境状态页绑定当前比特浏览器账号";
 
 /// The "missing BitBrowser identity" sentences. Shared by every flow, so they
 /// are constants rather than parameters.
@@ -129,10 +130,7 @@ impl PreflightFailure {
 
 /// Normalise a Cloud base URL the one way all four flows do, or refuse with the
 /// caller's own sentence.
-pub fn require_cloud_base_url(
-    raw: &str,
-    no_cloud_address: &str,
-) -> Result<String, String> {
+pub fn require_cloud_base_url(raw: &str, no_cloud_address: &str) -> Result<String, String> {
     let url = raw.trim().trim_end_matches('/').to_string();
     if url.is_empty() {
         return Err(no_cloud_address.to_string());
@@ -348,31 +346,71 @@ mod tests {
         // both: 16 rows, so no variant is left unpinned for either flow.
         let rows: [(PreflightSpec, PreflightFailure, &str); 16] = [
             // account_check
-            (ACCOUNT_CHECK, Transport("boom".into()), "账号检查预检失败: boom"),
+            (
+                ACCOUNT_CHECK,
+                Transport("boom".into()),
+                "账号检查预检失败: boom",
+            ),
             (
                 ACCOUNT_CHECK,
                 Status(StatusCode::BAD_REQUEST, "body".into()),
                 "账号检查预检失败: 400 Bad Request body",
             ),
-            (ACCOUNT_CHECK, Body("bad json".into()), "账号检查预检响应格式错误: bad json"),
+            (
+                ACCOUNT_CHECK,
+                Body("bad json".into()),
+                "账号检查预检响应格式错误: bad json",
+            ),
             (ACCOUNT_CHECK, CloudRefused("拒绝".into()), "拒绝"),
-            (ACCOUNT_CHECK, CloudRefused(String::new()), "账号检查预检失败"),
+            (
+                ACCOUNT_CHECK,
+                CloudRefused(String::new()),
+                "账号检查预检失败",
+            ),
             (ACCOUNT_CHECK, MissingOutcome, "账号检查预检缺少授权结果"),
-            (ACCOUNT_CHECK, NotGranted, "当前窗口正在执行其他敏感操作，请稍后重试"),
-            (ACCOUNT_CHECK, MissingPermitCredential, "账号检查授权缺少本机执行凭证"),
+            (
+                ACCOUNT_CHECK,
+                NotGranted,
+                "当前窗口正在执行其他敏感操作，请稍后重试",
+            ),
+            (
+                ACCOUNT_CHECK,
+                MissingPermitCredential,
+                "账号检查授权缺少本机执行凭证",
+            ),
             // cookie_read
-            (COOKIE_READ, Transport("boom".into()), "Cookie读取预检失败: boom"),
+            (
+                COOKIE_READ,
+                Transport("boom".into()),
+                "Cookie读取预检失败: boom",
+            ),
             (
                 COOKIE_READ,
                 Status(StatusCode::BAD_REQUEST, "body".into()),
                 "Cookie读取预检失败: 400 Bad Request body",
             ),
-            (COOKIE_READ, Body("bad json".into()), "Cookie读取预检响应格式错误: bad json"),
+            (
+                COOKIE_READ,
+                Body("bad json".into()),
+                "Cookie读取预检响应格式错误: bad json",
+            ),
             (COOKIE_READ, CloudRefused("拒绝".into()), "拒绝"),
-            (COOKIE_READ, CloudRefused(String::new()), "Cookie读取预检失败"),
+            (
+                COOKIE_READ,
+                CloudRefused(String::new()),
+                "Cookie读取预检失败",
+            ),
             (COOKIE_READ, MissingOutcome, "Cookie读取预检缺少授权结果"),
-            (COOKIE_READ, NotGranted, "当前窗口正在执行其他敏感操作，请稍后重试"),
-            (COOKIE_READ, MissingPermitCredential, "Cookie读取授权缺少本机执行凭证"),
+            (
+                COOKIE_READ,
+                NotGranted,
+                "当前窗口正在执行其他敏感操作，请稍后重试",
+            ),
+            (
+                COOKIE_READ,
+                MissingPermitCredential,
+                "Cookie读取授权缺少本机执行凭证",
+            ),
         ];
 
         for (spec, failure, expected) in rows {
@@ -428,8 +466,8 @@ mod tests {
     fn binding_guard_uses_the_callers_sentence() {
         let empty = RuntimeBindingState::default();
         for sentence in [NO_BINDING_SENSITIVE, NO_BINDING_REFRESH] {
-            let error = require_binding(&empty, sentence)
-                .expect_err("an unbound runtime must refuse");
+            let error =
+                require_binding(&empty, sentence).expect_err("an unbound runtime must refuse");
             assert_eq!(
                 error, sentence,
                 "the guard must not substitute its own wording"
@@ -469,7 +507,10 @@ mod tests {
         for (case, value) in [
             ("missing主账号", status(None, Some("normal"))),
             ("blank主账号", status(Some("  "), Some("normal"))),
-            ("BitBrowser未normal", status(Some("user-1"), Some("abnormal"))),
+            (
+                "BitBrowser未normal",
+                status(Some("user-1"), Some("abnormal")),
+            ),
             ("BitBrowser状态缺失", status(Some("user-1"), None)),
         ] {
             assert_eq!(

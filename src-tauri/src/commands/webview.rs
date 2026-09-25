@@ -38,7 +38,10 @@ mod tests {
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 2, "message and stack: {text}");
         assert!(text.contains("[ERROR] webview: boom"), "{text}");
-        assert!(text.contains("[ERROR] webview: [stack] at handler (app.js:1:2)"), "{text}");
+        assert!(
+            text.contains("[ERROR] webview: [stack] at handler (app.js:1:2)"),
+            "{text}"
+        );
     }
 
     /// An empty stack is one record, not two: the frontend sends `""` for every

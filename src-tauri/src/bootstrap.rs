@@ -97,7 +97,11 @@ pub fn load(
     let (text, source) = paths::file_text(env, environment, resource_dir, exe_dir, manifest_dir);
 
     match config::load_with(env, &text, environment) {
-        Ok(config) => Startup { config, source, rejected: None },
+        Ok(config) => Startup {
+            config,
+            source,
+            rejected: None,
+        },
         Err(error) => Startup {
             config: compiled_default(env, environment),
             // The file was found and then not used, so reporting the source as
@@ -197,10 +201,8 @@ mod tests {
     /// A directory with a `resources/desktop.production.toml` in it, removed by
     /// the caller.
     fn tree_with(text: &str, tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "wt-media-bootstrap-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("wt-media-bootstrap-{tag}-{}", std::process::id()));
         let resources = dir.join("resources");
         std::fs::create_dir_all(&resources).expect("temp dir");
         std::fs::write(resources.join(paths::RESOURCE_NAME), text).expect("write config");
@@ -208,8 +210,12 @@ mod tests {
     }
 
     fn shipped() -> DesktopConfig {
-        config::load_with(&BTreeMap::new(), config::PRODUCTION_TOML, Environment::Production)
-            .expect("the shipped resource must load")
+        config::load_with(
+            &BTreeMap::new(),
+            config::PRODUCTION_TOML,
+            Environment::Production,
+        )
+        .expect("the shipped resource must load")
     }
 
     #[test]
@@ -217,7 +223,10 @@ mod tests {
         assert_eq!(build_environment_of(true), Environment::Development);
         assert_eq!(build_environment_of(false), Environment::Production);
         // And the wiring agrees with the rule in the profile this test runs in.
-        assert_eq!(build_environment(), build_environment_of(cfg!(debug_assertions)));
+        assert_eq!(
+            build_environment(),
+            build_environment_of(cfg!(debug_assertions))
+        );
     }
 
     /// `tauri.conf.json` must not carry a policy of its own any more.
@@ -238,8 +247,8 @@ mod tests {
     /// "the injected policy is the policy, in dev and in production" hold.
     #[test]
     fn tauri_conf_carries_no_policy_of_its_own() {
-        let conf: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json is JSON");
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is JSON");
         let security = &conf["app"]["security"];
 
         for key in ["csp", "devCsp"] {
@@ -307,7 +316,10 @@ mod tests {
             policy.contains("connect-src 'self' https://cloud.example.test;"),
             "{policy}"
         );
-        assert!(!policy.contains("127.0.0.1:18080"), "the literal must not survive: {policy}");
+        assert!(
+            !policy.contains("127.0.0.1:18080"),
+            "the literal must not survive: {policy}"
+        );
     }
 
     /// A development build with a development file in the tree runs on that
@@ -315,7 +327,10 @@ mod tests {
     #[test]
     fn a_development_build_reads_the_tree_and_reports_it() {
         let text = config::PRODUCTION_TOML
-            .replace("environment = \"production\"", "environment = \"development\"")
+            .replace(
+                "environment = \"production\"",
+                "environment = \"development\"",
+            )
             .replace("port = 8765", "port = 8766");
         let dir = tree_with(&text, "dev");
 
@@ -326,7 +341,11 @@ mod tests {
         assert_eq!(startup.source, Source::DevelopmentTree);
         assert_eq!(startup.config.agent.port, 8766);
         assert!(startup.rejected.is_none());
-        assert!(startup.summary().contains("开发树"), "{}", startup.summary());
+        assert!(
+            startup.summary().contains("开发树"),
+            "{}",
+            startup.summary()
+        );
     }
 
     /// A file that parses but is not usable falls back to the compiled-in
@@ -334,7 +353,10 @@ mod tests {
     #[test]
     fn a_rejected_file_falls_back_and_says_why_without_echoing_a_value() {
         let text = config::PRODUCTION_TOML
-            .replace("environment = \"production\"", "environment = \"development\"")
+            .replace(
+                "environment = \"production\"",
+                "environment = \"development\"",
+            )
             .replace("host = \"127.0.0.1\"", "host = \"0.0.0.0\"");
         let dir = tree_with(&text, "bad");
 
@@ -342,11 +364,21 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(startup.config.agent.port, 8765, "the fallback must be the shipped config");
-        assert_eq!(startup.source, Source::CompiledIn, "a rejected file is not the source");
+        assert_eq!(
+            startup.config.agent.port, 8765,
+            "the fallback must be the shipped config"
+        );
+        assert_eq!(
+            startup.source,
+            Source::CompiledIn,
+            "a rejected file is not the source"
+        );
         let reason = startup.rejected.as_ref().expect("the reason must be kept");
         assert!(reason.contains("agent.host"), "{reason}");
-        assert!(!reason.contains("0.0.0.0"), "the value must not be echoed: {reason}");
+        assert!(
+            !reason.contains("0.0.0.0"),
+            "the value must not be echoed: {reason}"
+        );
         assert!(startup.summary().contains(reason), "{}", startup.summary());
     }
 
@@ -357,11 +389,20 @@ mod tests {
     #[test]
     fn production_ignores_the_environment_end_to_end() {
         let text = config::PRODUCTION_TOML
-            .replace("environment = \"production\"", "environment = \"development\"")
+            .replace(
+                "environment = \"production\"",
+                "environment = \"development\"",
+            )
             .replace("port = 8765", "port = 9999");
         let dir = tree_with(&text, "prod");
         let env = env_of(&[
-            (paths::CONFIG_ENV, dir.join("resources").join(paths::RESOURCE_NAME).to_str().unwrap()),
+            (
+                paths::CONFIG_ENV,
+                dir.join("resources")
+                    .join(paths::RESOURCE_NAME)
+                    .to_str()
+                    .unwrap(),
+            ),
             (config::ENV_PYTHON_FALLBACK, "1"),
         ]);
 

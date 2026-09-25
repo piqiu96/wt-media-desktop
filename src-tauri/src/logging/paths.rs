@@ -258,10 +258,16 @@ pub fn prepare(
 ) -> Result<PathBuf, LogDirectoryError> {
     let directory = directory(home, environment, manifest_dir);
     if let Err(reason) = std::fs::create_dir_all(&directory) {
-        return Err(LogDirectoryError { path: directory, reason });
+        return Err(LogDirectoryError {
+            path: directory,
+            reason,
+        });
     }
     if let Err(reason) = probe_write(&directory) {
-        return Err(LogDirectoryError { path: directory, reason });
+        return Err(LogDirectoryError {
+            path: directory,
+            reason,
+        });
     }
     Ok(directory)
 }
@@ -516,7 +522,9 @@ mod tests {
             Some(COMPONENT_DIR)
         );
         assert_eq!(
-            path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()),
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
             Some(APPLICATION_DIR)
         );
     }
@@ -605,7 +613,10 @@ mod tests {
 
         let error = prepare(&root, Environment::Development, &root).expect_err("must not succeed");
 
-        assert_eq!(error.path, occupied, "the error must name the path it could not use");
+        assert_eq!(
+            error.path, occupied,
+            "the error must name the path it could not use"
+        );
         // The *kind* is asserted, not merely "some error": the failure has to be
         // the one that could not create the directory. Measured on macOS:
         // `create_dir_all` on a path occupied by a file reports `AlreadyExists`,

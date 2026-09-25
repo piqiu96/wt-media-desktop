@@ -41,8 +41,14 @@ const FALLBACK_ARGS: [&str; 2] = ["-m", "wt_media_agent.local_api.server"];
 /// sends.
 pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String, String)> {
     let mut vars = vec![
-        ("WT_MEDIA_LOCAL_API_HOST".to_string(), config.agent.host.clone()),
-        ("WT_MEDIA_LOCAL_API_PORT".to_string(), config.agent.port.to_string()),
+        (
+            "WT_MEDIA_LOCAL_API_HOST".to_string(),
+            config.agent.host.clone(),
+        ),
+        (
+            "WT_MEDIA_LOCAL_API_PORT".to_string(),
+            config.agent.port.to_string(),
+        ),
         (
             "WT_MEDIA_AGENT_RUNTIME_TOKEN".to_string(),
             token.expose().to_string(),
@@ -100,7 +106,10 @@ pub fn start<R: Runtime>(
 
     let vars = environment(config, token);
     let with_vars = |command: tauri_plugin_shell::process::Command| {
-        command.envs(vars.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        command.envs(
+            vars.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
     };
 
     let attempt = match integrity::Location::of(app) {
@@ -318,8 +327,14 @@ mod tests {
 
         let vars = as_map(&environment(&config, &token));
 
-        assert_eq!(vars.get("WT_MEDIA_LOCAL_API_HOST").map(String::as_str), Some("127.0.0.1"));
-        assert_eq!(vars.get("WT_MEDIA_LOCAL_API_PORT").map(String::as_str), Some("18765"));
+        assert_eq!(
+            vars.get("WT_MEDIA_LOCAL_API_HOST").map(String::as_str),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            vars.get("WT_MEDIA_LOCAL_API_PORT").map(String::as_str),
+            Some("18765")
+        );
         assert_eq!(
             vars.get("WT_MEDIA_AGENT_RUNTIME_TOKEN").map(String::as_str),
             Some(token.expose())
@@ -362,18 +377,32 @@ mod tests {
         let first = RuntimeToken::generate();
         let second = RuntimeToken::generate();
 
-        let from_first = as_map(&environment(&config, crate::http::LocalAgentClient::new(&config, first.clone()).token()));
-        let from_second = as_map(&environment(&config, crate::http::LocalAgentClient::new(&config, second.clone()).token()));
+        let from_first = as_map(&environment(
+            &config,
+            crate::http::LocalAgentClient::new(&config, first.clone()).token(),
+        ));
+        let from_second = as_map(&environment(
+            &config,
+            crate::http::LocalAgentClient::new(&config, second.clone()).token(),
+        ));
 
         assert_eq!(
-            from_first.get("WT_MEDIA_AGENT_RUNTIME_TOKEN").map(String::as_str),
+            from_first
+                .get("WT_MEDIA_AGENT_RUNTIME_TOKEN")
+                .map(String::as_str),
             Some(first.expose())
         );
         assert_eq!(
-            from_second.get("WT_MEDIA_AGENT_RUNTIME_TOKEN").map(String::as_str),
+            from_second
+                .get("WT_MEDIA_AGENT_RUNTIME_TOKEN")
+                .map(String::as_str),
             Some(second.expose())
         );
-        assert_ne!(first.expose(), second.expose(), "the two cases must differ to mean anything");
+        assert_ne!(
+            first.expose(),
+            second.expose(),
+            "the two cases must differ to mean anything"
+        );
     }
 
     /// D-04: the secret travels in the environment and nowhere else.
@@ -416,7 +445,10 @@ mod tests {
         BufReader::new(child.stdout.take().expect("a stdout pipe"))
             .read_line(&mut line)
             .expect("the ready line");
-        assert!(line.contains("trap-set"), "the trap must be up first: {line:?}");
+        assert!(
+            line.contains("trap-set"),
+            "the trap must be up first: {line:?}"
+        );
         child
     }
 
@@ -473,7 +505,10 @@ mod tests {
         let mut child = with_trap("''");
         let pid = child.id();
 
-        assert!(ask(pid).is_ok(), "the signal is delivered — that is all it says");
+        assert!(
+            ask(pid).is_ok(),
+            "the signal is delivered — that is all it says"
+        );
 
         std::thread::sleep(Duration::from_millis(300));
         assert!(alive(pid), "it ignores SIGTERM, so the ask changed nothing");
@@ -509,7 +544,9 @@ mod tests {
             vec!["-m", "wt_media_agent.local_api.server"]
         );
         assert!(
-            !FALLBACK_ARGS.iter().any(|arg| arg.to_lowercase().contains("token")),
+            !FALLBACK_ARGS
+                .iter()
+                .any(|arg| arg.to_lowercase().contains("token")),
             "the token must never be an argument: {FALLBACK_ARGS:?}"
         );
     }

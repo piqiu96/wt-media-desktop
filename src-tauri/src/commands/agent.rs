@@ -172,7 +172,9 @@ fn failed(message: String, log: &SidecarLog, session: Option<&str>) -> String {
 }
 
 #[tauri::command]
-pub async fn local_agent_status(client: State<'_, LocalAgentClient>) -> Result<LocalAgentStatus, String> {
+pub async fn local_agent_status(
+    client: State<'_, LocalAgentClient>,
+) -> Result<LocalAgentStatus, String> {
     let resp = client
         .get("/api/v1/status")
         .send()
@@ -575,8 +577,8 @@ pub async fn local_agent_task_status(
 mod tests {
     use super::*;
     use crate::config::{load_with, Environment, PRODUCTION_TOML};
-    use crate::logging::test_support::{capture, capture_at, written};
     use crate::logging::targets::Levels;
+    use crate::logging::test_support::{capture, capture_at, written};
     use crate::token::RuntimeToken;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -889,7 +891,10 @@ mod tests {
 
         let text = written(&directory.0);
         assert!(text.contains("已请 Local Agent（pid "), "{text}");
-        assert!(text.contains("宽限已到，强杀 Local Agent（400 ms）"), "{text}");
+        assert!(
+            text.contains("宽限已到，强杀 Local Agent（400 ms）"),
+            "{text}"
+        );
         assert!(
             !text.contains("在宽限内自行退出"),
             "it never left on its own: {text}"
@@ -1006,7 +1011,11 @@ mod tests {
             // The exit status is what says which of the two happened.
             assert_eq!(
                 how_it_ended(&mut events),
-                if left { (Some(0), None) } else { (None, Some(9)) },
+                if left {
+                    (Some(0), None)
+                } else {
+                    (None, Some(9))
+                },
                 "{id}: 真机 Agent 的结束方式"
             );
             assert!(
@@ -1040,17 +1049,43 @@ mod tests {
 
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 9, "one record per outcome: {text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）"), "{text}");
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 已启动（sidecar_started）"),
+            "{text}"
+        );
         assert!(text.contains("[INFO] agent.supervisor: Local Agent 已就绪：wt-media-agent local API listening on 127.0.0.1:8765"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已在运行，忽略本次启动请求"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 已停止"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: 已请 Local Agent（pid 4321）停止"), "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 在宽限内自行退出（120 ms）"), "{text}");
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 已在运行，忽略本次启动请求"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[INFO] agent.supervisor: Local Agent 已不再应答，丢弃记着的句柄并按未运行处理"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 已停止"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[INFO] agent.supervisor: 已请 Local Agent（pid 4321）停止"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 在宽限内自行退出（120 ms）"),
+            "{text}"
+        );
         // WARN, and the level is the point: a stop that threw away work in flight
         // has to be findable in a production log without a filter.
-        assert!(text.contains("[WARN] agent.supervisor: 宽限已到，强杀 Local Agent（5000 ms）"), "{text}");
+        assert!(
+            text.contains("[WARN] agent.supervisor: 宽限已到，强杀 Local Agent（5000 ms）"),
+            "{text}"
+        );
     }
 
     /// The health body is DEBUG: kept in development, dropped in production.
@@ -1065,10 +1100,15 @@ mod tests {
         with_default(subscriber, || healthy("{\"status\":\"ok\"}", None));
         let text = written(&development.0);
         assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("[DEBUG] agent.supervisor: 健康检查成功：{\"status\":\"ok\"}"), "{text}");
+        assert!(
+            text.contains("[DEBUG] agent.supervisor: 健康检查成功：{\"status\":\"ok\"}"),
+            "{text}"
+        );
 
-        let (production, subscriber) =
-            capture_at(Levels::shipped(Environment::Production), "agent-health-body-production");
+        let (production, subscriber) = capture_at(
+            Levels::shipped(Environment::Production),
+            "agent-health-body-production",
+        );
         with_default(subscriber, || healthy("{\"status\":\"ok\"}", None));
         assert_eq!(
             written(&production.0),
@@ -1130,7 +1170,10 @@ mod tests {
         assert_eq!(returned, "read error: unexpected eof");
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("[WARN] agent.supervisor: read error: unexpected eof"), "{text}");
+        assert!(
+            text.contains("[WARN] agent.supervisor: read error: unexpected eof"),
+            "{text}"
+        );
     }
 
     /// The health command's body, against a real socket: the body comes back and
@@ -1187,8 +1230,14 @@ mod tests {
         );
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("[WARN] agent.supervisor: agent unreachable: "), "{text}");
-        assert!(!text.contains("uvicorn: started"), "the record has no tail: {text}");
+        assert!(
+            text.contains("[WARN] agent.supervisor: agent unreachable: "),
+            "{text}"
+        );
+        assert!(
+            !text.contains("uvicorn: started"),
+            "the record has no tail: {text}"
+        );
     }
 
     /// The stop command's body with nothing to stop.
@@ -1213,7 +1262,10 @@ mod tests {
         );
         let text = written(&directory.0);
         assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"), "{text}");
+        assert!(
+            text.contains("[INFO] agent.supervisor: Local Agent 未在运行，忽略本次停止请求"),
+            "{text}"
+        );
     }
 
     /// **The defect CHG-057 registered**, asserted at the level the frontend sees

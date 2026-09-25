@@ -153,8 +153,10 @@ mod tests {
                 let mut sink = [0u8; 1024];
                 let _ = stream.read(&mut sink);
                 let _ = stream.write_all(
-                    format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .as_bytes(),
+                    format!(
+                        "HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
                 );
                 let _ = stream.flush();
             }
@@ -225,8 +227,14 @@ mod tests {
         let proxied = format!("{:?}", build_client(&config));
         let direct = format!("{:?}", build_client_without_proxy(&config));
 
-        assert!(proxied.contains("proxies"), "the system proxy must be in the builder: {proxied}");
-        assert!(!direct.contains("proxies"), "nothing may be proxied here: {direct}");
+        assert!(
+            proxied.contains("proxies"),
+            "the system proxy must be in the builder: {proxied}"
+        );
+        assert!(
+            !direct.contains("proxies"),
+            "nothing may be proxied here: {direct}"
+        );
         assert_ne!(proxied, direct);
     }
 
@@ -257,7 +265,11 @@ mod tests {
             .await
             .expect("the destination is listening");
         assert_eq!(response.status(), 200);
-        assert_eq!(hits(&destination_hits), 1, "the request must reach the destination");
+        assert_eq!(
+            hits(&destination_hits),
+            1,
+            "the request must reach the destination"
+        );
         assert_eq!(hits(&proxy_hits), 0, "and nothing else");
 
         let control = reqwest::Client::builder()
@@ -269,9 +281,17 @@ mod tests {
             .send()
             .await
             .expect("the fake proxy answers everything");
-        assert_eq!(response.status(), 502, "the control must be answered by the proxy");
+        assert_eq!(
+            response.status(),
+            502,
+            "the control must be answered by the proxy"
+        );
         assert_eq!(hits(&proxy_hits), 1, "the control went through the proxy");
-        assert_eq!(hits(&destination_hits), 1, "the control never reached the destination");
+        assert_eq!(
+            hits(&destination_hits),
+            1,
+            "the control never reached the destination"
+        );
     }
 
     /// A port with nothing behind it fails fast, and not by waiting.
@@ -302,7 +322,10 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(!error.is_timeout(), "a refusal is not a deadline: {error}");
-        assert!(elapsed < Duration::from_secs(1), "it gave up only after {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "it gave up only after {elapsed:?}"
+        );
     }
 
     /// A client built from the config gives up on a server that never answers.
@@ -351,7 +374,13 @@ mod tests {
         let elapsed = started.elapsed();
 
         let error = outcome.expect_err("a mute server must not produce a response");
-        assert!(error.is_timeout(), "the deadline must be what ended this: {error}");
-        assert!(elapsed < Duration::from_secs(5), "gave up only after {elapsed:?}");
+        assert!(
+            error.is_timeout(),
+            "the deadline must be what ended this: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "gave up only after {elapsed:?}"
+        );
     }
 }
