@@ -19,6 +19,7 @@ case "$(uname -m)" in
   *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/WT Media_0.1.0_${DMG_SUFFIX}.dmg"
+bash "$SCRIPT_DIR/stage-release-config.sh" "$APP_PATH"
 bash "$SCRIPT_DIR/repair-macos-signing.sh" "$APP_PATH"
 
 STAGING_DIR="$(mktemp -d /private/tmp/wt-media-dmg.XXXXXX)"

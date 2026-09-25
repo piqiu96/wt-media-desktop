@@ -10,9 +10,19 @@ BUILD_MANIFEST="$(cd "$(dirname "$0")/.." && pwd)/target/sidecar-manifest.json"
 test -x "$SIDECAR_PATH"
 test -f "$BUILD_MANIFEST"
 
-# PyInstaller embeds a linker-signed libpython. Tauri's hardened-runtime
-# signature on the sidecar makes macOS 26 reject that nested library. Keep the
-# outer app hardened, but use a plain ad-hoc signature for the child sidecar.
+# PyInstaller embeds a linker-signed libpython, and macOS 26 refuses to load it
+# into a process whose signature disagrees (`different Team IDs`). The hardened
+# runtime flag is what makes the signatures disagree, and it is on the *build
+# output* already: `scripts/build_desktop_sidecar.py` passes `--codesign-identity -`,
+# and PyInstaller adds `--options=runtime` unless that argument is falsy
+# (`utils/osx.py:413-421` in PyInstaller 6.22.2) -- so an identity of literally
+# `-` still counts as "an identity was given". Measured: the freshly built sidecar
+# carries `flags=0x10002(adhoc,runtime)` and dies at startup, while the same file
+# re-signed here carries `flags=0x2(adhoc)` and runs
+# (`evidence/task-05-packaging.out`, `task-05-frozen-reading.out`).
+#
+# Removing and re-adding the signature is therefore not cosmetic. Keep the outer
+# app hardened; give the child sidecar a plain ad-hoc signature.
 /usr/bin/codesign --remove-signature "$SIDECAR_PATH"
 /usr/bin/codesign --force --sign - "$SIDECAR_PATH"
 
