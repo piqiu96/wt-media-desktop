@@ -1,6 +1,6 @@
 ---
 name: desktop-sidecar-update
-description: Update Desktop sidecars, local Agent packaging, FFmpeg, or platform-specific binaries.
+description: Update Desktop sidecars, local Agent packaging, or platform-specific binaries.
 ---
 <!-- GENERATED FILE - DO NOT EDIT DIRECTLY -->
 <!-- Source: skills/desktop/desktop-sidecar-update/SKILL.md -->

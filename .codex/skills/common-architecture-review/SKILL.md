@@ -13,7 +13,7 @@ Use this skill before architecture-sensitive changes in any repository.
 ## Check
 
 - Cloud remains the business fact center.
-- Agent remains the only execution entry for external platforms, files, FFmpeg, and browser automation.
+- Agent remains the only execution entry for external platforms, local files, and browser automation; M4-M5 video composition is Cloud-owned (`docs/decisions/0017-*.md`).
 - Desktop remains a local shell and does not duplicate Cloud business Web.
 - Runtime repositories do not depend on Workspace at build or runtime.
 - No microservices, MQ, dynamic plugins, or workflow engines are introduced without a decision record under `docs/decisions`.
