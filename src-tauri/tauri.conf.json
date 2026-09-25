@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../.generated/frontend",
     "devUrl": "http://127.0.0.1:5174",
-    "beforeDevCommand": "cd ../../wt-media-cloud/web && npm run dev:desktop",
+    "beforeDevCommand": "cd ../wt-media-cloud/web && npm run dev:desktop",
     "beforeBuildCommand": "bash scripts/prepare-release-sidecar.sh && bash ../wt-media-workspace/scripts/build-desktop.sh"
   },
   "app": {
