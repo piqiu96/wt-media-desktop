@@ -115,11 +115,20 @@ fn write(root: &Path, save_dir: Option<&str>) -> Result<SettingsView, String> {
     };
 
     let file = file_of(root);
-    let settings = UserSettings {
-        schema_version: settings::SCHEMA_VERSION,
-        save_dir: chosen,
-    };
-    settings::save(&file, &settings).map_err(|error| format!("保存设置失败：{error}"))?;
+    // Read-modify-write, not build-and-write. The file holds more than the
+    // current choice — it holds the **history** of directories this user has
+    // used — and a struct built from this function's argument alone would drop
+    // that history on every save: change the directory twice and the one last
+    // week's files are still in would be gone by the second save.
+    //
+    // The load is not the write's permission check (`settings::save` reads for
+    // itself, and refuses a file it cannot parse). It is here because the value
+    // being modified has to be read before it can be modified — and it runs
+    // *after* `check_save_dir`, so a directory nobody could use is refused
+    // without the file being opened at all.
+    let mut stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
+    stored.remember(chosen);
+    settings::save(&file, &stored).map_err(|error| format!("保存设置失败：{error}"))?;
     read(root)
 }
 
@@ -159,6 +168,33 @@ pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
     let (home, environment, manifest) = layout();
     let root = read_root(home.as_deref(), environment, manifest)?;
     stored_save_dir(&root)
+}
+
+/// [`known_save_dirs`] against a given root, so it can be exercised without one.
+///
+/// The same split [`stored_save_dir`] makes, and for the same reason: the rules
+/// are worth testing and the layout is not.
+pub(crate) fn known_dirs_of(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let file = file_of(root);
+    let stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
+    Ok(stored.search_dirs())
+}
+
+/// Every directory this machine has written downloads into, newest first.
+///
+/// The other question the one file answers. [`chosen_save_dir`] is 「新文件写到
+/// 哪儿」— one directory, and a `None` when nothing is chosen. This is 「这个文件
+/// 可能在哪些地方」, which is a different question with a different answer: it
+/// outlives the choice (clearing it does not forget where the files are) and it
+/// is non-empty whenever anything was ever downloaded.
+///
+/// Resolved through `read_root`, so asking does not create the data root — the
+/// same line `local_settings_get` draws, and the reason 「打开文件」 can be
+/// pressed on a machine where the page was never opened.
+pub(crate) fn known_save_dirs() -> Result<Vec<PathBuf>, String> {
+    let (home, environment, manifest) = layout();
+    let root = read_root(home.as_deref(), environment, manifest)?;
+    known_dirs_of(&root)
 }
 
 /// Replace the stored choice, against the real data root.
@@ -261,7 +297,13 @@ mod tests {
     }
 
     /// Clearing the choice is a value the file can hold, not a deletion of the
-    /// file: the schema version stays, and the key goes.
+    /// file: the schema version stays, and `save_dir` goes.
+    ///
+    /// Asserted by **parsing** rather than by searching the text. 「文件里没有
+    /// save_dir 这几个字」 was the older form of this test, and it stopped being the
+    /// same claim the moment `known_save_dirs` existed: that key contains the
+    /// substring, so a text search would fail on a file that is exactly right —
+    /// and, worse, would have gone on passing if the key had been dropped too.
     #[test]
     fn clearing_the_choice_leaves_a_readable_file() {
         let root = scratch("cleared");
@@ -269,13 +311,80 @@ mod tests {
         write(&root, Some(&wanted.display().to_string())).expect("save a choice");
 
         let cleared = write(&root, None).expect("clear");
-        let text = std::fs::read_to_string(file_of(&root)).expect("the file");
+        let stored = settings::load(&file_of(&root)).expect("the file is still readable");
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!(cleared.save_dir, None);
+        assert_eq!(
+            stored.save_dir, None,
+            "an unchosen directory is an absent key, not an empty one"
+        );
+        assert_eq!(
+            stored.known_save_dirs,
+            vec![wanted],
+            "but the directory the files are already in stays known — clearing is not forgetting"
+        );
+    }
+
+    /// The second choice does not erase the first.
+    ///
+    /// This is the whole reason the file keeps a history: the material
+    /// downloaded while the first directory was current is still sitting in it,
+    /// and 「打开文件」 has to be able to look there.
+    #[test]
+    fn a_second_choice_keeps_the_first_one_known() {
+        let root = scratch("history");
+        let (first, _) = pickable(&root);
+        let second = root.join("Pictures");
+        std::fs::create_dir_all(&second).expect("a second directory to pick");
+
+        write(&root, Some(&first.display().to_string())).expect("the first");
+        let written = write(&root, Some(&second.display().to_string())).expect("the second");
+        let stored = settings::load(&file_of(&root)).expect("read back");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(written.save_dir, Some(second.display().to_string()));
+        assert_eq!(stored.save_dir, Some(second.clone()));
+        assert_eq!(
+            stored.known_save_dirs,
+            vec![second, first],
+            "newest first, and the older one is still there to be searched"
+        );
+    }
+
+    /// A v1 file is upgraded by the next save rather than refused by the write.
+    ///
+    /// The file a user already has is the case this exists for: refusing it would
+    /// make 「换个下载目录」 impossible on the first launch after an update, and
+    /// silently overwriting it would lose the directory their files are in.
+    #[test]
+    fn a_v1_file_is_upgraded_by_the_next_save_with_its_directory_kept() {
+        let root = scratch("v1");
+        let file = file_of(&root);
+        let (wanted, _) = pickable(&root);
+        std::fs::write(
+            &file,
+            format!("schema_version = 1\nsave_dir = \"{}\"\n", wanted.display()),
+        )
+        .expect("plant a v1 file");
+
+        let moved = root.join("Pictures");
+        std::fs::create_dir_all(&moved).expect("a new directory to pick");
+
+        let written = write(&root, Some(&moved.display().to_string())).expect("the write");
+        let text = std::fs::read_to_string(&file).expect("the file");
+        let stored = settings::load(&file).expect("read back");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(written.save_dir, Some(moved.display().to_string()));
         assert!(
-            !text.contains("save_dir"),
-            "a cleared choice is an absent key, not an empty one: {text}"
+            text.contains(&format!("schema_version = {}", settings::SCHEMA_VERSION)),
+            "the next save is what upgrades the file: {text}"
+        );
+        assert_eq!(
+            stored.known_save_dirs,
+            vec![moved, wanted],
+            "and the directory the v1 file knew is not lost on the way"
         );
     }
 
@@ -320,8 +429,16 @@ mod tests {
     fn a_file_that_cannot_be_read_is_reported_and_left_alone() {
         let root = scratch("corrupt");
         let file = file_of(&root);
-        let original = "save_dir = \"/Users/operator/Movies\"\nschema_version = 2\n";
-        std::fs::write(&file, original).expect("plant a foreign schema");
+        // One past what this build implements, spelled as an expression rather
+        // than as a literal. It was `2` while 2 was foreign, and bumping the
+        // schema turned this into a valid file that the write would happily
+        // replace — the test would have kept passing its other assertions while
+        // asserting nothing.
+        let original = format!(
+            "save_dir = \"/Users/operator/Movies\"\nschema_version = {}\n",
+            settings::SCHEMA_VERSION + 1
+        );
+        std::fs::write(&file, &original).expect("plant a foreign schema");
 
         let read_error = read(&root).expect_err("the read must fail");
         let write_error = write(&root, Some("/tmp")).expect_err("the write must fail");
@@ -397,6 +514,51 @@ mod tests {
 
         assert_eq!(narrowed, page.save_dir, "two answers to 「选了哪个目录」");
         assert_eq!(cleared, None, "a cleared choice is no choice");
+    }
+
+    /// The search space leads with the directory new files go to.
+    ///
+    /// The two readers of the one file, held together: 「往哪儿写」 is the first
+    /// answer to 「去哪儿找」. If they could disagree, 「打开文件」 would look in a
+    /// folder the operator is no longer using while skipping the one the page
+    /// shows — and nothing else in the tree compares them.
+    #[test]
+    fn the_search_space_leads_with_the_directory_in_use() {
+        let root = scratch("searchspace");
+        let (first, _) = pickable(&root);
+        let second = root.join("Pictures");
+        std::fs::create_dir_all(&second).expect("a second directory to pick");
+
+        write(&root, Some(&first.display().to_string())).expect("the first");
+        write(&root, Some(&second.display().to_string())).expect("the second");
+        let space = known_dirs_of(&root).expect("the search space");
+        let in_use = stored_save_dir(&root).expect("the directory in use");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(space.first(), Some(&second), "newest first");
+        assert_eq!(space, vec![second, first], "and the older one is not lost");
+        assert_eq!(
+            space.first().map(|path| path.display().to_string()),
+            in_use,
+            "the two readers disagree about which directory is in use"
+        );
+    }
+
+    /// Nothing chosen and nothing ever chosen is an empty search space.
+    ///
+    /// Not an error: there is nowhere to look, which is a fact about a machine
+    /// that has never downloaded anything — and 「还没有选择下载保存位置」 is the
+    /// sentence the caller turns it into.
+    #[test]
+    fn a_machine_that_never_chose_has_an_empty_search_space() {
+        let root = scratch("nosearch");
+        let space = known_dirs_of(&root);
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            space.expect("no file is not an error"),
+            Vec::<PathBuf>::new()
+        );
     }
 
     /// The two roots — this module's and the storage commands' — are one answer.

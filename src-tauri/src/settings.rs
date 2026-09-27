@@ -68,13 +68,30 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The only schema this build understands.
+/// The schema this build writes.
 ///
-/// The check is `!=` rather than `>`: v1 is the first version, so 0 is as
-/// unreadable as 2, and "we understand exactly one shape" is the honest
-/// statement until a migration exists. When a v2 arrives, this is where the
-/// branch goes.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v1 held one directory. v2 adds the **history** of directories the user has
+/// chosen (`known_save_dirs`), because a file that was downloaded when an older
+/// directory was current is still there afterwards: without the history, 「打开
+/// 文件」 after a change could only look in the one directory that is current now
+/// and would report a file that plainly exists as 「可能已被移动或删除」.
+///
+/// The version check is `!=` on the *found* version, and v1 is **upgraded**
+/// rather than refused — see [`parse_named`]. Every other value (0, 3, …) is
+/// still an `Err` whose file is left exactly as it was: a version this build does
+/// not implement is not one it can migrate from.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// How many previously chosen directories are remembered.
+///
+/// A bound rather than unlimited growth, because the file is small, hand-editable
+/// and read on every start. Eight is more than any real installation accumulates
+/// (a person changes their download folder a handful of times), and the oldest is
+/// what goes: the file that was downloaded longest ago is the one least likely to
+/// still be on this machine. The consequence — a directory dropped from the
+/// history is no longer searched by 「打开文件」 — is why this is a number worth
+/// stating rather than an implementation detail.
+pub const MAX_KNOWN_SAVE_DIRS: usize = 8;
 
 /// The file name inside the data root.
 pub const FILE_NAME: &str = "settings.toml";
@@ -110,6 +127,111 @@ pub struct UserSettings {
     /// evidence rather than worked around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_dir: Option<PathBuf>,
+    /// Every directory this user has chosen, newest first.
+    ///
+    /// The current one is `save_dir` **and** the front of this list; the two can
+    /// only differ in a file a person edited by hand (see [`known_dirs`], which is
+    /// the answer to that case).
+    ///
+    /// Written only when non-empty, so a first launch's file is unchanged from v1's
+    /// — an absent key and an empty list are the same fact.
+    ///
+    /// The name is `known_save_dirs` rather than `save_dirs` and that is not
+    /// cosmetic: `an_unknown_key_is_refused_rather_than_dropped` plants `save_dirs`
+    /// as its misspelling sample, and a field that took the name would make that
+    /// test start passing for the wrong reason.
+    ///
+    /// **Clearing the choice does not clear this.** 「清除」 says 「do not default
+    /// new downloads anywhere」, not 「forget where the files I already have were
+    /// written」 — and those files are still there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_save_dirs: Vec<PathBuf>,
+}
+
+impl UserSettings {
+    /// The directory a new download goes to, and the history behind it.
+    ///
+    /// Deliberately *not* a field-built list: a hand-edited file can hold a
+    /// `save_dir` that is not in `known_save_dirs`, or a current directory that
+    /// appears further down the history, and every reader that walked the raw
+    /// field would then answer 「which directories should I search」 differently.
+    /// This is the one definition of that answer — deduplicated, current first.
+    pub fn search_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::with_capacity(self.known_save_dirs.len() + 1);
+        if let Some(current) = &self.save_dir {
+            dirs.push(current.clone());
+        }
+        for dir in &self.known_save_dirs {
+            if !dirs.contains(dir) {
+                dirs.push(dir.clone());
+            }
+        }
+        dirs
+    }
+
+    /// Record a newly chosen directory: it becomes the current one **and** the
+    /// front of the history. `None` clears only the choice.
+    ///
+    /// One function rather than two assignments at the call site, because the
+    /// invariant ("the current directory is the front of the history") is what
+    /// `search_dirs` and the migration scan rely on, and a caller that set one
+    /// without the other would leave a file that reads as if the operator had
+    /// chosen two different directories most recently.
+    pub fn remember(&mut self, chosen: Option<PathBuf>) {
+        let Some(dir) = chosen else {
+            self.save_dir = None;
+            return;
+        };
+        let mut dirs = vec![dir.clone()];
+        dirs.extend(
+            self.known_save_dirs
+                .iter()
+                .filter(|old| **old != dir)
+                .cloned(),
+        );
+        // The oldest goes. A directory dropped here is one 「打开文件」 no longer
+        // searches, which is the honest cost of a bounded file.
+        dirs.truncate(MAX_KNOWN_SAVE_DIRS);
+        self.save_dir = Some(dir);
+        self.known_save_dirs = dirs;
+    }
+}
+
+/// v1's shape, kept so a v1 file can be **upgraded** instead of refused.
+///
+/// A separate struct rather than a version-tolerant `UserSettings`, because
+/// `deny_unknown_fields` is what makes 「this file is not one I understand」 a
+/// report: reading a v1 file into the v2 struct would accept `known_save_dirs`
+/// from a file that claims not to know about it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserSettingsV1 {
+    /// Declared because every v1 file has it, and **deliberately not read**: which
+    /// version the file is was decided by [`declared_version`] before this struct
+    /// was chosen, and reading the same fact a second time here would be a second
+    /// answer to a question that can only have one. The field still has to be
+    /// named — a struct with `deny_unknown_fields` refuses a key it does not
+    /// declare, so omitting it would make every real v1 file unreadable. But it
+    /// must not be *typed* as a `u32`: that would accept `schema_version = 7` here
+    /// and upgrade a file whose version nobody agreed to.
+    #[serde(rename = "schema_version")]
+    _schema_version: serde::de::IgnoredAny,
+    #[serde(default)]
+    save_dir: Option<PathBuf>,
+}
+
+impl From<UserSettingsV1> for UserSettings {
+    /// v1's one directory becomes the current choice *and* the whole history: it
+    /// is the only directory that version could have written a file into.
+    fn from(old: UserSettingsV1) -> Self {
+        let mut settings = UserSettings {
+            schema_version: SCHEMA_VERSION,
+            save_dir: old.save_dir,
+            known_save_dirs: Vec::new(),
+        };
+        settings.known_save_dirs = settings.save_dir.iter().cloned().collect();
+        settings
+    }
 }
 
 impl Default for UserSettings {
@@ -122,6 +244,7 @@ impl Default for UserSettings {
         UserSettings {
             schema_version: SCHEMA_VERSION,
             save_dir: None,
+            known_save_dirs: Vec::new(),
         }
     }
 }
@@ -256,13 +379,19 @@ pub fn parse(text: &str) -> Result<UserSettings, SettingsError> {
 }
 
 fn parse_named(text: &str, path: &Path) -> Result<UserSettings, SettingsError> {
-    let settings: UserSettings =
-        toml::from_str(text).map_err(|error| SettingsError::Unparsable {
-            path: path.to_path_buf(),
-            // `message()` only. See this module's header: the error's `Display`
-            // renders the offending line, and a line is content.
-            reason: error.message().to_string(),
-        })?;
+    // The version is probed **before** a body shape is chosen, and v1 is
+    // upgraded rather than refused. Reading a v1 file into `UserSettings` would
+    // not work at all — it is `deny_unknown_fields`, so a file that predates
+    // `known_save_dirs` would be refused for a key it does not have, and the
+    // user's chosen directory would be lost on the first launch after an update.
+    //
+    // In memory only: nothing is written back here, so a v1 file stays v1 until
+    // the next save. That is the same rule `load` keeps for every read.
+    if declared_version(text) == Some(1) {
+        let old: UserSettingsV1 = toml::from_str(text).map_err(|error| unparsable(path, error))?;
+        return Ok(old.into());
+    }
+    let settings: UserSettings = toml::from_str(text).map_err(|error| unparsable(path, error))?;
     if settings.schema_version != SCHEMA_VERSION {
         return Err(SettingsError::UnknownSchema {
             path: path.to_path_buf(),
@@ -271,6 +400,28 @@ fn parse_named(text: &str, path: &Path) -> Result<UserSettings, SettingsError> {
         });
     }
     Ok(settings)
+}
+
+/// What a file says its schema is, when it says so in a way that can be read.
+///
+/// Only an integer in `u32` range counts. Everything else — a missing key, a
+/// string, a negative, a file that does not parse at all — answers `None` and is
+/// left to `serde`'s own error, which at least names the line it choked on; a
+/// probe that guessed here would replace a precise complaint with 「版本不对」.
+fn declared_version(text: &str) -> Option<u32> {
+    let value: toml::Value = toml::from_str(text).ok()?;
+    u32::try_from(value.get("schema_version")?.as_integer()?).ok()
+}
+
+/// A parse failure, with the path named and the contents never quoted.
+///
+/// `message()` only. See this module's header: `toml`'s error `Display` renders
+/// the offending line, and a line is content.
+fn unparsable(path: &Path, error: toml::de::Error) -> SettingsError {
+    SettingsError::Unparsable {
+        path: path.to_path_buf(),
+        reason: error.message().to_string(),
+    }
 }
 
 /// Read the settings, or the defaults if there is no file yet.
@@ -316,10 +467,15 @@ pub fn save(target: &Path, settings: &UserSettings) -> Result<(), SettingsError>
     // A missing file reads as the defaults, so this is also the first-launch
     // path; it never creates the file (see `load`).
     load(target)?;
-    let stamped = UserSettings {
+    let mut stamped = UserSettings {
         schema_version: SCHEMA_VERSION,
         ..settings.clone()
     };
+    // The history is normalized here for the same reason the version is stamped
+    // here: 「现在这个是历史里最新的那个」 is a property of every file this module
+    // writes, not a discipline every caller has to keep. `remember` is
+    // idempotent, so a caller that already did it gets the same file.
+    stamped.remember(stamped.save_dir.clone());
     // Serializing a struct this small cannot fail except for a path that is not
     // valid UTF-8, which `serde` refuses rather than mangling. Reported as
     // "unwritable" because that is what the caller's next step is either way.
@@ -376,11 +532,13 @@ fn write_atomically(
 mod tests {
     use super::*;
 
+    /// A first launch that has chosen one directory, built through the same
+    /// `remember` the command uses — so the fixture cannot hold a history that
+    /// disagrees with its current directory.
     fn chosen(dir: &str) -> UserSettings {
-        UserSettings {
-            schema_version: SCHEMA_VERSION,
-            save_dir: Some(PathBuf::from(dir)),
-        }
+        let mut settings = UserSettings::default();
+        settings.remember(Some(PathBuf::from(dir)));
+        settings
     }
 
     /// A scratch directory of this test's own, named after the test binary's pid
@@ -419,6 +577,226 @@ mod tests {
             "an unchosen directory must not be written at all: {text}"
         );
         assert_eq!(parse(&text).expect("parse").save_dir, None);
+    }
+
+    /// A v1 file keeps its directory, and answers as this build's schema.
+    ///
+    /// This is the whole point of the version probe: refusing v1 would lose the
+    /// user's choice on the first launch after an update, and the directory in
+    /// that file is still exactly where their files are.
+    #[test]
+    fn a_v1_file_is_read_as_the_directory_it_knew() {
+        let got =
+            parse("schema_version = 1\nsave_dir = \"/tmp/old\"\n").expect("a v1 file is usable");
+
+        assert_eq!(got.save_dir, Some(PathBuf::from("/tmp/old")));
+        assert_eq!(
+            got.known_save_dirs,
+            vec![PathBuf::from("/tmp/old")],
+            "the one directory v1 could have written into is the whole history"
+        );
+        assert_eq!(got.schema_version, SCHEMA_VERSION);
+        assert_eq!(got.search_dirs(), vec![PathBuf::from("/tmp/old")]);
+    }
+
+    /// A v1 file with no directory chooses nothing, and is still not refused.
+    #[test]
+    fn a_v1_file_that_chose_nothing_reads_as_unchosen() {
+        let got = parse("schema_version = 1\n").expect("a v1 file is usable");
+
+        assert_eq!(got.save_dir, None);
+        assert!(got.known_save_dirs.is_empty());
+    }
+
+    /// Reading a v1 file leaves it a v1 file.
+    ///
+    /// 「看不会创建东西」 in the module header, extended to 「看也不会改写」: an
+    /// upgrade that happened on a read would rewrite the user's file on startup,
+    /// and a file that is rewritten by looking at it is one nobody can diff.
+    #[test]
+    fn reading_a_v1_file_does_not_write_it_back() {
+        let root = scratch("v1-readonly");
+        let target = path(&root);
+        let original = "schema_version = 1\nsave_dir = \"/tmp/old\"\n";
+        std::fs::write(&target, original).expect("plant it");
+
+        let got = load(&target).expect("a v1 file loads");
+
+        let after = std::fs::read_to_string(&target).expect("still there");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(got.save_dir, Some(PathBuf::from("/tmp/old")));
+        assert_eq!(after, original, "a read must not upgrade the file on disk");
+    }
+
+    /// The next save is what upgrades it, and the directory survives that.
+    #[test]
+    fn the_next_save_upgrades_a_v1_file_to_this_schema() {
+        let root = scratch("v1-upgrade");
+        let target = path(&root);
+        std::fs::write(&target, "schema_version = 1\nsave_dir = \"/tmp/old\"\n").expect("plant it");
+
+        save(&target, &load(&target).expect("read the v1 file")).expect("save");
+
+        let text = std::fs::read_to_string(&target).expect("read back");
+        let got = load(&target).expect("load");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            text.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+            "{text}"
+        );
+        assert_eq!(got.save_dir, Some(PathBuf::from("/tmp/old")));
+        assert_eq!(got.known_save_dirs, vec![PathBuf::from("/tmp/old")]);
+    }
+
+    /// A v1 file may not carry the key v1 did not have.
+    ///
+    /// This is why the upgrade uses a separate struct rather than a
+    /// version-tolerant one: a file that says it is v1 while holding
+    /// `known_save_dirs` is not a v1 file, and reading it as one — or as v2 —
+    /// would mean half-understanding a file, which is the failure the version
+    /// check exists to prevent.
+    #[test]
+    fn a_v1_file_carrying_the_newer_key_is_refused() {
+        let error = parse("schema_version = 1\nknown_save_dirs = [\"/tmp/x\"]\n")
+            .expect_err("v1 did not have that key");
+        assert!(
+            matches!(error, SettingsError::Unparsable { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// The second choice keeps the first, and the current one leads.
+    ///
+    /// A file downloaded while `/tmp/old` was current is still there afterwards;
+    /// without the history 「打开文件」 could only look at the directory that is
+    /// current now and would call that file 「可能已被移动或删除」.
+    #[test]
+    fn choosing_a_second_directory_keeps_the_first_in_the_history() {
+        let mut settings = chosen("/tmp/old");
+        settings.remember(Some(PathBuf::from("/tmp/new")));
+
+        assert_eq!(settings.save_dir, Some(PathBuf::from("/tmp/new")));
+        assert_eq!(
+            settings.known_save_dirs,
+            vec![PathBuf::from("/tmp/new"), PathBuf::from("/tmp/old")]
+        );
+    }
+
+    /// Choosing a directory that is already in the history moves it to the
+    /// front instead of listing it twice.
+    #[test]
+    fn a_directory_chosen_again_moves_to_the_front_without_duplicating() {
+        let mut settings = chosen("/tmp/a");
+        settings.remember(Some(PathBuf::from("/tmp/b")));
+        settings.remember(Some(PathBuf::from("/tmp/a")));
+
+        assert_eq!(settings.save_dir, Some(PathBuf::from("/tmp/a")));
+        assert_eq!(
+            settings.known_save_dirs,
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+        );
+    }
+
+    /// The history is bounded, and the **oldest** is what goes.
+    ///
+    /// The consequence is not cosmetic: a directory dropped here is one
+    /// 「打开文件」 stops searching, so the test asserts which end is dropped as
+    /// well as the length.
+    #[test]
+    fn the_history_is_bounded_and_drops_the_oldest() {
+        let dirs: Vec<PathBuf> = (0..MAX_KNOWN_SAVE_DIRS + 2)
+            .map(|index| PathBuf::from(format!("/tmp/d{index}")))
+            .collect();
+        let mut settings = UserSettings::default();
+        for dir in &dirs {
+            settings.remember(Some(dir.clone()));
+        }
+
+        assert_eq!(settings.known_save_dirs.len(), MAX_KNOWN_SAVE_DIRS);
+        assert_eq!(settings.save_dir, Some(dirs[dirs.len() - 1].clone()));
+        assert_eq!(
+            settings.known_save_dirs.first(),
+            Some(&dirs[dirs.len() - 1]),
+            "the newest leads"
+        );
+        for dropped in dirs.iter().take(dirs.len() - MAX_KNOWN_SAVE_DIRS) {
+            assert!(
+                !settings.known_save_dirs.contains(dropped),
+                "{} should have been dropped",
+                dropped.display()
+            );
+        }
+    }
+
+    /// Clearing the choice does not forget where the files already are.
+    ///
+    /// 「清除」 says 「do not default new downloads anywhere」, not 「forget the
+    /// files I already have」 — and those files are still in those directories.
+    #[test]
+    fn clearing_the_choice_keeps_the_history() {
+        let mut settings = chosen("/tmp/a");
+        settings.remember(Some(PathBuf::from("/tmp/b")));
+
+        settings.remember(None);
+
+        assert_eq!(settings.save_dir, None);
+        assert_eq!(
+            settings.known_save_dirs,
+            vec![PathBuf::from("/tmp/b"), PathBuf::from("/tmp/a")]
+        );
+        assert_eq!(
+            settings.search_dirs(),
+            vec![PathBuf::from("/tmp/b"), PathBuf::from("/tmp/a")],
+            "the directories are still searched"
+        );
+    }
+
+    /// A hand-edited file cannot make the search miss the directory in use.
+    ///
+    /// `save_dir` and the front of `known_save_dirs` can disagree only in a file
+    /// a person typed; `search_dirs` answers with the union either way, current
+    /// first, and never twice.
+    #[test]
+    fn search_dirs_is_the_current_directory_then_the_history_deduplicated() {
+        let hand_edited = UserSettings {
+            schema_version: SCHEMA_VERSION,
+            save_dir: Some(PathBuf::from("/tmp/b")),
+            known_save_dirs: vec![
+                PathBuf::from("/tmp/a"),
+                PathBuf::from("/tmp/b"),
+                PathBuf::from("/tmp/a"),
+            ],
+        };
+
+        assert_eq!(
+            hand_edited.search_dirs(),
+            vec![PathBuf::from("/tmp/b"), PathBuf::from("/tmp/a"),]
+        );
+    }
+
+    /// Every file this module writes has a history headed by the directory in
+    /// use — the caller does not have to have done it.
+    #[test]
+    fn save_normalizes_a_history_that_disagrees_with_the_choice() {
+        let root = scratch("normalize");
+        let target = path(&root);
+        let inconsistent = UserSettings {
+            schema_version: SCHEMA_VERSION,
+            save_dir: Some(PathBuf::from("/tmp/second")),
+            known_save_dirs: vec![PathBuf::from("/tmp/first")],
+        };
+
+        save(&target, &inconsistent).expect("save");
+
+        let got = load(&target).expect("load");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            got.known_save_dirs,
+            vec![PathBuf::from("/tmp/second"), PathBuf::from("/tmp/first")]
+        );
     }
 
     /// The first launch has no file, and looking must not create one — a read
@@ -512,10 +890,31 @@ mod tests {
     ///
     /// Dropping is the quiet failure: the user edited the file, the app read
     /// half of it, and the next save writes the other half away.
+    ///
+    /// `save_dirs` is the sample because it is 「`save_dir`」 with an `s` — the
+    /// typo this schema's own field invites, and the name a careless rename of
+    /// `known_save_dirs` would take over. Note which struct refuses it: with
+    /// `schema_version = 1` this now goes down the **v1** path, so what refuses
+    /// it is `UserSettingsV1`'s `deny_unknown_fields`. The next test is what
+    /// holds the same rule for a current file.
     #[test]
     fn an_unknown_key_is_refused_rather_than_dropped() {
         let error = parse_named(
             "schema_version = 1\nsave_dirs = \"/tmp/x\"\n",
+            Path::new("s.toml"),
+        )
+        .expect_err("a typo must not be ignored");
+        assert!(
+            matches!(error, SettingsError::Unparsable { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// The same refusal for a file this build's schema wrote.
+    #[test]
+    fn an_unknown_key_in_a_current_file_is_refused_too() {
+        let error = parse_named(
+            &format!("schema_version = {SCHEMA_VERSION}\nsave_dirs = \"/tmp/x\"\n"),
             Path::new("s.toml"),
         )
         .expect_err("a typo must not be ignored");
@@ -780,7 +1179,7 @@ mod tests {
         let target = path(&root);
         let lying = UserSettings {
             schema_version: SCHEMA_VERSION + 99,
-            save_dir: Some(PathBuf::from("/tmp/x")),
+            ..chosen("/tmp/x")
         };
 
         save(&target, &lying).expect("save");

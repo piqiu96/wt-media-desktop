@@ -256,26 +256,107 @@ fn file_name_of(name: &str) -> Result<&str, String> {
 /// `reveal`'s `reveal` draws.
 fn find_saved_file(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let wanted = file_name_of(name)?;
+    look_for(directory, wanted).map_err(|miss| match miss {
+        Lookup::Absent => format!(
+            "{} 里没有 {wanted}：可能已被移动或删除",
+            directory.display()
+        ),
+        Lookup::Unreadable(sentence) => sentence,
+    })
+}
+
+/// Why one directory did not produce the file.
+///
+/// The two are kept apart because they are different answers about **different
+/// things**: `Absent` is about the file, `Unreadable` is about the directory.
+/// Collapsing them is what makes 「文件不在」 the report for a folder nobody
+/// could open — and a person told 「已删除」 re-downloads material they still have.
+enum Lookup {
+    /// The directory was read and the name is not in it.
+    Absent,
+    /// The directory could not be looked in, so the file may well be inside it.
+    /// Held as the sentence, because the two ways it fails (not a directory any
+    /// more, cannot be listed) say different things to a person.
+    Unreadable(String),
+}
+
+/// The lookup itself, without deciding what its failure means.
+fn look_for(directory: &Path, wanted: &str) -> Result<PathBuf, Lookup> {
     if !directory.is_dir() {
-        return Err(format!(
+        return Err(Lookup::Unreadable(format!(
             "保存位置 {} 现在不是一个目录：到本机设置里重新选一个",
             directory.display()
-        ));
+        )));
     }
     std::fs::read_dir(directory)
-        .map_err(|error| format!("无法读取保存位置 {}：{error}", directory.display()))?
+        .map_err(|error| {
+            Lookup::Unreadable(format!("无法读取保存位置 {}：{error}", directory.display()))
+        })?
         .filter_map(Result::ok)
         .find(|entry| {
             entry.file_name().to_str() == Some(wanted)
                 && entry.file_type().is_ok_and(|kind| kind.is_file())
         })
         .map(|entry| entry.path())
-        .ok_or_else(|| {
-            format!(
-                "{} 里没有 {wanted}：可能已被移动或删除",
-                directory.display()
-            )
-        })
+        .ok_or(Lookup::Absent)
+}
+
+/// Find `name` in every directory this machine has written downloads into.
+///
+/// Newest first, and the history is not a courtesy: the reason it exists is that
+/// a file downloaded while an older directory was current is **still there**
+/// afterwards, and a lookup that only knew the directory in use now would report
+/// it as 「可能已被移动或删除」 — which is the defect this exists to remove. So
+/// the first directory that has the file wins, wherever it is in the list.
+///
+/// A directory that could not be read is not an error by itself: the file may be
+/// in the next one, and failing on it would refuse to open a file that is
+/// sitting right there. It is only *reported* — in the message, when nothing was
+/// found — because 「这个文件不在本机」 and 「有三个地方我没能查」 are different
+/// answers and only one of them is about the file.
+fn find_in_known(dirs: &[PathBuf], name: &str) -> Result<PathBuf, String> {
+    let wanted = file_name_of(name)?;
+    if dirs.is_empty() {
+        return Err("还没有选择下载保存位置".to_string());
+    }
+    let mut searched: Vec<String> = Vec::with_capacity(dirs.len());
+    let mut unreadable: Vec<String> = Vec::new();
+    for directory in dirs {
+        match look_for(directory, wanted) {
+            Ok(found) => return Ok(found),
+            Err(Lookup::Absent) => searched.push(directory.display().to_string()),
+            Err(Lookup::Unreadable(sentence)) => unreadable.push(sentence),
+        }
+    }
+    Err(describe_not_found(wanted, &searched, &unreadable))
+}
+
+/// What to say when the name was in none of the directories.
+///
+/// 「查了哪些地方」 is spelled out rather than summarised. The defect this
+/// replaced reported the *current* directory as though it were the only place
+/// known, so a person whose file was in their previous folder was told their
+/// file might have been deleted — the list is what makes the sentence checkable
+/// against what they remember doing.
+///
+/// The two lists are separate and never merged: a directory that was read and
+/// does not hold the name is evidence about the file, and a directory nobody
+/// could look in is the absence of evidence. Only the first is a place the name
+/// is known not to be.
+fn describe_not_found(wanted: &str, searched: &[String], unreadable: &[String]) -> String {
+    let mut parts = vec![format!("{wanted} 不在本机已知的保存位置里")];
+    if !searched.is_empty() {
+        parts.push(format!("已经查过：{}", searched.join("、")))
+    }
+    if !unreadable.is_empty() {
+        parts.push(format!(
+            "另有 {} 个位置没能查（那里的文件没看过）：{}",
+            unreadable.len(),
+            unreadable.join("；")
+        ))
+    }
+    parts.push("可能已被移动或删除；如果它被搬到别处，可以在下载列表里重新下载".to_string());
+    parts.join("。")
 }
 
 /// Pick the download save location in the system dialog and store the choice.
@@ -327,21 +408,25 @@ pub async fn local_push_save_directory(
 
 /// Open one of this machine's downloaded files.
 ///
-/// Takes a **name** from the page and looks it up in the stored save directory —
-/// `AGENT-INDEX.md`'s rule for the read and cleanup commands, and the reason this
-/// needs no path parameter at all. Desktop-only by construction: the Local Agent
-/// never composites and never opens anything, so this is the app that has a file
-/// manager to reach.
+/// Takes a **name** from the page and looks it up in every save directory this
+/// machine has used — `AGENT-INDEX.md`'s rule for the read and cleanup commands,
+/// and the reason this needs no path parameter at all. Desktop-only by
+/// construction: the Local Agent never composites and never opens anything, so
+/// this is the app that has a file manager to reach.
+///
+/// **Every** directory, not the one in use: a file downloaded last week, before
+/// the operator moved their save location, is still in the older folder, and
+/// looking only where new files go would report it as gone. The choice of *where
+/// new things go* and the question *where is this thing* are different questions
+/// and only the second one has several answers.
 ///
 /// The opener is the boundary, as in `commands::reveal`: whether the file then
 /// appears in front of the person is not something a test can assert, and a test
 /// that spawned it would open whatever the suite's machine has registered for
-/// `.mp4`. Everything up to the spawn is [`find_saved_file`], which is tested.
+/// `.mp4`. Everything up to the spawn is [`find_in_known`], which is tested.
 #[tauri::command]
 pub fn local_open_saved_file(name: String) -> Result<String, String> {
-    let chosen =
-        settings::chosen_save_dir()?.ok_or_else(|| "还没有选择下载保存位置".to_string())?;
-    let found = find_saved_file(&PathBuf::from(chosen), &name)?;
+    let found = find_in_known(&settings::known_save_dirs()?, &name)?;
     open::that(&found).map_err(|error| format!("无法打开 {}：{error}", found.display()))?;
     Ok(found.display().to_string())
 }
@@ -1082,6 +1167,163 @@ mod tests {
 
         assert!(error.contains("无法读取保存位置"), "{error}");
         assert!(error.contains(&locked.display().to_string()), "{error}");
+    }
+
+    /// A file in the **older** directory is found there.
+    ///
+    /// This is the defect 「已下载的改完保存路径后就找不到文件了」 as an assertion,
+    /// and the older directory is deliberately the *second* one: a lookup that
+    /// only ever tried the directory in use would pass a test whose file sits in
+    /// the current folder, and would fail this one.
+    #[test]
+    fn a_file_in_an_older_save_directory_is_found_there() {
+        let root = scratch("history-hit");
+        let current = root.join("now");
+        let older = root.join("before");
+        std::fs::create_dir_all(&current).expect("the directory in use");
+        std::fs::create_dir_all(&older).expect("the directory it used to be");
+        let wanted = older.join("标题-素材.mp4");
+        std::fs::write(&wanted, b"x").expect("a file downloaded before the move");
+        let dirs = vec![current, older];
+
+        let found = find_in_known(&dirs, "标题-素材.mp4");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(found.expect("it is still there"), wanted);
+    }
+
+    /// The directory in use wins when both hold the name.
+    ///
+    /// Order is not decoration: the list is newest-first, and a file re-downloaded
+    /// after a move would otherwise be shadowed by the copy it replaced.
+    #[test]
+    fn the_newest_directory_wins_when_the_name_is_in_two_of_them() {
+        let root = scratch("newest-wins");
+        let current = root.join("now");
+        let older = root.join("before");
+        std::fs::create_dir_all(&current).expect("the directory in use");
+        std::fs::create_dir_all(&older).expect("the directory it used to be");
+        std::fs::write(current.join("same.mp4"), b"new").expect("the copy that is current");
+        std::fs::write(older.join("same.mp4"), b"old").expect("the copy it replaced");
+
+        let found = find_in_known(&[current.clone(), older], "same.mp4");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(found.expect("found"), current.join("same.mp4"));
+    }
+
+    /// A name in none of them names every directory that was looked in.
+    ///
+    /// 「查了哪些地方」 has to be in the sentence: the defect this replaced named
+    /// the current directory as though it were the only one known, so a person
+    /// whose file was in their previous folder was told it might have been
+    /// deleted. The two directories here are both **readable and empty**, so the
+    /// message may not hedge — nothing was unreadable.
+    #[test]
+    fn a_name_in_no_known_directory_names_every_directory_searched() {
+        let root = scratch("history-miss");
+        let current = root.join("now");
+        let older = root.join("before");
+        std::fs::create_dir_all(&current).expect("the directory in use");
+        std::fs::create_dir_all(&older).expect("the directory it used to be");
+
+        let error = find_in_known(&[current.clone(), older.clone()], "gone.mp4")
+            .expect_err("nowhere to be found");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("已经查过"), "{error}");
+        assert!(error.contains(&current.display().to_string()), "{error}");
+        assert!(error.contains(&older.display().to_string()), "{error}");
+        assert!(!error.contains("没能查"), "nothing was unreadable: {error}");
+        assert!(
+            error.contains("重新下载"),
+            "and it has to say what the way out is: {error}"
+        );
+    }
+
+    /// A directory nobody can read is reported as unread, not as an absence.
+    ///
+    /// The distinction the whole message turns on: 「已经查过 X」 is evidence that
+    /// the file is not there, and 「X 没能查」 is the absence of evidence. Merging
+    /// them is how a file sitting on an unplugged volume gets reported as
+    /// deleted, and how somebody re-downloads 230 MB they still have.
+    #[test]
+    fn a_directory_that_cannot_be_read_is_not_reported_as_an_absence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("history-unreadable");
+        let current = root.join("now");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&current).expect("the directory in use");
+        std::fs::create_dir_all(&locked).expect("a directory about to be unreadable");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock it");
+
+        let error = find_in_known(&[current.clone(), locked.clone()], "gone.mp4")
+            .expect_err("nowhere to be found");
+
+        // Unlocked before the cleanup: a directory with no permission bits cannot
+        // be removed, and a suite that left one behind would fail the next run.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("没能查"), "{error}");
+        assert!(error.contains(&locked.display().to_string()), "{error}");
+        assert!(
+            error.contains(&current.display().to_string()),
+            "the directory that *was* read is still named: {error}"
+        );
+    }
+
+    /// A directory that is no longer a directory is one of the unread ones.
+    ///
+    /// The unmounted-volume shape, and the one a person reaches by deleting the
+    /// folder: it is listed with its own sentence rather than swallowed.
+    #[test]
+    fn a_directory_that_is_no_longer_a_directory_is_named_as_unread() {
+        let root = scratch("history-not-a-dir");
+        let gone = root.join("was-a-folder");
+        std::fs::write(&gone, b"x").expect("a file where the directory was");
+
+        let error = find_in_known(&[gone.clone()], "movie.mp4").expect_err("nowhere to look");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("没能查"), "{error}");
+        assert!(error.contains("不是一个目录"), "{error}");
+    }
+
+    /// Nothing ever chosen has nowhere to look, and says that.
+    #[test]
+    fn an_empty_search_space_says_nothing_has_been_chosen() {
+        let error = find_in_known(&[], "movie.mp4").expect_err("nowhere to look");
+
+        assert!(error.contains("还没有选择下载保存位置"), "{error}");
+    }
+
+    /// A path is refused before any directory is touched.
+    ///
+    /// The rule does not weaken because there are now several directories to
+    /// search — `find_in_known` checks the name once, at the top, and the
+    /// directories are never consulted for a name that is not one. Asserted with
+    /// a directory list that **would** have found it, so a lookup that searched
+    /// first and refused later cannot pass.
+    #[test]
+    fn a_path_shaped_name_is_refused_before_any_directory_is_searched() {
+        let root = scratch("history-name");
+        std::fs::write(root.join("movie.mp4"), b"x").expect("a file");
+
+        let error = find_in_known(&[root.clone()], "../movie.mp4").expect_err("not a name");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("不是一个文件名"), "{error}");
+        assert!(
+            !error.contains(&root.display().to_string()),
+            "the directories must not even be listed: {error}"
+        );
     }
 
     /// Every command this module declares is registered, and no others are.
