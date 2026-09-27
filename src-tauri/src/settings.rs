@@ -86,11 +86,13 @@ pub const SCHEMA_VERSION: u32 = 2;
 ///
 /// A bound rather than unlimited growth, because the file is small, hand-editable
 /// and read on every start. Eight is more than any real installation accumulates
-/// (a person changes their download folder a handful of times), and the oldest is
-/// what goes: the file that was downloaded longest ago is the one least likely to
-/// still be on this machine. The consequence — a directory dropped from the
-/// history is no longer searched by 「打开文件」 — is why this is a number worth
-/// stating rather than an implementation detail.
+/// (a person changes their download folder a handful of times, and adds a
+/// directory to search a rarer handful still), and the oldest is what goes: the
+/// file that was downloaded longest ago is the one least likely to still be on
+/// this machine. The consequence — a directory dropped from the history is no
+/// longer searched by 「打开文件」 — is why this is a number worth stating rather
+/// than an implementation detail, and why
+/// [`UserSettings::note_search_dir`] reports the directory it evicted.
 pub const MAX_KNOWN_SAVE_DIRS: usize = 8;
 
 /// The file name inside the data root.
@@ -127,11 +129,13 @@ pub struct UserSettings {
     /// evidence rather than worked around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_dir: Option<PathBuf>,
-    /// Every directory this user has chosen, newest first.
+    /// Every directory this user has chosen **or asked to search**, newest first.
     ///
-    /// The current one is `save_dir` **and** the front of this list; the two can
-    /// only differ in a file a person edited by hand (see [`known_dirs`], which is
-    /// the answer to that case).
+    /// The current one is always in this list, and [`save`] normalizes the file so
+    /// that it leads. A directory that is in here *without* being the current
+    /// choice is one [`UserSettings::note_search_dir`] added — 「我以前下到这儿
+    /// 的文件还在这个目录里」, which is a different statement from 「新文件写到
+    /// 这儿」 and only the first one is being made.
     ///
     /// Written only when non-empty, so a first launch's file is unchanged from v1's
     /// — an absent key and an empty list are the same fact.
@@ -195,6 +199,66 @@ impl UserSettings {
         self.save_dir = Some(dir);
         self.known_save_dirs = dirs;
     }
+
+    /// Record a directory that is to be **searched** without becoming the place
+    /// new files are written.
+    ///
+    /// The case this exists for is a save location that has already changed: the
+    /// material downloaded before that change is still in the older directory, and
+    /// 「打开文件」、搬运与删除 have to keep looking there. [`remember`](Self::remember)
+    /// cannot express it — it makes its argument the current directory as well —
+    /// and the two are separate functions rather than one with a flag, because
+    /// 「新文件写到哪儿」 and 「这个文件可能在哪些地方」 are two answers and this call
+    /// gives only the second one.
+    ///
+    /// The directory joins at the **front of the history** and [`save`] then
+    /// normalizes the file, so it ends up immediately behind the current choice and
+    /// ahead of every directory the operator picked earlier. That is where it
+    /// needs to be: the eviction below drops the oldest, and the directory
+    /// somebody has just said 「我的文件在那儿」 about is the one whose loss they
+    /// would notice.
+    ///
+    /// **A directory that is already searched is a no-op**, and the answer says so
+    /// rather than reporting a change: `search_dirs` is the union of the choice and
+    /// the history, so 「已经在里面」 is the whole truth for that input, and moving
+    /// its position to no observable end would only make the answer harder to
+    /// believe.
+    ///
+    /// **The history stays bounded, so this can evict.** [`SearchNote::dropped`]
+    /// names the directory that fell out instead of letting it go in silence: one
+    /// dropped here is one 「打开文件」 stops searching.
+    pub fn note_search_dir(&mut self, dir: PathBuf) -> SearchNote {
+        if self.search_dirs().contains(&dir) {
+            return SearchNote {
+                added: false,
+                dropped: None,
+            };
+        }
+        let mut dirs = vec![dir];
+        dirs.extend(self.known_save_dirs.iter().cloned());
+        // At most one can fall out: the history never holds more than
+        // `MAX_KNOWN_SAVE_DIRS`, and this call adds exactly one.
+        let dropped = dirs.get(MAX_KNOWN_SAVE_DIRS).cloned();
+        dirs.truncate(MAX_KNOWN_SAVE_DIRS);
+        self.known_save_dirs = dirs;
+        SearchNote {
+            added: true,
+            dropped,
+        }
+    }
+}
+
+/// What [`UserSettings::note_search_dir`] did.
+///
+/// A value rather than `()`, because the answers a person reads are different
+/// sentences and one of them is a warning about a directory they will stop being
+/// able to find files in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchNote {
+    /// False when the directory was already searched and nothing changed.
+    pub added: bool,
+    /// The oldest directory the bounded history dropped to make room, if any.
+    pub dropped: Option<PathBuf>,
 }
 
 /// v1's shape, kept so a v1 file can be **upgraded** instead of refused.
@@ -728,6 +792,147 @@ mod tests {
                 dropped.display()
             );
         }
+    }
+
+    /// A directory can be searched without becoming the place new files go.
+    ///
+    /// The whole point of the call: `save_dir` is untouched, the directory is in
+    /// the history, and `search_dirs` — the one definition of 「这个文件可能在哪些
+    /// 地方」 — answers with both.
+    #[test]
+    fn a_search_directory_is_added_without_becoming_the_choice() {
+        let mut settings = chosen("/tmp/now");
+
+        let note = settings.note_search_dir(PathBuf::from("/tmp/before"));
+
+        assert_eq!(
+            note,
+            SearchNote {
+                added: true,
+                dropped: None
+            }
+        );
+        assert_eq!(
+            settings.save_dir,
+            Some(PathBuf::from("/tmp/now")),
+            "new downloads must keep going where they went"
+        );
+        assert_eq!(
+            settings.known_save_dirs,
+            vec![PathBuf::from("/tmp/before"), PathBuf::from("/tmp/now")],
+            "and the history holds it, ahead of anything picked earlier"
+        );
+        assert_eq!(
+            settings.search_dirs(),
+            vec![PathBuf::from("/tmp/now"), PathBuf::from("/tmp/before")],
+            "the search space is the choice first, then the history"
+        );
+    }
+
+    /// A directory that is already searched is answered as no change.
+    ///
+    /// Two inputs, one answer, and both are the honest one: the current choice is
+    /// searched (`search_dirs` leads with it) and so is a directory already in the
+    /// history. Reporting 「已加入」 for either would tell the operator something
+    /// happened that did not.
+    #[test]
+    fn a_directory_already_searched_is_not_added_again() {
+        let mut settings = chosen("/tmp/now");
+        settings.remember(Some(PathBuf::from("/tmp/before")));
+        let before = settings.clone();
+
+        let the_choice = settings.note_search_dir(PathBuf::from("/tmp/now"));
+        let in_history = settings.note_search_dir(PathBuf::from("/tmp/before"));
+
+        assert_eq!(
+            the_choice,
+            SearchNote {
+                added: false,
+                dropped: None
+            }
+        );
+        assert_eq!(
+            in_history,
+            SearchNote {
+                added: false,
+                dropped: None
+            }
+        );
+        assert_eq!(
+            settings, before,
+            "a no-op has to leave the file it would have written exactly as it was"
+        );
+    }
+
+    /// Thinking a directory into the search space can push the oldest out, and
+    /// the answer names it.
+    ///
+    /// The pair of assertions is the point: with room to spare nothing is dropped,
+    /// and with the history full the directory that goes is the oldest — not the
+    /// one just added, and not the current choice.
+    #[test]
+    fn adding_a_search_directory_reports_the_oldest_it_evicted() {
+        let dirs: Vec<PathBuf> = (0..MAX_KNOWN_SAVE_DIRS)
+            .map(|index| PathBuf::from(format!("/tmp/d{index}")))
+            .collect();
+        let mut settings = UserSettings::default();
+        for dir in &dirs {
+            settings.remember(Some(dir.clone()));
+        }
+        let oldest = dirs.first().cloned().expect("a full history");
+
+        let note = settings.note_search_dir(PathBuf::from("/tmp/older-still"));
+
+        assert_eq!(
+            note,
+            SearchNote {
+                added: true,
+                dropped: Some(oldest.clone()),
+            },
+            "{:?}",
+            settings.known_save_dirs
+        );
+        assert_eq!(settings.known_save_dirs.len(), MAX_KNOWN_SAVE_DIRS);
+        assert!(!settings.known_save_dirs.contains(&oldest));
+        assert!(settings
+            .search_dirs()
+            .contains(&PathBuf::from("/tmp/older-still")));
+        assert_eq!(
+            settings.save_dir,
+            Some(dirs[dirs.len() - 1].clone()),
+            "and the choice is still the one that was chosen"
+        );
+    }
+
+    /// Saving after a note keeps the noted directory, behind the choice.
+    ///
+    /// `save` normalizes the history so the current directory leads, and that
+    /// rewrite is where a note could quietly be lost. The order asserted here is
+    /// the file's, read back from disk rather than from the struct that was handed
+    /// in.
+    #[test]
+    fn a_save_keeps_a_noted_directory_behind_the_choice() {
+        let root = scratch("note-then-save");
+        let target = path(&root);
+        let mut settings = chosen("/tmp/now");
+        // Noted in this order, so the second is the more recent note and is the
+        // one that must end up nearest the choice.
+        settings.note_search_dir(PathBuf::from("/tmp/first"));
+        settings.note_search_dir(PathBuf::from("/tmp/second"));
+
+        save(&target, &settings).expect("save");
+        let got = load(&target).expect("load");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            got.known_save_dirs,
+            vec![
+                PathBuf::from("/tmp/now"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("/tmp/first"),
+            ],
+            "the choice leads and both notes are still searched"
+        );
     }
 
     /// Clearing the choice does not forget where the files already are.

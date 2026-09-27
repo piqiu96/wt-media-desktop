@@ -236,6 +236,12 @@ fn main() {
             commands::saved_files::local_save_dir_migration_plan,
             commands::saved_files::local_move_saved_files,
             commands::saved_files::local_delete_saved_files,
+            // Q-11's picker, appended for the same reason as the eighteen above.
+            // It opens the same native dialog as `local_pick_save_directory` and
+            // writes into the same history, but it is **not** a second way to set
+            // the save directory: it names a place to look in, and new downloads
+            // keep going where `save_dir` already points.
+            commands::downloads::local_pick_search_directory,
         ])
         .plugin(tauri_plugin_shell::init())
         // The folder picker. Registered next to the shell plugin rather than

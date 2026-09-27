@@ -4,6 +4,11 @@
 //! question, so a page that just saved does not have to ask again to find out
 //! what it saved, and the two can never describe different states.
 //!
+//! `SearchDirectoryView` is the second shape, and it is separate rather than a
+//! wider `SettingsView` because it answers a question the read does not: adding a
+//! directory to the search space can evict one, and 「这次挤掉了谁」 is a fact about
+//! *that call* which nothing stored can be asked afterwards.
+//!
 //! Two fields, and each is one a person acts on. `save_dir` is the choice
 //! itself, `None` when nothing has been chosen; the page says 「未设置」for that
 //! rather than inventing a default, because the default is the *task's* decision
@@ -34,6 +39,33 @@ pub struct SettingsView {
     pub file: String,
 }
 
+/// What adding a directory to the search space did.
+///
+/// The four facts a person needs to judge the answer, and each is one the page
+/// cannot derive:
+///
+/// - `picked` is the directory they chose — the page never sees it otherwise,
+///   because the dialog is opened on the Rust side and only its outcome crosses;
+/// - `added` says whether anything changed at all, so 「已经在查找位置里了」 can be
+///   said instead of reporting a change that did not happen;
+/// - `dropped` names the directory the **bounded** history pushed out, or `null` —
+///   a directory dropped here stops being searched, and learning that from a
+///   file that quietly got shorter is not learning it;
+/// - `searched` is how many directories are searched now, so 「现在共查找 N 个位置」
+///   is a number this process measured rather than one the page counted out of a
+///   list it was never sent.
+///
+/// The path is one this process resolved from a dialog it opened, and it is going
+/// back to the person who just picked it — the same path the settings file has
+/// held since they chose it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SearchDirectoryView {
+    pub picked: String,
+    pub added: bool,
+    pub dropped: Option<String>,
+    pub searched: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +90,34 @@ mod tests {
             vec!["file", "save_dir"]
         );
         assert_eq!(value["save_dir"], "/Users/operator/Movies");
+    }
+
+    /// The search-directory answer's keys, pinned for the same reason.
+    ///
+    /// `dropped` is `null` rather than absent — the page distinguishes 「没有挤掉
+    /// 任何一个」 from 「答案里没有这一项」 by reading it, and only the first of those
+    /// is a fact this process knows.
+    #[test]
+    fn the_search_directory_keys_are_pinned() {
+        let view = SearchDirectoryView {
+            picked: "/Users/operator/Movies/WTMedia-old".to_string(),
+            added: true,
+            dropped: None,
+            searched: 2,
+        };
+        let value = serde_json::to_value(&view).expect("serialize");
+
+        assert_eq!(
+            value
+                .as_object()
+                .expect("an object")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["added", "dropped", "picked", "searched"]
+        );
+        assert!(value["dropped"].is_null(), "{value}");
+        assert_eq!(value["added"], true);
+        assert_eq!(value["searched"], 2);
     }
 
     /// An unchosen directory is `null`, not `""`.

@@ -1,5 +1,21 @@
 //! Where a download lands: the operator's choice, handed to the Local Agent.
 //!
+//! ## Two pickers, one panel, and only one of them is pushed
+//!
+//! This module holds both folder pickers because it holds the dialog call they
+//! share ([`open_folder_dialog`]):
+//!
+//! - `local_pick_save_directory` answers 「新文件写到哪儿」, stores it as the
+//!   choice, and the push in this module carries it to the Agent;
+//! - `local_pick_search_directory` answers 「我以前下过的文件还可能在哪儿」, adds
+//!   the directory to the search history and **stops there**.
+//!
+//! The second one is deliberately not a variant of the first: the two answers have
+//! different owners, and pushing a search directory would move the operator's
+//! downloads as a side effect of a question about where their existing files are.
+//!
+//! ## The choice itself
+//!
 //! One fact, two owners, and this module is the seam. The operator chooses the
 //! folder on the 本机设置 page and Desktop stores it in its own settings file
 //! (`commands::settings`); the **Agent** is what writes the bytes, so it has to
@@ -36,7 +52,9 @@
 //! `commands::agent` are: a command takes `State`, which no test can build, and
 //! a function nobody can call is a function nobody can check.
 
-use crate::dto::{LocalErrorBody, SaveDirectoryFacts, SaveDirectoryResponse, SettingsView};
+use crate::dto::{
+    LocalErrorBody, SaveDirectoryFacts, SaveDirectoryResponse, SearchDirectoryView, SettingsView,
+};
 use crate::http::LocalAgentClient;
 use crate::saved_files::find_in_known;
 use crate::state::RuntimeBinding;
@@ -213,38 +231,81 @@ async fn push_chosen(
     push(client, &directory).await
 }
 
+/// Open the folder dialog at the operator's current choice, and answer what was
+/// picked.
+///
+/// The one native surface this app reaches, shared by both pickers below:
+/// 「新下载写到哪儿」 and 「这些文件还可能在哪儿」 are the same panel, and two calls to
+/// `blocking_pick_folder` would be two places for the starting directory, the
+/// dialog's title and the cancelled arm to drift apart.
+///
+/// It starts at the current choice rather than at home, so a second look begins
+/// where the operator last pointed instead of at the top of their home directory.
+/// A settings file that cannot be read is **not** reported here: this function's
+/// job is to produce a path, the dialog still opens, and whichever writer consumes
+/// it reports the same file's problems on the way out (`settings::save` reads
+/// before it writes).
+///
+/// Blocking, and the commands that call it are `#[tauri::command] async` for that
+/// reason: they then run on the runtime's worker, not on the main thread the
+/// dialog has to reach (`blocking_pick_folder`'s own doc says so). The plugin
+/// dispatches `NSOpenPanel` to the main thread itself, which is why it is the
+/// plugin rather than `rfd`'s synchronous API.
+///
+/// `Ok(None)` is a **cancelled dialog**; [`chosen_path`] is where that is decided
+/// and where everything the answer is judged by lives.
+fn open_folder_dialog(app: &tauri::AppHandle, title: &str) -> Result<Option<PathBuf>, String> {
+    let mut dialog = app.dialog().file().set_title(title);
+    if let Some(current) = settings::chosen_save_dir().ok().flatten() {
+        dialog = dialog.set_directory(current);
+    }
+    chosen_path(dialog.blocking_pick_folder())
+}
+
 /// Pick the download save location in the system dialog and store the choice.
 ///
-/// The dialog is opened where the operator's current choice is, so a second look
-/// starts from the folder they last picked rather than from home. A settings file
-/// that cannot be read is **not** reported here: the picker's job is to produce a
-/// choice, the dialog still opens, and the store below reports the same file's
-/// problems on the way out (`settings::save` reads before it writes).
-///
 /// The dialog call and the store are the two boundaries; everything between them
-/// is [`chosen_path`], which is tested.
+/// is [`open_folder_dialog`] and [`settings::set_save_dir`], both tested. The
+/// store is the **same** writer `local_settings_set` uses, so the picker's value
+/// meets the same `check_save_dir` — a second path into the settings file would be
+/// a second chance for a directory the tasks cannot use to be stored.
 #[tauri::command]
 pub async fn local_pick_save_directory(
     app: tauri::AppHandle,
 ) -> Result<Option<SettingsView>, String> {
-    let mut dialog = app.dialog().file().set_title("选择下载保存位置");
-    if let Some(current) = settings::chosen_save_dir().ok().flatten() {
-        dialog = dialog.set_directory(current);
-    }
-    // Blocking, and `#[tauri::command] async` is what makes that correct: this
-    // runs on the runtime's worker, not on the main thread the dialog has to
-    // reach (`blocking_pick_folder`'s own doc says so). The plugin dispatches
-    // `NSOpenPanel` to the main thread itself, which is why it is the plugin
-    // rather than `rfd`'s synchronous API.
-    let chosen = dialog.blocking_pick_folder();
-    let Some(directory) = chosen_path(chosen)? else {
+    let Some(directory) = open_folder_dialog(&app, "选择下载保存位置")? else {
         return Ok(None);
     };
-    // Through `settings::set_save_dir`, which is the **same** writer
-    // `local_settings_set` uses, so the picker's value meets the same
-    // `check_save_dir` — a second path into the settings file would be a second
-    // chance for a directory the tasks cannot use to be stored.
     settings::set_save_dir(Some(&directory.display().to_string())).map(Some)
+}
+
+/// Pick a directory this machine's downloaded files may be in, and remember it.
+///
+/// The question this answers is the one a changed save location leaves behind:
+/// 「换过位置以后，以前下到旧目录里的文件去哪儿了」. The history in `settings.toml`
+/// is what 「打开文件」、搬运与删除 all search, and it holds only the directories
+/// this app watched the operator choose — so a directory written into before that
+/// history existed (v1 knew one directory, and only the last of them) is searched
+/// by nobody, and the files sitting there answer 「已不存在」: the same sentence as
+/// files that were deleted. This command is how such a directory is put back, by
+/// the person who knows where their files are.
+///
+/// **It does not become the save location, and nothing is pushed to the Agent.**
+/// New downloads keep going where they went before, and the Agent is never told
+/// about a search directory: it writes new files, and this is about finding old
+/// ones. A push here would move the operator's downloads as a side effect of a
+/// question about where their files already are — which is why the *effect*
+/// belongs to `commands::settings` and not to the same writer the choice uses.
+///
+/// `Ok(None)` is a cancelled dialog, and the page says nothing about it.
+#[tauri::command]
+pub async fn local_pick_search_directory(
+    app: tauri::AppHandle,
+) -> Result<Option<SearchDirectoryView>, String> {
+    let Some(directory) = open_folder_dialog(&app, "选择要一并查找的目录")? else {
+        return Ok(None);
+    };
+    settings::store_search_dir(&directory).map(Some)
 }
 
 /// Push the stored save location to the Local Agent now.
@@ -860,7 +921,7 @@ mod tests {
         );
         assert_eq!(
             declared.len(),
-            3,
+            4,
             "the denominator, measured here: {declared:?}"
         );
     }
