@@ -132,35 +132,89 @@ fn write(root: &Path, save_dir: Option<&str>) -> Result<SettingsView, String> {
     read(root)
 }
 
-/// The wire shape of one stored state.
+/// A stored path as the page spells it.
 ///
 /// `display()` rather than a UTF-16 or percent-encoded form: a path that got here
 /// was parsed out of a TOML string, so it is text, and the page shows it to a
-/// person who has to recognise their own directory.
+/// person who has to recognise their own directory. One function rather than a
+/// `.map(...)` at each reader, so 「未设置」 cannot mean `None` in one place and
+/// `""` in another.
+fn display_of(path: Option<&PathBuf>) -> Option<String> {
+    path.map(|path| path.display().to_string())
+}
+
+/// The wire shape of one stored state.
 fn view(file: &Path, stored: &UserSettings) -> SettingsView {
     SettingsView {
-        save_dir: stored
-            .save_dir
-            .as_ref()
-            .map(|path| path.display().to_string()),
+        save_dir: display_of(stored.save_dir.as_ref()),
         file: file.display().to_string(),
     }
 }
 
-/// The operator's stored choice of save directory, or `None` when there is none.
+/// Both answers the one settings file gives about save directories.
 ///
-/// The inner half takes the root so it can be exercised without a layout; the
-/// outer one is what `commands::downloads` calls through `commands::agent`'s
-/// start, and it resolves the root **without creating it** — reading is not
-/// writing, the same line `local_settings_get` draws.
+/// One struct rather than two readers, because they are two answers about **the
+/// same file at the same moment**, and a second load could answer about a
+/// different one: the operator may edit `settings.toml` by hand while the app is
+/// running, and a plan built from one load while the move ran from another would
+/// act on a directory the dialog never listed.
 ///
-/// A second reader of the one file rather than a cached copy: the operator may
-/// edit it by hand while the app is running, and the two readers disagreeing is
-/// exactly the state that would make Desktop push a folder it no longer offers.
-pub(crate) fn stored_save_dir(root: &Path) -> Result<Option<String>, String> {
+/// The two fields are **not** the same question, and the answers differ: `chosen`
+/// is `None` on a machine whose choice was cleared, while `search` is still every
+/// directory its files may be in — clearing says 「新下载不要默认到哪儿」, not
+/// 「忘掉我的文件」.
+pub(crate) struct SavePlaces {
+    /// Where new downloads go, or `None` when nothing is chosen.
+    pub chosen: Option<PathBuf>,
+    /// Every directory a saved file may be in: the chosen one first, then the
+    /// history newest-first (`UserSettings::search_dirs`, which is the one
+    /// definition of that answer — a hand-edited file can hold a `save_dir` that
+    /// is not in the history at all).
+    pub search: Vec<PathBuf>,
+}
+
+impl SavePlaces {
+    /// The chosen directory as the page spells it.
+    pub fn chosen_display(&self) -> Option<String> {
+        display_of(self.chosen.as_ref())
+    }
+}
+
+/// [`save_places`] against a given root, so it can be exercised without one.
+///
+/// The same split [`stored_save_dir`] makes, and for the same reason: the rules
+/// are worth testing and the layout is not.
+pub(crate) fn places_of(root: &Path) -> Result<SavePlaces, String> {
     let file = file_of(root);
     let stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
-    Ok(view(&file, &stored).save_dir)
+    Ok(SavePlaces {
+        chosen: stored.save_dir.clone(),
+        search: stored.search_dirs(),
+    })
+}
+
+/// The directories this machine knows, resolved against the real data root.
+///
+/// Resolved through `read_root`, so asking does not create the data root — the
+/// same line `local_settings_get` draws, and the reason 「打开文件」 can be pressed
+/// on a machine where the page was never opened. A settings file that cannot be
+/// read is an `Err`: a machine whose settings are unreadable has no directories
+/// to search, and answering 「没有下载」 for it would be a different fact.
+pub(crate) fn save_places() -> Result<SavePlaces, String> {
+    let (home, environment, manifest) = layout();
+    let root = read_root(home.as_deref(), environment, manifest)?;
+    places_of(&root)
+}
+
+/// The operator's stored choice of save directory, or `None` when there is none.
+///
+/// The narrowed reader `commands::downloads` calls through `commands::agent`'s
+/// start, and the one `local_pick_save_directory` opens the dialog at. Built on
+/// [`places_of`] rather than loading the file a second time: one load, one answer,
+/// and `the_narrowed_reader_agrees_with_the_pages` is the assertion that the two
+/// readers cannot drift.
+pub(crate) fn stored_save_dir(root: &Path) -> Result<Option<String>, String> {
+    Ok(places_of(root)?.chosen_display())
 }
 
 /// [`stored_save_dir`] against the real data root.
@@ -168,33 +222,6 @@ pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
     let (home, environment, manifest) = layout();
     let root = read_root(home.as_deref(), environment, manifest)?;
     stored_save_dir(&root)
-}
-
-/// [`known_save_dirs`] against a given root, so it can be exercised without one.
-///
-/// The same split [`stored_save_dir`] makes, and for the same reason: the rules
-/// are worth testing and the layout is not.
-pub(crate) fn known_dirs_of(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let file = file_of(root);
-    let stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
-    Ok(stored.search_dirs())
-}
-
-/// Every directory this machine has written downloads into, newest first.
-///
-/// The other question the one file answers. [`chosen_save_dir`] is 「新文件写到
-/// 哪儿」— one directory, and a `None` when nothing is chosen. This is 「这个文件
-/// 可能在哪些地方」, which is a different question with a different answer: it
-/// outlives the choice (clearing it does not forget where the files are) and it
-/// is non-empty whenever anything was ever downloaded.
-///
-/// Resolved through `read_root`, so asking does not create the data root — the
-/// same line `local_settings_get` draws, and the reason 「打开文件」 can be
-/// pressed on a machine where the page was never opened.
-pub(crate) fn known_save_dirs() -> Result<Vec<PathBuf>, String> {
-    let (home, environment, manifest) = layout();
-    let root = read_root(home.as_deref(), environment, manifest)?;
-    known_dirs_of(&root)
 }
 
 /// Replace the stored choice, against the real data root.
@@ -518,10 +545,13 @@ mod tests {
 
     /// The search space leads with the directory new files go to.
     ///
-    /// The two readers of the one file, held together: 「往哪儿写」 is the first
+    /// The two answers of the one file, held together: 「往哪儿写」 is the first
     /// answer to 「去哪儿找」. If they could disagree, 「打开文件」 would look in a
     /// folder the operator is no longer using while skipping the one the page
-    /// shows — and nothing else in the tree compares them.
+    /// shows — and nothing else in the tree compares them. Both are read from the
+    /// **same** `places_of` call here, which is the point of the struct: one load
+    /// answers both, so no second reading of the file can answer about a different
+    /// moment.
     #[test]
     fn the_search_space_leads_with_the_directory_in_use() {
         let root = scratch("searchspace");
@@ -531,34 +561,86 @@ mod tests {
 
         write(&root, Some(&first.display().to_string())).expect("the first");
         write(&root, Some(&second.display().to_string())).expect("the second");
-        let space = known_dirs_of(&root).expect("the search space");
+        let places = places_of(&root).expect("the places");
         let in_use = stored_save_dir(&root).expect("the directory in use");
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(space.first(), Some(&second), "newest first");
-        assert_eq!(space, vec![second, first], "and the older one is not lost");
+        assert_eq!(places.search.first(), Some(&second), "newest first");
         assert_eq!(
-            space.first().map(|path| path.display().to_string()),
+            places.search,
+            vec![second.clone(), first],
+            "and the older one is not lost"
+        );
+        assert_eq!(
+            places.chosen.as_ref(),
+            Some(&second),
+            "the directory new files go to is the front of the search space"
+        );
+        assert_eq!(
+            places.chosen_display(),
             in_use,
-            "the two readers disagree about which directory is in use"
+            "the two answers disagree about which directory is in use"
         );
     }
 
-    /// Nothing chosen and nothing ever chosen is an empty search space.
+    /// The two keys of a hand-edited file can disagree, and the search space still
+    /// holds both answers.
+    ///
+    /// The file is two keys, not a list: a person editing it by hand can leave
+    /// `save_dir` pointing at a directory the history never held, and reading the
+    /// history field directly would then search everywhere **except** the folder
+    /// the page shows as the one in use. That is the defect `search_dirs` exists to
+    /// prevent, so it is pinned at the `places_of` seam — the only place a caller
+    /// could take the shortcut. Every fixture built through `write` holds the two
+    /// keys in agreement, which is exactly why none of them can catch it.
+    #[test]
+    fn a_hand_edited_file_still_answers_with_the_directory_in_use_first() {
+        let root = scratch("handedited");
+        let file = file_of(&root);
+        let (history, _) = pickable(&root);
+        let in_use = root.join("Pictures");
+        std::fs::create_dir_all(&in_use)
+            .expect("a directory that is in use and not in the history");
+        std::fs::write(
+            &file,
+            format!(
+                "schema_version = {}\nsave_dir = \"{}\"\nknown_save_dirs = [\"{}\"]\n",
+                settings::SCHEMA_VERSION,
+                in_use.display(),
+                history.display()
+            ),
+        )
+        .expect("plant a file whose two keys disagree");
+
+        let places = places_of(&root).expect("the places");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(places.chosen.as_ref(), Some(&in_use));
+        assert_eq!(
+            places.search,
+            vec![in_use, history],
+            "the directory in use leads the search, and the history is still behind it"
+        );
+    }
+
+    /// Nothing chosen and nothing ever chosen: no target, and an empty search
+    /// space.
     ///
     /// Not an error: there is nowhere to look, which is a fact about a machine
     /// that has never downloaded anything — and 「还没有选择下载保存位置」 is the
-    /// sentence the caller turns it into.
+    /// sentence the caller turns it into. Both halves are asserted in the one
+    /// answer, because the two ways of being empty are the same fact here and a
+    /// machine that had one without the other would make 「还没有选择」 untrue.
     #[test]
     fn a_machine_that_never_chose_has_an_empty_search_space() {
         let root = scratch("nosearch");
-        let space = known_dirs_of(&root);
+        let places = places_of(&root);
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(
-            space.expect("no file is not an error"),
-            Vec::<PathBuf>::new()
-        );
+        let places = places.expect("no file is not an error");
+        assert_eq!(places.chosen, None);
+        assert_eq!(places.search, Vec::<PathBuf>::new());
+        assert_eq!(places.chosen_display(), None);
     }
 
     /// The two roots — this module's and the storage commands' — are one answer.

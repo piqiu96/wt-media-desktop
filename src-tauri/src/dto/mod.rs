@@ -8,7 +8,8 @@
 //! support bundle holds, and what it left out), `settings` (the operator's own
 //! choice of save location, as the 本机设置 page reads and writes it),
 //! `downloads` (what the Agent says about the folder it was given, which the
-//! page reads back unchanged).
+//! page reads back unchanged), `saved_files` (where this machine's downloaded
+//! files are, and what a move or a delete of them did).
 //!
 //! Field names and serde attributes are load-bearing: the Vue layer asserts on
 //! exact argument objects (`web/src/apps/desktop/features/local-agent/
@@ -23,6 +24,7 @@ mod config;
 mod diagnostic;
 mod downloads;
 mod profile;
+mod saved_files;
 mod settings;
 mod storage;
 
@@ -34,6 +36,7 @@ pub use config::*;
 pub use diagnostic::*;
 pub use downloads::*;
 pub use profile::*;
+pub use saved_files::*;
 pub use settings::*;
 pub use storage::*;
 

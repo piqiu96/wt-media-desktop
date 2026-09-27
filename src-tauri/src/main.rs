@@ -18,6 +18,7 @@ mod local_agent;
 mod logging;
 mod paths;
 mod preflight;
+mod saved_files;
 mod secure_store;
 mod settings;
 mod sidecar;
@@ -223,6 +224,18 @@ fn main() {
             commands::downloads::local_pick_save_directory,
             commands::downloads::local_push_save_directory,
             commands::downloads::local_open_saved_file,
+            // T-08's four, appended for the same reason as the fourteen above.
+            // They are the only commands in this app that **destroy** a file the
+            // operator has: `local_delete_saved_files` removes downloads and
+            // `local_move_saved_files` moves them between directories. Neither
+            // takes a path — both take names, matched against the directories
+            // `settings.toml` says this machine has written downloads into, which
+            // is what keeps 「删掉这个下载」 from being 「删掉这个进程能碰到的任何
+            // 东西」.
+            commands::saved_files::local_saved_file_states,
+            commands::saved_files::local_save_dir_migration_plan,
+            commands::saved_files::local_move_saved_files,
+            commands::saved_files::local_delete_saved_files,
         ])
         .plugin(tauri_plugin_shell::init())
         // The folder picker. Registered next to the shell plugin rather than

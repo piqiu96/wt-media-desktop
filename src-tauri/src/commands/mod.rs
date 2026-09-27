@@ -12,6 +12,7 @@ pub mod downloads;
 pub mod profile;
 pub mod public_config;
 pub mod reveal;
+pub mod saved_files;
 pub mod settings;
 pub mod storage;
 pub mod webview;
