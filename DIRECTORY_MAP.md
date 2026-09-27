@@ -8,7 +8,7 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、单实例守卫、27 个命令的 `generate_handler!`（254 行；AC-04 上限 300） | 改客户端生命周期、增删命令（**新命令追加在末尾**） |
+| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、单实例守卫、30 个命令的 `generate_handler!`（284 行；CHG-058 AC-04 的上限是 300，余量 16 行——下一次加命令前先看这里） | 改客户端生命周期、增删命令（**新命令追加在末尾**） |
 | `src-tauri/src/bootstrap.rs` | 配置 → 启动所需物件的引导，以及**必须在 Tauri 构建任何东西之前**完成的 CSP 注入 | 改启动顺序 |
 | `src-tauri/src/config.rs` | 配置模式：一个 schema、一条解析路径、两条只往更严方向走的叠加规则（production 忽略整个 `WT_MEDIA_DESKTOP_*` 命名空间） | 改配置键、改优先级 |
 | `src-tauri/src/paths.rs` | 配置文件定位：打包版看资源目录，开发树看 crate `resources/`，两条路都以编译进二进制的 `PRODUCTION_TOML` 兜底 | 改配置定位 |
@@ -28,7 +28,7 @@
 
 | 路径 | 职责 | 何时进入 |
 |---|---|---|
-| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（27 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`，以及 CHG-058 的五个——`storage.rs`（`local_storage_usage` / `local_log_files` / `local_log_tail`）、`cleanup.rs`（`local_cache_cleanup` / `local_log_cleanup`）、`diagnostic.rs`（`local_diagnostic_export`）、`settings.rs`（`local_settings_get` / `local_settings_set`）、`reveal.rs`（`local_open_place`）。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关。**新命令追加在 `generate_handler!` 末尾**——前端的 `localAgentService.test.js` 按精确参数对象断言既有命令 | 改命令接口 |
+| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（30 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`，CHG-058 的五个——`storage.rs`（`local_storage_usage` / `local_log_files` / `local_log_tail`）、`cleanup.rs`（`local_cache_cleanup` / `local_log_cleanup`）、`diagnostic.rs`（`local_diagnostic_export`）、`settings.rs`（`local_settings_get` / `local_settings_set`）、`reveal.rs`（`local_open_place`），以及 CHG-061 的 `downloads.rs`（`local_pick_save_directory` / `local_push_save_directory` / `local_open_saved_file`——选择器要 `dialog:allow-open`，打开文件**收名字不收路径**）。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关。**新命令追加在 `generate_handler!` 末尾**——前端的 `localAgentService.test.js` 按精确参数对象断言既有命令 | 改命令接口 |
 | `src-tauri/src/dto/` | 按消费方分组的 serde 结构体，含 CHG-058 的 `storage.rs`/`cleanup.rs`/`diagnostic.rs`/`settings.rs`（线上形状）。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象；前端传 camelCase、Rust 收 snake_case | 改命令载荷 |
 | `src-tauri/src/http/` | 两个**分开的**客户端类型：`local_agent.rs`（回环、带运行 token）、`cloud.rs`（地址与凭据都是逐请求事实）。分开是因为可信级别不同——合在一起会让「这次调用带没带本机 token」无法从类型上回答 | 改出站客户端 |
 | `src-tauri/src/preflight.rs` | 敏感流程共用的 Cloud 预检与守卫。原先在 account/cookie 各抄一份；错误文案由 `tests::message_parity` 钉住 | 改预检、改错误文案 |

@@ -16,10 +16,11 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 
 ## 本仓库拥有
 
-- 客户端生命周期：Tauri 初始化、窗口、应用退出、系统托盘、运行状态（`src-tauri/src/main.rs`，254 行；`invoke_handler!` 里 27 个命令，**新命令一律追加在末尾**，见「禁止」）。
+- 客户端生命周期：Tauri 初始化、窗口、应用退出、系统托盘、运行状态（`src-tauri/src/main.rs`，284 行；`invoke_handler!` 里 30 个命令，**新命令一律追加在末尾**，见「禁止」）。
 - 启动期配置与安全：`config.rs`（一个 schema、一条解析路径）、`paths.rs`（配置文件定位）、`bootstrap.rs`（引导顺序 + CSP 注入）、`token.rs`（每次启动的本机运行 token）、`state.rs`（不进 IPC 的原生状态）。
 - 本地安全桥：受控权限下向 Vue 页面暴露本地系统能力——文件/目录选择、安全存储、系统信息（`src-tauri/src/{commands,dto,preflight,filesystem,secure_store,system}`）。
-- **本机运行目录与用户设置**（CHG-058）：`app_paths.rs` 解析 Desktop 自己的四个根（数据根 / `versions` / 日志根 / 缓存根；装机态与开发态两套布局，**缓存根不在数据根之内**），读方只用纯函数、写方才 `prepare`；`settings.rs` 读写数据根下的 `settings.toml`（`schema_version` + 同级临时文件 + `rename` 原子替换；损坏时保留原文件并报错，不静默清空）。`save_dir` **目前没有消费方**——页面能改它，不代表下载会按它落盘。
+- **本机运行目录与用户设置**（CHG-058）：`app_paths.rs` 解析 Desktop 自己的四个根（数据根 / `versions` / 日志根 / 缓存根；装机态与开发态两套布局，**缓存根不在数据根之内**），读方只用纯函数、写方才 `prepare`；`settings.rs` 读写数据根下的 `settings.toml`（`schema_version` + 同级临时文件 + `rename` 原子替换；损坏时保留原文件并报错，不静默清空）。`save_dir` 的消费方见下一条。
+- **下载落盘通道**（CHG-061 T-04）：`commands/downloads.rs` 把运营选定的保存目录推给 Local Agent（`POST /api/v1/save-directory`，与绑定是同一条回环 HTTP，因此同样受运行 token 保护），并在**每次成功启动后重推一次**——目录存在 Agent 自己的元数据里，Desktop 不缓存它。选择器是 `tauri-plugin-dialog`（权限 `dialog:allow-open`，缺它表现为像代码 bug 的运行时失败），选中的值仍走 `settings::set_save_dir`，即「本机设置」页用的**同一个**写口。`local_open_saved_file` 收名字不收路径，在保存目录里**列目录后按名匹配**，且只认常规文件。字节由 Local Agent 落盘，Desktop 只负责选位置、转达与打开。
 - **本机存储、日志与清理命令面**（CHG-058）：`storage.rs`（可用空间与目录占用）、`cleanup.rs`（只删可安全再生的文件与已轮转归档）、`diagnostic.rs`（脱敏诊断包）、`logging/reader.rs`（列日志文件与读尾部，**列表即白名单**）、`commands/{storage,cleanup,diagnostic,settings,reveal}.rs`。它们只服务 Desktop 自己的「本机设置」页，不是第二套业务后端。
 - Agent 生命周期：Local Agent Sidecar 的启动、停止、健康检查、进程恢复，以及 Desktop 与 Local Agent 的本地通信（`src-tauri/src/sidecar/`、`http/`、`src-tauri/binaries`）。**通信是普通 HTTP**：Agent 侧有 `text/event-stream` 端点（`local_api/server.py`），但 Desktop 不消费流，`local_agent_task_status` 取的是状态快照。
 - 客户端交付：原生依赖、Sidecar 集成、安装包、版本检测、签名、更新、跨平台打包（`src-tauri/src/updater`、`scripts/`）。支持 Windows x64、macOS Intel、macOS Apple Silicon。
@@ -39,6 +40,7 @@ Desktop 是**客户端控制壳，不是第二套业务系统**。
 | 改 Desktop 日志（目录、级别、轮转、保留、脱敏、新增 target） | `src-tauri/src/logging/`；新增 target 要同时改 `targets.rs` 的 `OWNED_TARGETS`（枚举断言钉着） |
 | 改本机运行目录解析（数据根 / `versions` / 日志根 / 缓存根） | `src-tauri/src/app_paths.rs`。**不动 `paths.rs`**——那是配置文件定位器；日志目录仍委托 `logging/paths.rs` |
 | 改用户设置（`settings.toml` 的键、schema 版本、原子替换） | `src-tauri/src/settings.rs`；线上形状在 `dto/settings.rs`（**字段名是契约**） |
+| 改下载保存位置的选择／转达／打开已下载文件 | `src-tauri/src/commands/downloads.rs`（选择器是 `tauri-plugin-dialog`，权限 `dialog:allow-open` 在 `capabilities/default.json`）。**打开文件收名字不收路径**，按「列表即白名单」在保存目录里按名匹配 |
 | 改存储与日志的读取（占用、列文件、读尾部、级别筛选） | `src-tauri/src/storage.rs`、`logging/reader.rs`，命令在 `commands/storage.rs`。**列表即白名单**：先列目录再按名查找 |
 | 改清理规则（删什么、留什么、释放字节怎么算） | `src-tauri/src/cleanup.rs`（规则本体）+ `commands/cleanup.rs`（接线）；保护面按**路径**判、按**种类**例外 |
 | 改脱敏诊断包（形状、条目、上限、摘要值） | `src-tauri/src/diagnostic.rs`、`commands/diagnostic.rs`、`dto/diagnostic.rs`；**脱敏在门口**——新增进包的字符串都要过 `mask` |
