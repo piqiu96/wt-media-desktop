@@ -215,8 +215,24 @@ fn main() {
             commands::settings::local_settings_get,
             commands::settings::local_settings_set,
             commands::reveal::local_open_place,
+            // T-04's three, appended for the same reason as the eleven above.
+            // The picker is the only one that reaches a native surface; the other
+            // two are the same loopback HTTP as `local_agent_bind`. Note that
+            // `local_open_saved_file` takes a **name**, not a path, so it adds no
+            // way for the page to name a file this process may open.
+            commands::downloads::local_pick_save_directory,
+            commands::downloads::local_push_save_directory,
+            commands::downloads::local_open_saved_file,
         ])
         .plugin(tauri_plugin_shell::init())
+        // The folder picker. Registered next to the shell plugin rather than
+        // before the single-instance guard above: a second instance exits before
+        // ever reaching this line, and a plugin that was never initialised cannot
+        // fail on a dialog nobody opened. `dialog:allow-open` in
+        // `capabilities/default.json` is what the page is allowed to reach --
+        // without it the command fails at runtime in a way that reads like a bug
+        // in the command itself.
+        .plugin(tauri_plugin_dialog::init())
         .build(context)
         .expect("error while building wt-media-desktop tauri application");
 

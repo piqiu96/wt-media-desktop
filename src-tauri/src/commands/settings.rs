@@ -161,6 +161,19 @@ pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
     stored_save_dir(&root)
 }
 
+/// Replace the stored choice, against the real data root.
+///
+/// The composition the two writers share: `local_settings_set`, which takes a
+/// value from the page, and the folder picker, which takes one from a dialog.
+/// One function rather than two so the picker's value goes through the **same**
+/// `check_save_dir` — a second path into the settings file is a second chance for
+/// a directory the tasks cannot use to be stored.
+pub(crate) fn set_save_dir(save_dir: Option<&str>) -> Result<SettingsView, String> {
+    let (home, environment, manifest) = layout();
+    let root = write_root(home.as_deref(), environment, manifest)?;
+    write(&root, save_dir)
+}
+
 /// Read the operator's settings.
 #[tauri::command]
 pub fn local_settings_get() -> Result<SettingsView, String> {
@@ -175,9 +188,7 @@ pub fn local_settings_get() -> Result<SettingsView, String> {
 /// state the file can hold, and a page needs a way back to it.
 #[tauri::command]
 pub fn local_settings_set(save_dir: Option<String>) -> Result<SettingsView, String> {
-    let (home, environment, manifest) = layout();
-    let root = write_root(home.as_deref(), environment, manifest)?;
-    write(&root, save_dir.as_deref())
+    set_save_dir(save_dir.as_deref())
 }
 
 #[cfg(test)]

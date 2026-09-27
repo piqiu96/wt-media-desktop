@@ -36,10 +36,14 @@
 //! `commands::agent` are: a command takes `State`, which no test can build, and
 //! a function nobody can call is a function nobody can check.
 
-use crate::dto::{LocalErrorBody, SaveDirectoryFacts, SaveDirectoryResponse};
+use crate::dto::{LocalErrorBody, SaveDirectoryFacts, SaveDirectoryResponse, SettingsView};
+use crate::http::LocalAgentClient;
 use crate::state::RuntimeBinding;
+use std::path::{Path, PathBuf};
+use tauri::State;
+use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use super::bind;
+use super::{bind, settings};
 
 /// What Desktop posts to the Agent's save-directory route.
 ///
@@ -167,6 +171,181 @@ pub(crate) async fn offer_stored_choices(
     failures
 }
 
+/// The directory a picked `FilePath` names, or why it does not name one.
+///
+/// Split out of the command because everything the picker's answer is judged by
+/// is here, and the two arms are both reachable: `into_path` converts the
+/// `file://` form some platforms answer with, and fails for a URL that is not a
+/// file at all — a `content://` document, an `https://` share. The call to
+/// `settings::set_save_dir` that follows is the one line a test cannot make:
+/// it writes through the **real** data root, which is why `store_chosen` used to
+/// be untestable in its happy arm.
+///
+/// `Ok(None)` is a **cancelled dialog**, not a failure: the operator closing the
+/// picker is a decision, and a page that showed an error for it would be
+/// reporting their own click back as a fault.
+fn chosen_path(chosen: Option<FilePath>) -> Result<Option<PathBuf>, String> {
+    let Some(file_path) = chosen else {
+        return Ok(None);
+    };
+    file_path
+        .into_path()
+        .map(Some)
+        .map_err(|error| format!("这个位置不是本机目录，无法作为保存位置：{error}"))
+}
+
+/// Everything the push command does, as a function of what it read.
+///
+/// `chosen` is passed in rather than read here so the three answers a page can
+/// get — 「没有选择」/「设置文件读不出来」/「Agent 的答复」— are all reachable from
+/// a test; `settings::chosen_save_dir` needs a real data root, which a test must
+/// not have.
+async fn push_chosen(
+    client: &LocalAgentClient,
+    chosen: Result<Option<String>, String>,
+) -> Result<SaveDirectoryFacts, String> {
+    let chosen = chosen?;
+    // Not a `None`-shaped success: the page asked to push a choice, and there is
+    // none. `offer_directory`'s no-op arm is for a *start*, where the answer is
+    // not being waited for; here somebody clicked and deserves a sentence.
+    let directory = chosen.ok_or_else(|| "还没有选择下载保存位置".to_string())?;
+    push(client, &directory).await
+}
+
+/// A file name that may be looked up in the save directory, or why it may not.
+///
+/// The page sends a **name**, never a path, and this is where that is enforced —
+/// the same move as `local_log_tail`'s 「列表即白名单」. `Path::file_name` is the
+/// check rather than a scan for separators: a name is one component, so anything
+/// that is not exactly one component is refused whether the separator is `/`,
+/// `\`, a leading `~`, or nothing at all. `.` and `..` are refused by the same
+/// rule rather than by a case for them: `file_name` answers `None` for both.
+///
+/// **Byte for byte, with no trim.** A trimmed name would be a file the download
+/// list shows and this command cannot open — the names the page sends come from
+/// the task records, not from a keyboard, so there is nothing to be lenient
+/// about, and `every_name_in_a_listing_is_looked_up_as_it_is_spelled` is the
+/// case that holds that.
+fn file_name_of(name: &str) -> Result<&str, String> {
+    match Path::new(name).file_name() {
+        Some(component) if component == std::ffi::OsStr::new(name) => Ok(name),
+        _ => Err(format!(
+            "{name:?} 不是一个文件名（只接受保存目录里的名字，不接受路径）"
+        )),
+    }
+}
+
+/// Find `name` in `directory`, or say why it is not there.
+///
+/// The directory is **listed** and the name matched against what is in it, rather
+/// than joined onto the directory and passed to the opener: joining would make
+/// any name the page could spell a path this process opens, and the two are only
+/// distinguishable at the moment of the check. `file_name_of` refuses a
+/// path-shaped name first, which is what keeps that property if the lookup below
+/// is ever rewritten as a join — a `join` plus `is_file` looks like the same
+/// check and is not one.
+///
+/// A directory that shares the name is not a download, so the match requires a
+/// regular file. `DirEntry::file_type` does not follow symlinks, so a symlink
+/// planted in the save directory is not one either — a download this app wrote
+/// is a file, and following a link is how 「打开下载的文件」 turns into 「打开链接
+/// 指向的任何东西」.
+///
+/// Returns the path rather than opening it, so every decision above is a test's
+/// and the opener is the command's one untestable line — the split
+/// `reveal`'s `reveal` draws.
+fn find_saved_file(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    let wanted = file_name_of(name)?;
+    if !directory.is_dir() {
+        return Err(format!(
+            "保存位置 {} 现在不是一个目录：到本机设置里重新选一个",
+            directory.display()
+        ));
+    }
+    std::fs::read_dir(directory)
+        .map_err(|error| format!("无法读取保存位置 {}：{error}", directory.display()))?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_name().to_str() == Some(wanted)
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+        })
+        .map(|entry| entry.path())
+        .ok_or_else(|| {
+            format!(
+                "{} 里没有 {wanted}：可能已被移动或删除",
+                directory.display()
+            )
+        })
+}
+
+/// Pick the download save location in the system dialog and store the choice.
+///
+/// The dialog is opened where the operator's current choice is, so a second look
+/// starts from the folder they last picked rather than from home. A settings file
+/// that cannot be read is **not** reported here: the picker's job is to produce a
+/// choice, the dialog still opens, and the store below reports the same file's
+/// problems on the way out (`settings::save` reads before it writes).
+///
+/// The dialog call and the store are the two boundaries; everything between them
+/// is [`chosen_path`], which is tested.
+#[tauri::command]
+pub async fn local_pick_save_directory(
+    app: tauri::AppHandle,
+) -> Result<Option<SettingsView>, String> {
+    let mut dialog = app.dialog().file().set_title("选择下载保存位置");
+    if let Some(current) = settings::chosen_save_dir().ok().flatten() {
+        dialog = dialog.set_directory(current);
+    }
+    // Blocking, and `#[tauri::command] async` is what makes that correct: this
+    // runs on the runtime's worker, not on the main thread the dialog has to
+    // reach (`blocking_pick_folder`'s own doc says so). The plugin dispatches
+    // `NSOpenPanel` to the main thread itself, which is why it is the plugin
+    // rather than `rfd`'s synchronous API.
+    let chosen = dialog.blocking_pick_folder();
+    let Some(directory) = chosen_path(chosen)? else {
+        return Ok(None);
+    };
+    // Through `settings::set_save_dir`, which is the **same** writer
+    // `local_settings_set` uses, so the picker's value meets the same
+    // `check_save_dir` — a second path into the settings file would be a second
+    // chance for a directory the tasks cannot use to be stored.
+    settings::set_save_dir(Some(&directory.display().to_string())).map(Some)
+}
+
+/// Push the stored save location to the Local Agent now.
+///
+/// Its own command rather than part of `local_settings_set`, because the choice
+/// must be storable while the Agent is down: a push folded into the write would
+/// report 「保存失败」for an Agent that is not running, which is the wrong
+/// sentence and the wrong state.
+#[tauri::command]
+pub async fn local_push_save_directory(
+    client: State<'_, LocalAgentClient>,
+) -> Result<SaveDirectoryFacts, String> {
+    push_chosen(&client, settings::chosen_save_dir()).await
+}
+
+/// Open one of this machine's downloaded files.
+///
+/// Takes a **name** from the page and looks it up in the stored save directory —
+/// `AGENT-INDEX.md`'s rule for the read and cleanup commands, and the reason this
+/// needs no path parameter at all. Desktop-only by construction: the Local Agent
+/// never composites and never opens anything, so this is the app that has a file
+/// manager to reach.
+///
+/// The opener is the boundary, as in `commands::reveal`: whether the file then
+/// appears in front of the person is not something a test can assert, and a test
+/// that spawned it would open whatever the suite's machine has registered for
+/// `.mp4`. Everything up to the spawn is [`find_saved_file`], which is tested.
+#[tauri::command]
+pub fn local_open_saved_file(name: String) -> Result<String, String> {
+    let chosen =
+        settings::chosen_save_dir()?.ok_or_else(|| "还没有选择下载保存位置".to_string())?;
+    let found = find_saved_file(&PathBuf::from(chosen), &name)?;
+    open::that(&found).map_err(|error| format!("无法打开 {}：{error}", found.display()))?;
+    Ok(found.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,9 +353,12 @@ mod tests {
     use crate::http::LocalAgentClient;
     use crate::token::RuntimeToken;
     use std::collections::BTreeMap;
+    // The `Url` inside `FilePath::Url`, reached through `tauri`'s re-export so
+    // this test does not have to name the `url` crate as a dependency of its own.
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use tauri::Url;
 
     /// The folder the tests hand over, and the one that must never come back in
     /// a message. Absolute, because the Agent refuses anything else, and under
@@ -557,5 +739,423 @@ mod tests {
                 "no path and no secret on the way to a record: {reason}"
             );
         }
+    }
+
+    // ---- the picker's answer ----
+
+    /// A cancelled dialog is `None`, not a failure.
+    ///
+    /// The operator closing the picker is a decision the page has to be able to
+    /// tell apart from 「选了但存不上」: the first is nothing to report, and a
+    /// command that turned it into an `Err` would show a person their own click
+    /// back as a fault.
+    #[test]
+    fn a_cancelled_dialog_is_not_a_failure() {
+        let got = chosen_path(None).expect("cancelling is not an error");
+
+        assert_eq!(got, None);
+    }
+
+    /// A picked path comes back exactly as the picker gave it.
+    #[test]
+    fn a_picked_path_comes_back_unchanged() {
+        let path = PathBuf::from(FOLDER);
+
+        let got = chosen_path(Some(FilePath::Path(path.clone()))).expect("a path is a path");
+
+        assert_eq!(got, Some(path));
+    }
+
+    /// The `file://` form converts; a URL that names no file is refused.
+    ///
+    /// The pair is the point: the same enum variant, two outcomes, so the refusal
+    /// is provably about the URL not naming a file rather than about it being a
+    /// URL at all. `content://` is what an Android build's picker answers with;
+    /// the directory this app stores has to be one this machine can write to.
+    #[test]
+    fn a_file_url_converts_and_another_scheme_is_refused() {
+        let file = Url::parse("file:///tmp/Movies").expect("a file url");
+        let converted = chosen_path(Some(FilePath::Url(file))).expect("file:// converts");
+
+        let mut refusals = Vec::new();
+        for spelling in ["https://example.invalid/share", "content://media/external"] {
+            let url = Url::parse(spelling).expect("a url");
+            let error = chosen_path(Some(FilePath::Url(url))).expect_err(spelling);
+            assert!(error.contains("不是本机目录"), "{spelling}: {error}");
+            // The refusal must not quote what it refused: a share URL can carry a
+            // token, and this message is what a page shows and a log records.
+            assert!(!error.contains(spelling), "{spelling}: {error}");
+            refusals.push(error);
+        }
+
+        assert_eq!(converted, Some(PathBuf::from("/tmp/Movies")));
+        assert_eq!(refusals.len(), 2, "both schemes are in the loop above");
+    }
+
+    // ---- the push's three answers ----
+
+    /// 「还没有选择」 is a sentence, and **nothing is pushed**.
+    ///
+    /// The port is a closed one, so had the push been attempted this would have
+    /// come back as a connection failure instead — which is what makes the exact
+    /// message below a reading rather than an assumption about a `None` arm.
+    #[test]
+    fn an_unchosen_choice_is_reported_rather_than_pushed() {
+        let port = silent_port();
+
+        let returned = tauri::async_runtime::block_on(push_chosen(&client_to(port), Ok(None)));
+
+        assert_eq!(
+            returned.expect_err("there is nothing to push"),
+            "还没有选择下载保存位置"
+        );
+    }
+
+    /// A settings file that cannot be read is reported as itself.
+    ///
+    /// Distinct from 「没有选择」 on purpose: one is a person who has not decided,
+    /// the other is a file this build cannot understand, and the two want
+    /// different things done about them. Neither is a push.
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_not_pushed() {
+        let port = silent_port();
+        let broken = "读取设置失败：settings.toml 的 schema 不认识".to_string();
+
+        let returned =
+            tauri::async_runtime::block_on(push_chosen(&client_to(port), Err(broken.clone())));
+
+        assert_eq!(returned.expect_err("must fail"), broken);
+    }
+
+    /// A stored choice reaches the Agent, and the Agent's facts come back.
+    ///
+    /// The composition's happy arm: what `settings::chosen_save_dir` returned is
+    /// what travels, and the answer is the Agent's rather than an echo.
+    #[test]
+    fn a_stored_choice_is_pushed_and_answered_by_the_agent() {
+        let (port, seen) = serving(|_| ("200 OK".into(), stored(FOLDER)));
+
+        let returned =
+            tauri::async_runtime::block_on(push_chosen(&client_to(port), Ok(Some(FOLDER.into()))));
+
+        let facts = returned.expect("the Agent stored it");
+        assert_eq!(facts.save_dir, Some(FOLDER.to_string()));
+        assert_eq!(arrivals(&seen, "/api/v1/save-directory"), 1);
+        assert!(
+            received(&seen)[0].contains(FOLDER),
+            "the folder has to travel"
+        );
+    }
+
+    // ---- opening a downloaded file ----
+
+    /// A scratch directory of this test's own, removed by the caller.
+    fn scratch(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "wt-media-downloads-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::remove_dir_all(&path).ok();
+        std::fs::create_dir_all(&path).expect("scratch dir");
+        path
+    }
+
+    /// A name that is in the directory comes back as that entry's path.
+    #[test]
+    fn a_name_in_the_save_directory_comes_back_as_its_path() {
+        let root = scratch("found");
+        let wanted = root.join("标题-素材.mp4");
+        std::fs::write(&wanted, b"x").expect("a downloaded file");
+
+        let found = find_saved_file(&root, "标题-素材.mp4");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(found.expect("it is there"), wanted);
+    }
+
+    /// Every name a listing gives is looked up **as it is spelled**.
+    ///
+    /// The property the page depends on: the drawer shows names that came from the
+    /// task records, and each of them has to be openable. Driven from the listing
+    /// itself rather than from this test's literals, so the fixture and the input
+    /// cannot be two different sets of names — and the awkward shapes are in it
+    /// deliberately, because a lookup that trimmed its input would pass a fixture
+    /// of tidy names and leave 「列表里有、点开说没有」 as the defect.
+    #[test]
+    fn every_name_in_a_listing_is_looked_up_as_it_is_spelled() {
+        let root = scratch("listing");
+        for name in [
+            "plain.mp4",
+            "with space.mp4",
+            " leading-space.mp4",
+            "trailing-space.mp4 ",
+            "a.b.c.mp4",
+            ".hidden.mp4",
+            "emoji-\u{1f3ac}.mp4",
+        ] {
+            std::fs::write(root.join(name), b"x").unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        let listed: Vec<(String, PathBuf)> = std::fs::read_dir(&root)
+            .expect("the listing")
+            .map(|entry| {
+                let entry = entry.expect("an entry");
+                (
+                    entry.file_name().to_str().expect("a name").to_string(),
+                    entry.path(),
+                )
+            })
+            .collect();
+
+        let mut looked_up = Vec::new();
+        for (name, path) in &listed {
+            let found = find_saved_file(&root, name)
+                .unwrap_or_else(|error| panic!("the listing offered {name:?}: {error}"));
+            looked_up.push((name.clone(), found, path.clone()));
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(looked_up.len(), 7, "the fixture itself: {looked_up:?}");
+        for (name, found, path) in looked_up {
+            assert_eq!(found, path, "「{name}」 resolved to the wrong entry");
+        }
+    }
+
+    /// A name the directory does not hold is reported as missing, not as a path.
+    ///
+    /// Both halves matter: the sentence says which directory and which name — a
+    /// person has to be able to see whether it is the folder they meant — and it
+    /// is a different sentence from the path refusal below, so a page (or a log)
+    /// can tell 「名字不对」 from 「这种输入根本不收」.
+    #[test]
+    fn a_name_that_is_not_in_the_directory_is_reported_as_missing() {
+        let root = scratch("missing");
+        std::fs::write(root.join("kept.mp4"), b"x").expect("a file");
+
+        let error = find_saved_file(&root, "gone.mp4").expect_err("must not be found");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("里没有 gone.mp4"), "{error}");
+        assert!(error.contains(&root.display().to_string()), "{error}");
+        assert!(!error.contains("不是一个文件名"), "{error}");
+    }
+
+    /// A path is not a name, in every spelling that could name one — and the two
+    /// spellings that **are** one component are looked up rather than refused.
+    ///
+    /// Enumerated rather than sampled, and split along the rule's own boundary,
+    /// because the check is 「a name is one path component」 and not 「the text
+    /// looks tidy」: on this platform `\` and a space are ordinary characters, so
+    /// `C:\Windows` and `"   "` are names, and a test that claimed otherwise would
+    /// pass for the wrong reason. What matters for both groups is that neither
+    /// reaches anything outside the save directory.
+    #[test]
+    fn a_path_is_not_a_name() {
+        use std::os::unix::fs::symlink;
+
+        let parent = scratch("shapes");
+        let save = parent.join("save");
+        std::fs::create_dir_all(&save).expect("the save directory");
+        // Outside the save directory, so a lookup that joined the name onto the
+        // directory would find something and the refusal would be a lie.
+        let outside = parent.join("secret.mp4");
+        std::fs::write(&outside, b"x").expect("a file the page must not reach");
+        symlink(&outside, save.join("linked.mp4")).expect("a link to it");
+        let outside_name = outside.display().to_string();
+
+        let not_a_name = [
+            "",
+            ".",
+            "..",
+            "/",
+            "/etc/passwd",
+            "../secret.mp4",
+            "sub/secret.mp4",
+            "~/secret.mp4",
+            "file:///etc/passwd",
+            outside_name.as_str(),
+        ];
+        let one_component = ["   ", "C:\\Windows", "..hidden.mp4"];
+
+        let mut wrong = Vec::new();
+        for name in not_a_name {
+            match find_saved_file(&save, name) {
+                Ok(found) => wrong.push(format!("{name:?} was accepted as {}", found.display())),
+                Err(error) if !error.contains("不是一个文件名") => {
+                    wrong.push(format!("{name:?} got the wrong sentence: {error}"))
+                }
+                Err(_) => {}
+            }
+        }
+        for name in one_component {
+            match find_saved_file(&save, name) {
+                Ok(found) => wrong.push(format!("{name:?} was accepted as {}", found.display())),
+                Err(error) if !error.contains("里没有") => {
+                    wrong.push(format!("{name:?} got the wrong sentence: {error}"))
+                }
+                Err(_) => {}
+            }
+        }
+        // The link is in the directory and is still not a download: a name that
+        // is one component does not get to reach whatever it points at.
+        let linked = find_saved_file(&save, "linked.mp4");
+
+        std::fs::remove_dir_all(&parent).ok();
+
+        assert!(
+            wrong.is_empty(),
+            "{} shapes, {} wrong: {wrong:?}",
+            not_a_name.len() + one_component.len(),
+            wrong.len()
+        );
+        assert_eq!(not_a_name.len(), 10, "the refused group, as written above");
+        assert_eq!(
+            one_component.len(),
+            3,
+            "the looked-up group, as written above"
+        );
+        let linked = linked.expect_err("a symlink is not a downloaded file");
+        assert!(
+            !linked.contains("secret"),
+            "the refusal must not say where the link pointed: {linked}"
+        );
+    }
+
+    /// A directory that shares the name is not a download either.
+    #[test]
+    fn a_directory_that_shares_the_name_is_not_a_download() {
+        let root = scratch("directory");
+        std::fs::create_dir_all(root.join("movie.mp4")).expect("a directory named like one");
+
+        let error = find_saved_file(&root, "movie.mp4").expect_err("not a file");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("里没有"), "{error}");
+    }
+
+    /// A save directory that is not a directory says so, and says what to do.
+    #[test]
+    fn a_save_directory_that_is_not_a_directory_is_reported() {
+        let root = scratch("stale");
+        let file = root.join("was-a-folder");
+        std::fs::write(&file, b"x").expect("a file where the directory was");
+
+        let error = find_saved_file(&file, "movie.mp4").expect_err("not a directory");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("不是一个目录"), "{error}");
+        assert!(
+            error.contains("重新选"),
+            "it has to say what to do: {error}"
+        );
+    }
+
+    /// A save directory that cannot be listed at all is reported as that.
+    ///
+    /// The arm an unmounted volume or a changed permission produces, and the one
+    /// that must not be mistaken for 「还没有下载」: the message names the
+    /// directory, and the directory is still there afterwards.
+    #[test]
+    fn a_save_directory_that_cannot_be_listed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("locked");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).expect("a directory");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock it");
+
+        let error = find_saved_file(&locked, "movie.mp4").expect_err("cannot be listed");
+
+        // Unlocked before the cleanup: a directory with no permission bits cannot
+        // be removed, and a suite that left one behind would fail the next run.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(error.contains("无法读取保存位置"), "{error}");
+        assert!(error.contains(&locked.display().to_string()), "{error}");
+    }
+
+    /// Every command this module declares is registered, and no others are.
+    ///
+    /// A `#[tauri::command]` that nobody put in `generate_handler!` compiles,
+    /// passes its own tests, and fails at runtime as 「command not found」 — the
+    /// shape of failure the capability note above warns about. Nothing else in the
+    /// tree compares the two lists: `localAgentService.test.js` asserts the
+    /// argument objects of the commands the page calls, which is the other
+    /// direction and only covers what the page already uses.
+    ///
+    /// Read as source text rather than through any macro, because that is what
+    /// 「registered」 means here. The reader takes only lines that are exactly the
+    /// attribute and only entries that are not comments, which is the difference
+    /// between this and a `grep` that counts a doc comment mentioning the
+    /// attribute — that mistake was made once already in this CHG.
+    #[test]
+    fn every_command_in_this_module_is_registered() {
+        fn declared(source: &str) -> Vec<String> {
+            let lines: Vec<&str> = source.lines().collect();
+            let mut names = Vec::new();
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[tauri::command]" {
+                    continue;
+                }
+                let signature = lines[index..]
+                    .iter()
+                    .find(|line| line.contains("fn "))
+                    .unwrap_or_else(|| {
+                        panic!("no signature after the attribute at line {}", index + 1)
+                    });
+                let after = signature.split("fn ").nth(1).expect("a name");
+                names.push(
+                    after
+                        .split('(')
+                        .next()
+                        .expect("an open paren")
+                        .trim()
+                        .to_string(),
+                );
+            }
+            names
+        }
+
+        fn registered(main: &str) -> Vec<String> {
+            let start = main.find("generate_handler![").expect("the handler list");
+            let rest = &main[start..];
+            let end = rest.find("])").expect("the end of the handler list");
+            let mut names = Vec::new();
+            for line in rest[..end].lines() {
+                let entry = line.trim().trim_end_matches(',');
+                if entry.starts_with("//") {
+                    continue;
+                }
+                if let Some(rest) = entry.strip_prefix("commands::downloads::") {
+                    names.push(rest.to_string());
+                }
+            }
+            names
+        }
+
+        let mut declared = declared(include_str!("downloads.rs"));
+        let mut registered = registered(include_str!("../main.rs"));
+        declared.sort();
+        registered.sort();
+
+        assert_eq!(
+            declared, registered,
+            "the module's commands and the app's handler list are not the same set"
+        );
+        assert_eq!(
+            declared.len(),
+            3,
+            "the denominator, measured here: {declared:?}"
+        );
     }
 }

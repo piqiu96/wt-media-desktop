@@ -100,6 +100,13 @@ hex = "0.4"
 # (`open`, `explorer`, `xdg-open`, and the quoting each needs) are exactly what a
 # wheel is for, and this machine can only ever test one arm of such a `match`.
 open = "5"
+# The folder picker for the operator's save location (CHG-061 T-04). The plugin
+# rather than `rfd` directly, for the reason the plan records: it dispatches
+# `NSOpenPanel` to the main thread itself, and it arrives with the capability
+# file's permission model, so `dialog:allow-open` is the whole of what the page
+# is allowed to reach. `rfd`'s synchronous API on a Tauri command thread is the
+# macOS hazard this avoids.
+tauri-plugin-dialog = "2"
 
 # The same `tauri` the app already depends on, with one feature turned on, and
 # **only in test builds**: `test` is what exposes `tauri::test::mock_app`, whose
