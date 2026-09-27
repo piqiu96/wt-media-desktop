@@ -24,9 +24,11 @@ use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
 use crate::sidecar::{self, drain, readiness};
-use crate::state::{AgentProcess, OperationId, SidecarLog};
+use crate::state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
 use std::time::{Duration, Instant};
 use tauri::{Manager, State};
+
+use super::{downloads, settings};
 
 /// One lifecycle record, carrying the session id when there is one.
 ///
@@ -138,6 +140,18 @@ fn ready(line: &str, session: Option<&str>) {
 /// managed slot before the kill was attempted, and a kill that failed leaves a
 /// process that may still be running — so the id stays where it is.
 fn stop_failed(reason: &str, session: Option<&str>) {
+    lifecycle!(WARN, session, "{reason}");
+}
+
+/// A start that succeeded could not tell the Agent something it needs.
+///
+/// WARN, and the start still succeeds: the Agent is up and answering, which is
+/// what the caller asked for, and `commands::downloads`'s header says why a
+/// network failure must not be entangled with a local success. What the record
+/// adds is that a download will refuse later for a reason that happened **here**,
+/// minutes earlier — without this line the only evidence would be the download's
+/// own failure, with nothing above it saying why.
+fn offer_failed(reason: &str, session: Option<&str>) {
     lifecycle!(WARN, session, "{reason}");
 }
 
@@ -314,8 +328,18 @@ async fn start<R: tauri::Runtime>(
     process: &AgentProcess,
     session: &OperationId,
     log: &SidecarLog,
+    binding_state: &RuntimeBindingState,
 ) -> Result<String, String> {
     match occupancy(process, client).await? {
+        // Nothing is offered on this arm, and that is a decision rather than an
+        // omission. An Agent that is already running is one of two things, and
+        // neither needs a re-push: an Agent **this** Desktop started, which was
+        // offered both facts when it started; or an Agent that outlived a
+        // Desktop restart, where the caller has no credential to offer — it is
+        // in native memory (`state::RuntimeBindingState`) and died with the
+        // previous process — and the save directory is already in the Agent's
+        // own store, which outlives Desktop. Pushing here would either repeat
+        // what is held or announce a shape of the problem this launch cannot fix.
         Occupancy::Running => {
             already_running(session.current().as_deref());
             return Ok("already_running".into());
@@ -364,6 +388,20 @@ async fn start<R: tauri::Runtime>(
         Ok(ready_agent) => {
             ready(&ready_agent.line, Some(&id));
             healthy(&ready_agent.health, Some(&id));
+            // The Agent has just come up holding nothing from before, so this is
+            // the moment to say the two things it cannot remember (CHG-061 T-04):
+            // the Cloud node credential it reports under, and the folder this
+            // machine's downloads go in. Best-effort — the sequence and its
+            // reasoning live in `commands::downloads::offer_stored_choices`, and
+            // what stays here is the two reads and the record — and the start's
+            // own answer is unchanged, because it is about a process that is up.
+            let held = binding_state.0.lock().ok().and_then(|held| held.clone());
+            let offered =
+                downloads::offer_stored_choices(client, held.as_ref(), settings::chosen_save_dir())
+                    .await;
+            for reason in offered {
+                offer_failed(&reason, Some(&id));
+            }
             Ok(label.into())
         }
         Err(reason) => {
@@ -523,8 +561,18 @@ pub async fn local_agent_start(
     process: State<'_, AgentProcess>,
     session: State<'_, OperationId>,
     log: State<'_, SidecarLog>,
+    binding_state: State<'_, RuntimeBindingState>,
 ) -> Result<String, String> {
-    start(&app, &client, &config, &process, &session, &log).await
+    start(
+        &app,
+        &client,
+        &config,
+        &process,
+        &session,
+        &log,
+        &binding_state,
+    )
+    .await
 }
 #[tauri::command]
 pub async fn local_agent_stop(
@@ -1322,6 +1370,7 @@ mod tests {
                 &process,
                 &OperationId::default(),
                 &SidecarLog::default(),
+                &RuntimeBindingState::default(),
             ))
         });
 
@@ -1364,6 +1413,7 @@ mod tests {
             &process,
             &session,
             &SidecarLog::default(),
+            &RuntimeBindingState::default(),
         ));
 
         assert_eq!(answer, Ok("already_running".to_string()));

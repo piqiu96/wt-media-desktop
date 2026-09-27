@@ -138,6 +138,29 @@ fn view(file: &Path, stored: &UserSettings) -> SettingsView {
     }
 }
 
+/// The operator's stored choice of save directory, or `None` when there is none.
+///
+/// The inner half takes the root so it can be exercised without a layout; the
+/// outer one is what `commands::downloads` calls through `commands::agent`'s
+/// start, and it resolves the root **without creating it** — reading is not
+/// writing, the same line `local_settings_get` draws.
+///
+/// A second reader of the one file rather than a cached copy: the operator may
+/// edit it by hand while the app is running, and the two readers disagreeing is
+/// exactly the state that would make Desktop push a folder it no longer offers.
+pub(crate) fn stored_save_dir(root: &Path) -> Result<Option<String>, String> {
+    let file = file_of(root);
+    let stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
+    Ok(view(&file, &stored).save_dir)
+}
+
+/// [`stored_save_dir`] against the real data root.
+pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
+    let (home, environment, manifest) = layout();
+    let root = read_root(home.as_deref(), environment, manifest)?;
+    stored_save_dir(&root)
+}
+
 /// Read the operator's settings.
 #[tauri::command]
 pub fn local_settings_get() -> Result<SettingsView, String> {
@@ -341,6 +364,28 @@ mod tests {
             !error.contains("未设置"),
             "a broken file is not an unchosen one: {error}"
         );
+    }
+
+    /// The two readers of the one file are one answer.
+    ///
+    /// `stored_save_dir` is the narrowed one `commands::downloads` pushes to the
+    /// Agent; `read` is what the page shows. Two readers that disagreed would let
+    /// Desktop push a folder the operator is no longer being shown — and nothing
+    /// else in the tree compares them.
+    #[test]
+    fn the_narrowed_reader_agrees_with_the_pages() {
+        let root = scratch("narrowed");
+        let (wanted, _) = pickable(&root);
+        write(&root, Some(&wanted.display().to_string())).expect("save a choice");
+
+        let narrowed = stored_save_dir(&root).expect("the narrowed reader");
+        let page = read(&root).expect("the page's reader");
+        write(&root, None).expect("clear");
+        let cleared = stored_save_dir(&root).expect("the narrowed reader");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(narrowed, page.save_dir, "two answers to 「选了哪个目录」");
+        assert_eq!(cleared, None, "a cleared choice is no choice");
     }
 
     /// The two roots — this module's and the storage commands' — are one answer.
