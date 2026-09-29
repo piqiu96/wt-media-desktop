@@ -1,93 +1,50 @@
-# wt-media-desktop 目录地图
+# WT Media Desktop：目录地图
 
-本文只记录实际存在的目录。定位代码时从本文件出发，禁止全仓库扫描。
+本文件只用于代码定位、验证入口和默认扫描边界。架构与执行规则见 `AGENT-INDEX.md`，实现事实以当前代码为准。
 
-**特别标注：业务 Vue 页面源码在 `../wt-media-cloud/web`，不在本仓库。** 本仓库只拥有 Tauri 原生壳；`../.generated/frontend` 是构建产物，不是源码。
+## Tauri 原生
 
-## 一、Tauri 应用入口
+| 位置 | 主要内容 | 适用任务 |
+| --- | --- | --- |
+| `src-tauri/src/main.rs`、`src-tauri/src/bootstrap.rs` | 进程入口、启动装配和生命周期 | 窗口、启动、退出 |
+| `src-tauri/src/config.rs`、`src-tauri/src/paths.rs`、`src-tauri/src/state.rs`、`src-tauri/src/token.rs` | 配置定位、原生状态和运行 token | 配置、本机鉴权 |
+| `src-tauri/src/commands/`、`src-tauri/src/dto/` | 受控命令与 Vue 消费的载荷 | IPC 接口、参数、返回值 |
+| `src-tauri/src/http/`、`src-tauri/src/preflight.rs` | Cloud 和 Local Agent 出站客户端、敏感流程预检 | 本地通信、Cloud 调用 |
+| `src-tauri/src/sidecar/`、`src-tauri/binaries/` | Agent Sidecar 生命周期和打包二进制 | 启停、健康检查、集成 |
+| `src-tauri/src/app_paths.rs`、`src-tauri/src/settings.rs` | 运行目录和用户设置 | 本机设置、保存位置 |
+| `src-tauri/src/storage.rs`、`src-tauri/src/cleanup.rs`、`src-tauri/src/diagnostic.rs` | 存储、清理和诊断 | 本机维护功能 |
+| `src-tauri/src/logging/` | Desktop 日志装配和读取 | 日志、诊断与可观测性 |
+| `src-tauri/src/filesystem/`、`src-tauri/src/secure_store/`、`src-tauri/src/system/`、`src-tauri/src/updater/` | 原生能力与更新模块；以当前实现为准 | 对应系统能力 |
+| `src-tauri/capabilities/`、`src-tauri/resources/`、`src-tauri/tauri.conf.json` | 权限、生产配置和构建接线 | 权限、CSP、发布配置 |
+| `contracts.lock.json` | 消费的契约版本 | 跨仓接口变化 |
 
-| 路径 | 职责 | 何时进入 |
-|---|---|---|
-| `src-tauri/src/main.rs` | 只剩启动序列：`mod` 声明、配置引导、CSP 注入、Builder 装配、单实例守卫、30 个命令的 `generate_handler!`（284 行；CHG-058 AC-04 的上限是 300，余量 16 行——下一次加命令前先看这里） | 改客户端生命周期、增删命令（**新命令追加在末尾**） |
-| `src-tauri/src/bootstrap.rs` | 配置 → 启动所需物件的引导，以及**必须在 Tauri 构建任何东西之前**完成的 CSP 注入 | 改启动顺序 |
-| `src-tauri/src/config.rs` | 配置模式：一个 schema、一条解析路径、两条只往更严方向走的叠加规则（production 忽略整个 `WT_MEDIA_DESKTOP_*` 命名空间） | 改配置键、改优先级 |
-| `src-tauri/src/paths.rs` | 配置文件定位：打包版看资源目录，开发树看 crate `resources/`，两条路都以编译进二进制的 `PRODUCTION_TOML` 兜底 | 改配置定位 |
-| `src-tauri/src/token.rs` | 每次启动生成的本机运行 token。**无 `Debug`/`Display`/`Serialize`**——这是它作为类型而非 `String` 存在的全部理由 | 改本地鉴权 |
-| `src-tauri/src/state.rs` | Tauri 管理的原生状态（绑定凭据、sidecar 句柄）。**不越过 IPC 到 Vue** | 改原生状态 |
-| `src-tauri/src/logging/` | Desktop 自己的日志（CHG-057；轮转口径由 CHG-058 T-02 改写）。`setup.rs` 是**唯一**装配入口（`plan()` 决定一切、`install(plan, secrets)` 只装配；在 `main.rs` 的 CSP 注入与启动摘要之间调用）；`paths.rs` 解目录（Production `~/Library/Logs/WTMedia/Desktop`，Development `<manifest>/.local/logs`）并解 Agent 那棵树；`rolling.rs` 是 `file-rotate` 的**薄壳**——活文件恒为 `desktop.log`、归档为 `desktop.log.<YYYY-MM-DD-HH>`（本机时区）、**越保留天数的归档由 crate 按天删**，**没有单文件上限也没有总量预算**，单条超长截断标 `truncate=true original_size=<n>`；`reader.rs`（CHG-058 T-05）是读取面——列两棵树的文件（**列表即白名单**）、读尾部、按级别筛（该级别及以上）；`targets.rs` 的 `OWNED_TARGETS` 恰 3 个（`agent.supervisor`/`desktop.startup`/`webview`，外来 target 一律不进文件）；`redact.rs` 是**唯一**脱敏落点（在 sink，记录成形后、离开进程前） | 改日志目录、级别、轮转、脱敏、target、读取面 |
-| `src-tauri/src/app_paths.rs` | Desktop 自己的四个运行目录（CHG-058 T-03）：数据根、`versions`、日志根、缓存根。装机态 `~/Library/Application Support/WTMedia/Desktop{,/versions}` + `~/Library/Logs/WTMedia/Desktop` + **`~/Library/Caches/WTMedia/Desktop`**，开发态 `<repo>/.local/{data,data/versions,logs,cache}`。`directory` 是纯函数、`resolve` 收拢（装机态缺 `HOME` 即 `Err`）、`prepare` 是**唯一**碰盘的那个（建目录 + 真写探针）——**读方只用 `directory`，写方才 `prepare`**；logs 一根本模块不复述、委托 `logging/paths.rs` | 改运行目录、加第五个根 |
-| `src-tauri/src/settings.rs` | 数据根下的 `settings.toml`：`schema_version` + 同级临时文件 + `sync_all` + `rename` 的原子替换；坏形态（不可读 / 解析失败 / 版本不认识）一律 `Err` 且**原文件一个字节不动**；`save` **读得通才写**（想重置要自己删文件）；`check_save_dir` 只判路径合法性，**放行「存在但不可写」**（探针会在用户自己的素材目录里写字） | 改用户设置的键或写盘方式 |
-| `src-tauri/src/storage.rs` | 容量与占用（CHG-058 T-05）：`available_bytes_for` 用 `statvfs` 的 `f_bavail`（`f_bfree` 在有人保留块时会把不能用的空间算进来），`directory_bytes` 是一次独立 walk（清理命令用它**对账**释放字节） | 改占用与可用空间的口径 |
-| `src-tauri/src/cleanup.rs` | 清理规则本体（CHG-058 T-06）：只删可安全再生的文件与**已轮转归档**；活文件、数据根下的素材/成片/SQLite/检查点/待回传结果、符号链接与特殊文件永不删；`FileKind::Other`（读者不认识的日志名）是**显示**类目、不是删除类目；`freed_bytes` 是**被删文件的逻辑大小之和**，不是可用空间差值；单个 `remove_file` 失败只记一行、不中断整次 | 改「删什么 / 留什么」 |
-| `src-tauri/src/diagnostic.rs` | 脱敏诊断包（CHG-058 T-07）：一个 gzip tar + 一棵目录树（`summary.json` + `manifest.txt` + `logs/{desktop,agent}/…`），摘要值是**归档外的兄弟 `.sha256`**（放进包里会自指）；**每条进包的字符串都过 `mask`**，日志条目两次（写它的那层一次、`bundle_files` 再一次，靠幂等钉着）；「不含用户媒体」由**布局**保证（每棵树只读一层），不靠名字过滤 | 改包的内容边界或上限 |
-| `src-tauri/resources/desktop.production.toml` | 编译进二进制的生产配置；`environment`/`agent.*`/`cloud.base_url`/`browser.csp_connect_src`/`http.*_timeout_seconds`/`sidecar.start_timeout_ms`/`development.python_fallback`/`logging.*`（`level = "auto"`、`retention_days = 14`、`max_record_bytes = 1048576`——**没有单文件上限与总量键**，出货值由测试与 `rolling::DEFAULT_RETENTION_DAYS` 钉着不许漂） | 改发布默认值 |
-| `src-tauri/tauri.conf.json` | 应用配置：`frontendDist: ../.generated/frontend`、`devUrl`、构建命令指向 `../wt-media-cloud/web`、`bundle.resources: ["resources/*.toml"]`。**CSP 不在此处**——它由 `bootstrap.rs` 在运行期经 `config_mut()` 注入，使地址来自配置而非字面量 | 改窗口/构建配置 |
-| `src-tauri/build.rs`、`src-tauri/gen/`、`src-tauri/icons/` | 构建脚本、生成内容、图标 | 改打包资源 |
+## Vue 来源
 
-## 二、Rust 命令与安全桥
+Cloud 仓的 `web/src/apps/desktop/` 与 `web/src/modules/` 维护 Desktop Vue 业务页面和共用模块；本仓消费其构建产物。具体集成路径以 `src-tauri/tauri.conf.json` 为准。
 
-| 路径 | 职责 | 何时进入 |
-|---|---|---|
-| `src-tauri/src/commands/` | 暴露给 Vue 的 Tauri 命令（30 个）：`agent.rs`、`bind.rs`、`account.rs`、`profile.rs`、`webview.rs`、`public_config.rs`，CHG-058 的五个——`storage.rs`（`local_storage_usage` / `local_log_files` / `local_log_tail`）、`cleanup.rs`（`local_cache_cleanup` / `local_log_cleanup`）、`diagnostic.rs`（`local_diagnostic_export`）、`settings.rs`（`local_settings_get` / `local_settings_set`）、`reveal.rs`（`local_open_place`），以及 CHG-061 的 `downloads.rs`（`local_pick_save_directory` / `local_push_save_directory` / `local_open_saved_file`——选择器要 `dialog:allow-open`，打开文件**收名字不收路径**）。`webview.rs` 原名 `logging.rs`（CHG-057 T-16 纯重命名，**命令名 `log_js_error` 与前端调用一个字都没动**），改名是因为它报的是 webview 的 JS 错误，与日志子系统无关。**新命令追加在 `generate_handler!` 末尾**——前端的 `localAgentService.test.js` 按精确参数对象断言既有命令 | 改命令接口 |
-| `src-tauri/src/dto/` | 按消费方分组的 serde 结构体，含 CHG-058 的 `storage.rs`/`cleanup.rs`/`diagnostic.rs`/`settings.rs`（线上形状）。**字段名与 serde 属性是契约**：`localAgentService.test.js` 按精确相等断言参数对象；前端传 camelCase、Rust 收 snake_case | 改命令载荷 |
-| `src-tauri/src/http/` | 两个**分开的**客户端类型：`local_agent.rs`（回环、带运行 token）、`cloud.rs`（地址与凭据都是逐请求事实）。分开是因为可信级别不同——合在一起会让「这次调用带没带本机 token」无法从类型上回答 | 改出站客户端 |
-| `src-tauri/src/preflight.rs` | 敏感流程共用的 Cloud 预检与守卫。原先在 account/cookie 各抄一份；错误文案由 `tests::message_parity` 钉住 | 改预检、改错误文案 |
-| `src-tauri/src/filesystem/` | 文件/目录选择等受控本地文件能力 | 改文件桥 |
-| `src-tauri/src/secure_store/` | OS 安全存储（敏感 Token 不进 localStorage） | 改安全存储 |
-| `src-tauri/src/system/` | 系统信息与本地系统能力 | 改系统能力桥 |
-| `src-tauri/capabilities/default.json` | Tauri 权限能力声明 | 改权限边界 |
+## 测试与验证入口
 
-规则：Vue 页面不直接访问 Local Agent 动态端口或 Token（地址经 `get_public_config` 取得）；平台特定行为放 Rust 桥模块，不散落在业务 UI。
+| 范围 | 优先入口 |
+| --- | --- |
+| Rust 原生能力 | `src-tauri/Cargo.toml`、相关模块测试和 `tests/` |
+| Tauri 命令与权限 | `src-tauri/src/commands/`、`src-tauri/src/dto/`、`src-tauri/capabilities/`、Cloud Vue 调用方 |
+| Cloud／Agent 协议 | `contracts.lock.json`、`src-tauri/src/http/` 和对应提供方 |
+| Sidecar、打包与更新 | `src-tauri/src/sidecar/`、`src-tauri/src/updater/`、`scripts/` 中已有验证 |
 
-`filesystem/`、`secure_store/`、`system/`、`updater/` 目前是 3 行空壳——它们被占位保留，尚无实现，不要把它们当成可读的实现来源。
+优先复用仓库已有验证方式，不在本文件复制具体命令。
 
-## 三、Agent Sidecar 生命周期
+## 工具
 
-| 路径 | 职责 | 何时进入 |
-|---|---|---|
-| `src-tauri/src/sidecar/mod.rs` | sidecar 的启停。两条 spawn 路径都在这里，且**注入同一组四个环境变量**（`WT_MEDIA_LOCAL_API_HOST`/`_PORT`、`WT_MEDIA_AGENT_RUNTIME_TOKEN`、`WT_MEDIA_AGENT_DATA_DIR`）。返回的标签（`sidecar_started`/`started`/`already_running`/`not_running`）逐字保持，Vue 按它分支 | 改 Sidecar 启停 |
-| `src-tauri/src/sidecar/drain.rs` | 保留 sidecar 的输出（原先绑给 `_events` 再不消费，等于全丢）。缓冲仍是**内存环形 200 行**，Agent 的 stdout **不落盘、不轮转**；但它的**去向已经分层**（CHG-057 T-16）：进程存活期间的普通输出**一条记录都不产生**（AC-09 的口径），退出时由 `report_exit` 发**恰一条** `agent.supervisor` 记录并带**末 20 行**尾，读失败（`CommandEvent::Error`）另发一条。那两条记录会落盘、会被轮转、会在 sink 里脱敏——脱敏落点在 `src-tauri/src/logging/redact.rs`，不在本文件 | 改侧车日志处理 |
-| `src-tauri/src/local_agent/` | 只余一个纯契约类型 `BoundNodeFacts`（绑定后交给 Vue 的非敏感事实） | 改绑定返回 |
-| `src-tauri/binaries/` | Sidecar 二进制组件（当前含 `wt-media-agent-aarch64-apple-darwin`） | 改 Sidecar 集成 |
+- `scripts/`：开发、验证、打包和发布脚本。
+- `bin/`：本地进程控制及运行辅助。
 
-Agent 内部如何执行浏览器操作或 FFmpeg，不属于本仓库（归 `../wt-media-agent`）。
+## 默认跳过
 
-**两条 spawn 路径的差异是有意的**：打包 sidecar 是发布版唯一可走的路，Python fallback 在 debug 构建的开关之后，release 产物里不可达——客户不需要装系统 Python。
+日常代码检索默认跳过：
 
-## 四、更新与跨平台打包
+- Rust 构建产物，如 `target/`。
+- Tauri 自动生成内容，如 `src-tauri/gen/`。
+- 前端构建产物、依赖、缓存、日志和临时文件。
+- `.git/` 等版本控制元数据。
 
-| 路径 | 职责 | 何时进入 |
-|---|---|---|
-| `src-tauri/src/updater/` | 版本检测、更新 | 改更新逻辑 |
-| `bin/control.sh` | 本地开发壳的启停与状态（`cargo tauri dev`）；只有这一个 `bin/` 文件 | 改开发流程 |
-| `scripts/test.sh` | 测试面：`cargo test --workspace` ＋ `tests/` 下的发布套件 | 改测试 |
-| `scripts/build-release-macos.sh`、`scripts/package-release-macos.sh` | macOS 发布构建与打包 | 改安装包 |
-| `scripts/prepare-release-sidecar.sh`、`scripts/stage-release-config.sh` | 发布前准备 Sidecar 与发布配置入包 | 改 Sidecar 集成 |
-| `scripts/repair-macos-signing.sh` | macOS 签名修复 | 改签名 |
-| `scripts/release-versions.sh`、`scripts/verify-release-macos.sh` | 五个版本类别的打戳与核对、发布产物验收 | 改版本口径、改发布验收 |
-| `scripts/dev/`、`scripts/verify/` | 新脚本落位（当前各一枚 `.gitkeep`） | 写新脚本时 |
-| 其余脚本的分类与落位规则 | 见 `scripts/README.md` | — |
-
-支持范围遵循工程基线：Windows x64、macOS Intel、macOS Apple Silicon。
-
-## 五、契约与测试
-
-| 路径 | 职责 |
-|---|---|
-| `contracts.lock.json` | 消费的契约版本锁 |
-| `tests/` | 发布打包测试（`package-release-macos.test.sh`） |
-
-## 六、Vue 构建产物的来源与集成方式
-
-- 开发：`tauri.conf.json` 的 `beforeDevCommand` 进入 `../../wt-media-cloud/web` 跑 `npm run dev:desktop`（地址由同文件的 `devUrl` 给出，本文不复述其值）。
-- 发布：`beforeBuildCommand` 先 `prepare-release-sidecar.sh`，再调 `../wt-media-workspace/scripts/build-desktop.sh` 产出前端到 `../.generated/frontend`，由 `frontendDist` 加载。
-
-改 Desktop 业务页面 → 去 `../wt-media-cloud/web`（`web/src/apps/desktop` 与 `web/src/modules`）。
-
-## 七、禁止扫描区
-
-- `target/`（Rust 构建产物）
-- `../.generated/`（前端构建产物快照）
-- `src-tauri/gen/`（生成内容，除非任务就是核对生成结果）
-
-本节是禁止扫描区的**唯一落点**。`AGENT-INDEX.md` 此前在末行另存一份清单，已换成指向本节的指针（CHG-20260925-065 T-07）——**那份清单多出的 `../generated`（无点）实测不存在**：`frontendDist` 是 `../.generated/frontend`，工作区根下也没有 `generated/`，全仓仅该行提到它。按代码实况不再保留该条目。
+任务直接涉及这些内容时再进入。

@@ -36,7 +36,7 @@ Before relying on any process, enforce freshness:
    - Cloud migrations (`wt-media-cloud/scripts/migrate.sh`);
    - Cloud server (`go run ./cmd/server`);
    - Local Agent (`wt-media-agent/.venv/bin/python -m wt_media_agent.local_api.server`);
-   - Desktop frontend via `wt-media-workspace/scripts/build-desktop.sh` and DMG via `cargo tauri build --bundles dmg --no-sign`;
+   - Desktop frontend via `wt-media-workspace/scripts/build-desktop-frontend.sh` and DMG via `cargo tauri build --bundles dmg --no-sign`;
    - Regenerate Cloud desktop artifacts (`npm run build:desktop`).
 3. **Freshness gate.** Confirm each running artifact was built after the latest source commit it contains (compare process start time and build artifact mtime against `git log -1 --format=%ci` in the owning repo). If any artifact is older than its source, restart/re-build it. Do not proceed with a stale Cloud or Agent.
 4. **Mount and launch** the freshly built DMG at `/Volumes/WT Media/WT Media.app`.

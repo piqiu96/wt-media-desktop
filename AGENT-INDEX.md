@@ -1,101 +1,50 @@
-# wt-media-desktop Agent Index
+# WT Media Desktop Agent Index
 
-> 本文件是本仓**全部正式内容**的唯一落点：定位、职责边界、需求路由、**本仓规则**、禁止项与本仓内加载顺序。`CLAUDE.md` 与 `AGENTS.md` 是指针，只声明本文件的位置，不承载任何规则。
+本文件只记录 Desktop 的长期工作规则，不记录当前 Milestone、CHG、临时任务状态或本机路径。
 
-## 依赖
+## 1. 仓库职责
 
-关于文档等事实都在`../wt-media-workspace`，需要执行时优先考虑对应的约束边界。
+- Desktop 是 Tauri 2 原生客户端，负责窗口与应用生命周期、受控系统桥、Local Agent Sidecar 和安装交付。
+- Cloud 裁决正式业务状态，维护 HTTP API、Desktop Vue 业务源码和已确认的云端视频合成能力。
+- Agent 负责运营电脑上的浏览器、登录环境、本地文件落地和其他实际执行。
+- Desktop 通过 Rust 桥提供本机能力，不复制 Cloud 业务后端或 Agent 执行逻辑。
+- Workspace 维护系统级 Product、Architecture、Contract、Decision 和 Delivery；Desktop 运行时及安装产物不依赖 Workspace。
 
-治理上下文（当前 CHG、执行契约）在 `../wt-media-workspace`，按其 `.ai/CURRENT_CONTEXT.md` 指引加载。
+## 2. Workspace 协作
 
-## 定位
+- 分析、定位和明确的小范围单仓修改可以直接进行，不自动创建 CHG。
+- 已关联 CHG 时，以其目标、范围和 References 为任务依据，只实施已确认的 Desktop 范围。
+- References 是优先入口，不限制任务确实需要的进一步查证。
+- 涉及跨仓 Contract、系统架构、仓库职责或扩大 CHG 范围时，先回 Workspace 更新共同定义。
+- Workspace 发起的任务直接使用当前 Workspace 上下文；独立执行需要 Workspace 时使用已提供的根目录或环境配置，无法定位则要求提供路径。
+- 不复制 Workspace 文档，也不在 Desktop 建立第二套 Delivery、任务状态或临时 context。
 
-本仓库是 WT Media 的 **Tauri 2 原生客户端工程**：Windows 与 macOS 客户端的原生能力、运行环境、进程生命周期与打包交付。
+## 3. 上下文加载
 
-Desktop 是**客户端控制壳，不是第二套业务系统**。
+按任务逐步读取：
 
-## 本仓库拥有
+1. 理解当前任务；有关联 CHG 时读取对应 CHG。
+2. 按需要读取相关 Product、Engineering、Contract 或 Decision。
+3. 目标位置不明确时用 `DIRECTORY_MAP.md` 定位原生区域和验证入口。
+4. 进入目标模块后，再读取直接依赖、调用方和相关测试。
 
-- 客户端生命周期：Tauri 初始化、窗口、应用退出、系统托盘、运行状态（`src-tauri/src/main.rs`，284 行；`invoke_handler!` 里 30 个命令，**新命令一律追加在末尾**，见「禁止」）。
-- 启动期配置与安全：`config.rs`（一个 schema、一条解析路径）、`paths.rs`（配置文件定位）、`bootstrap.rs`（引导顺序 + CSP 注入）、`token.rs`（每次启动的本机运行 token）、`state.rs`（不进 IPC 的原生状态）。
-- 本地安全桥：受控权限下向 Vue 页面暴露本地系统能力——文件/目录选择、安全存储、系统信息（`src-tauri/src/{commands,dto,preflight,filesystem,secure_store,system}`）。
-- **本机运行目录与用户设置**（CHG-058）：`app_paths.rs` 解析 Desktop 自己的四个根（数据根 / `versions` / 日志根 / 缓存根；装机态与开发态两套布局，**缓存根不在数据根之内**），读方只用纯函数、写方才 `prepare`；`settings.rs` 读写数据根下的 `settings.toml`（`schema_version` + 同级临时文件 + `rename` 原子替换；损坏时保留原文件并报错，不静默清空）。`save_dir` 的消费方见下一条。
-- **下载落盘通道**（CHG-061 T-04）：`commands/downloads.rs` 把运营选定的保存目录推给 Local Agent（`POST /api/v1/save-directory`，与绑定是同一条回环 HTTP，因此同样受运行 token 保护），并在**每次成功启动后重推一次**——目录存在 Agent 自己的元数据里，Desktop 不缓存它。选择器是 `tauri-plugin-dialog`（权限 `dialog:allow-open`，缺它表现为像代码 bug 的运行时失败），选中的值仍走 `settings::set_save_dir`，即「本机设置」页用的**同一个**写口。`local_open_saved_file` 收名字不收路径，在保存目录里**列目录后按名匹配**，且只认常规文件。字节由 Local Agent 落盘，Desktop 只负责选位置、转达与打开。
-- **本机存储、日志与清理命令面**（CHG-058）：`storage.rs`（可用空间与目录占用）、`cleanup.rs`（只删可安全再生的文件与已轮转归档）、`diagnostic.rs`（脱敏诊断包）、`logging/reader.rs`（列日志文件与读尾部，**列表即白名单**）、`commands/{storage,cleanup,diagnostic,settings,reveal}.rs`。它们只服务 Desktop 自己的「本机设置」页，不是第二套业务后端。
-- Agent 生命周期：Local Agent Sidecar 的启动、停止、健康检查、进程恢复，以及 Desktop 与 Local Agent 的本地通信（`src-tauri/src/sidecar/`、`http/`、`src-tauri/binaries`）。**通信是普通 HTTP**：Agent 侧有 `text/event-stream` 端点（`local_api/server.py`），但 Desktop 不消费流，`local_agent_task_status` 取的是状态快照。
-- 客户端交付：原生依赖、Sidecar 集成、安装包、版本检测、签名、更新、跨平台打包（`src-tauri/src/updater`、`scripts/`）。支持 Windows x64、macOS Intel、macOS Apple Silicon。
-- **Desktop 自己的日志**（`src-tauri/src/logging/`）：目录解析、装配、轮转与保留、target 白名单、脱敏，以及**读取面**（`reader.rs`）。与 Agent 的日志**各自一套、互不转存**——Agent 的业务日志归 `../wt-media-agent` 的 `agent.log`，Desktop 只记自己的生命周期（启动退出、配置加载、Agent 启停与健康检查、sidecar 异常退出）。**没有容量限额**：活文件恒为 `desktop.log`，归档是 `desktop.log.<YYYY-MM-DD-HH>`，超过保留天数（默认 14）的归档由 `file-rotate` 按天删除。
+默认不做全仓代码扫描，不读取 `delivery/completed`、历史材料和全量 Skills，也不扫描构建、缓存、临时或生成目录。任务需要时可以扩大范围，并说明目的。
 
-## 本仓库不拥有
+## 4. 本仓架构
 
-- **业务 Vue 页面源码** → `../wt-media-cloud/web`（`web/src/apps/desktop` 与 `web/src/modules`）；本仓库的 `../.generated/frontend` 只是构建产物
-- 业务规则、业务数据模型、正式任务管理、Cloud MySQL → `../wt-media-cloud`
-- BitBrowser、Playwright、FFmpeg 的实际执行 → `../wt-media-agent`（Agent 内部如何执行不属于 Desktop）
+- Vue 业务源码由 Cloud 的 `web/` 维护；Desktop 消费其构建产物，不建立第二套业务前端。
+- Vue 通过受控 Tauri 命令访问本机能力；Local Agent 动态端口和运行 token 由 Rust 层持有，不直接交给页面。
+- 敏感 Token 使用操作系统安全存储；原生敏感状态不作为普通页面数据暴露。
+- 命令载荷、serde 字段和权限声明构成前端接口，变化时核对 Cloud 的 Vue 调用与契约锁。
+- Sidecar 管理 Local Agent 生命周期和本地通信；实际浏览器、文件落地和平台操作由 Agent 执行。
+- 本机文件读取、打开和清理保持受控范围，不接受页面任意路径；下载字节由 Local Agent 落盘。
+- Desktop 只记录自身日志，不全量转存 Agent 输出。
 
-## 需求路由
+## 5. 修改与验证
 
-| 需求是 | 去哪里 |
-|---|---|
-| 改 Agent Sidecar 启停/健康检查 | `src-tauri/src/sidecar/`（两条 spawn 路径都在此，且共用同一组四个环境变量）。启停与健康检查的生命周期记录（`agent.supervisor`）在 `src-tauri/src/commands/agent.rs` |
-| 改 Desktop 日志（目录、级别、轮转、保留、脱敏、新增 target） | `src-tauri/src/logging/`；新增 target 要同时改 `targets.rs` 的 `OWNED_TARGETS`（枚举断言钉着） |
-| 改本机运行目录解析（数据根 / `versions` / 日志根 / 缓存根） | `src-tauri/src/app_paths.rs`。**不动 `paths.rs`**——那是配置文件定位器；日志目录仍委托 `logging/paths.rs` |
-| 改用户设置（`settings.toml` 的键、schema 版本、原子替换） | `src-tauri/src/settings.rs`；线上形状在 `dto/settings.rs`（**字段名是契约**） |
-| 改下载保存位置的选择／转达／打开已下载文件 | `src-tauri/src/commands/downloads.rs`（选择器是 `tauri-plugin-dialog`，权限 `dialog:allow-open` 在 `capabilities/default.json`）。**打开文件收名字不收路径**，按「列表即白名单」在保存目录里按名匹配 |
-| 改存储与日志的读取（占用、列文件、读尾部、级别筛选） | `src-tauri/src/storage.rs`、`logging/reader.rs`，命令在 `commands/storage.rs`。**列表即白名单**：先列目录再按名查找 |
-| 改清理规则（删什么、留什么、释放字节怎么算） | `src-tauri/src/cleanup.rs`（规则本体）+ `commands/cleanup.rs`（接线）；保护面按**路径**判、按**种类**例外 |
-| 改脱敏诊断包（形状、条目、上限、摘要值） | `src-tauri/src/diagnostic.rs`、`commands/diagnostic.rs`、`dto/diagnostic.rs`；**脱敏在门口**——新增进包的字符串都要过 `mask` |
-| 改「本机设置」页或日志查看器 | `../wt-media-cloud/web`（`web/src/apps/desktop/features/local-settings`、`local-logs`；**不在本仓库**） |
-| 改本地通信（回环客户端、运行 token） | `src-tauri/src/http/local_agent.rs` |
-| 改 Cloud 出站调用 | `src-tauri/src/http/cloud.rs` |
-| 改配置键、发布默认值、配置文件定位 | `src-tauri/src/config.rs`、`paths.rs`、`resources/desktop.production.toml` |
-| 改 CSP | `src-tauri/resources/desktop.production.toml` 的 `browser.csp_connect_src` + `src-tauri/src/bootstrap.rs`（**不在 `tauri.conf.json`**） |
-| 改页面能看到的非敏感配置 | `src-tauri/src/commands/public_config.rs`（只返回 `cloud_base_url`/`local_agent_port`/`environment`） |
-| 改 Tauri 安全桥（文件、存储、系统信息） | `src-tauri/src/{commands,filesystem,secure_store,system}/`（后三个目前是 3 行空壳） |
-| 改命令载荷形状 | `src-tauri/src/dto/`（**字段名与 serde 属性是契约**） |
-| 改敏感流程的 Cloud 预检 | `src-tauri/src/preflight.rs` |
-| 改 Windows/macOS 安装包、签名、更新 | `src-tauri/src/updater/`、`scripts/build-release-macos.sh` 等 |
-| 改 Desktop 使用的 Vue 业务页面 | `../wt-media-cloud/web`（**不在本仓库**） |
-| 改窗口、托盘、退出逻辑 | `src-tauri/src/main.rs` |
-| 改页面权限边界 | `src-tauri/capabilities/default.json` |
-
-## 本仓规则
-
-本仓全部规则的唯一落点。一条一行，写清做什么／不做什么。逐项目录事实与禁止扫描区见 `DIRECTORY_MAP.md`。
-
-### 平台与 UI 边界
-
-- 平台特定行为放 Rust 系统桥模块，不散落在业务 UI 代码。
-- 敏感 Token 走 OS 安全存储，不进 `localStorage`。
-- Rust 代理 Local Agent 的 HTTP。Agent 侧虽有 `text/event-stream` 端点，Desktop **不消费流**（`local_agent_task_status` 取的是状态快照）——**不要在文档或代码注释里把这条写成已实现**。
-
-### 生成内容
-
-- `src-tauri/gen/` 是 Tauri 生成内容，**禁止手改**；除非任务本身就是核对生成结果。
-
-### 前端产物与 Workspace 依赖
-
-- 业务 Vue 页面源码在 `../wt-media-cloud/web`：开发时 `beforeDevCommand` 指向该工程，发布时由 `../wt-media-workspace/scripts/build-desktop.sh` 产出前端到 `../.generated/frontend`（`frontendDist`）。本仓库不维护第二套 Vue 源码，也**没有 `src/` 顶层目录**。
-- 上述是**开发／发布期的工具依赖**；**产物与运行期不依赖 Workspace**——见 `src-tauri/tauri.conf.json` 的 `beforeBuildCommand`。
-
-## 禁止
-
-- 复制 Cloud 的业务规则、业务数据模型和正式任务管理能力。
-- 直接连 Cloud MySQL。
-- 直接承担 FFmpeg、BitBrowser 或 Playwright 业务执行（归 Local Agent）。
-- 把 Tauri Rust 层变成第二套业务后端。
-- 重复开发已有的 Vue 页面、Store、业务组件和 API 调用层。
-- 绕过 Cloud 授权或 Local Agent 执行校验直接操作本地敏感资源。
-- Vue 直接访问 Local Agent 动态端口或 Token（必须走 Rust 代理）。
-- 在 `logging/setup.rs` 之外装配日志（`set_global_default` 每进程只能一次，第二个装配点不会报错、只会静默失效），或把 Agent 的 stdout 全量转存进 `desktop.log`。
-- 在 `invoke_handler!` **中间**插入新命令：既有命令的参数对象被前端按**精确相等**断言（`localAgentService.test.js`），新命令一律**追加在末尾**。
-- 给读取或清理命令加**路径参数**：读取面靠「列表即白名单」（先列目录再按名查找），清理靠「根 + 种类」判定；收了路径就等于把保护面交给调用方。
-
-## 本仓内加载顺序
-
-本节只写**本仓内**的入口顺序；跨仓读取顺序与全部红线的唯一落点是 `../wt-media-workspace/AGENT-INDEX.md` §4 与 §2，本节不复述。
-
-1. 本文件（职责、路由与本仓规则）
-2. `DIRECTORY_MAP.md`（目录导航；含 Vue 产物来源与集成方式）
-3. 只读目标模块的代码、直接依赖与 `tests/`
-
-禁止默认扫描的目录见 `DIRECTORY_MAP.md` 的「禁止扫描区」。
+- 从目标代码开始调查；位置不明确时使用 `DIRECTORY_MAP.md`。
+- 实现事实以当前代码、契约锁和 Cloud Vue 消费点为准。
+- 验证从最小相关范围开始，优先使用仓库已有脚本和测试方式。
+- 命令、权限或本地桥变化时核对前端调用；Sidecar、打包或更新变化时检查受影响的平台与产物接线。
+- 不默认执行全平台构建，不修改生成产物，也不覆盖、还原或提交他人已有工作区改动。
+- CHG 任务完成后按 Workspace 当前 Delivery 规则回写状态。
