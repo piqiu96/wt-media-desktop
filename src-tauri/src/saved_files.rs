@@ -22,9 +22,10 @@
 //! Only **regular files** are opened, moved or deleted. A symlink is not a
 //! download: following one is how 「打开下载的文件」 becomes 「打开链接指向的任何
 //! 东西」, and deleting one — or the file it points at — is not what a button
-//! saying 「删除这个下载」 promised. A name is one path component and nothing else
-//! ([`file_name_of`]), so no caller can reach outside the directories it was given
-//! however it spells what it asks for. Nothing recurses, and nothing overwrites:
+//! saying 「删除这个下载」 promised. A name is at most one subdirectory and one
+//! component ([`file_name_of`]), so no caller can reach outside the directories
+//! it was given however it spells what it asks for. Nothing recurses beyond that
+//! one level, and nothing overwrites:
 //! 「目标位置已有同名文件」 is a `kept` entry in the report, not a rename — the `(2)`
 //! rule belongs to the Agent's sink, and a second one here would be a second
 //! answer to *what is this file called*.
@@ -52,11 +53,11 @@ pub const MOVING_SUFFIX: &str = ".moving";
 /// A file name that may be looked up in a save directory, or why it may not.
 ///
 /// The page sends a **name**, never a path, and this is where that is enforced —
-/// the same move as `local_log_tail`'s 「列表即白名单」. `Path::file_name` is the
-/// check rather than a scan for separators: a name is one component, so anything
-/// that is not exactly one component is refused whether the separator is `/`,
-/// `\`, a leading `~`, or nothing at all. `.` and `..` are refused by the same
-/// rule rather than by a case for them: `file_name` answers `None` for both.
+/// the same move as `local_log_tail`'s 「列表即白名单」. The rule is read off the
+/// path's own components rather than by scanning for separators: a name is one
+/// component, or one subdirectory and one component (`20260930/游戏-素材.mp4`),
+/// and anything else is refused — a second level, a root, a drive prefix, `.`,
+/// `..`, or a separator this platform does not treat as one.
 ///
 /// **Byte for byte, with no trim.** A trimmed name would be a file the download
 /// list shows and these commands cannot touch — the names the page sends come
@@ -64,11 +65,23 @@ pub const MOVING_SUFFIX: &str = ".moving";
 /// about, and `every_name_in_a_listing_is_looked_up_as_it_is_spelled` is the case
 /// that holds that.
 pub fn file_name_of(name: &str) -> Result<&str, String> {
-    match Path::new(name).file_name() {
-        Some(component) if component == std::ffi::OsStr::new(name) => Ok(name),
-        _ => Err(format!(
+    let mut normal = 0;
+    for component in Path::new(name).components() {
+        match component {
+            std::path::Component::Normal(_) => normal += 1,
+            _ => {
+                return Err(format!(
+                    "{name:?} 不是一个文件名（只接受保存目录里的名字，不接受路径）"
+                ))
+            }
+        }
+    }
+    if (1..=2).contains(&normal) {
+        Ok(name)
+    } else {
+        Err(format!(
             "{name:?} 不是一个文件名（只接受保存目录里的名字，不接受路径）"
-        )),
+        ))
     }
 }
 
@@ -229,25 +242,42 @@ impl Scouted {
 /// directory answers [`NotAFile::Symlink`] rather than being read as the file it
 /// points at.
 fn entry_in(directory: &Path, wanted: &str) -> Result<Entry, Unreadable> {
-    let entries = match std::fs::read_dir(directory) {
+    // `wanted` was validated by `file_name_of`, so it is one component or
+    // `subdir/name`. A subdirectory names a place to look, never a thing to
+    // follow: it has to be a real directory (not a file, not a link), so a name
+    // cannot ride a symlink out of the save directory and in the file the link
+    // points at.
+    let (search_in, wanted_name) = match wanted.split_once('/') {
+        Some((subdir, name)) => {
+            let candidate = directory.join(subdir);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(meta) if meta.is_dir() => (candidate, name),
+                // Nothing to look in — absent, a file, or a link. In none of
+                // them is there a file with that name to find.
+                _ => return Ok(Entry::Nothing),
+            }
+        }
+        None => (directory.to_path_buf(), wanted),
+    };
+    let entries = match std::fs::read_dir(&search_in) {
         Ok(entries) => entries,
-        Err(_) if !directory.is_dir() => {
+        Err(_) if !search_in.is_dir() => {
             return Err(Unreadable {
-                directory: directory.to_path_buf(),
+                directory: search_in,
                 reason: "现在不是一个目录".to_string(),
                 gone: true,
             })
         }
         Err(error) => {
             return Err(Unreadable {
-                directory: directory.to_path_buf(),
+                directory: search_in,
                 reason: error.to_string(),
                 gone: false,
             })
         }
     };
     for entry in entries.filter_map(Result::ok) {
-        if entry.file_name().to_str() != Some(wanted) {
+        if entry.file_name().to_str() != Some(wanted_name) {
             continue;
         }
         return match entry.file_type() {
@@ -651,6 +681,12 @@ fn is_cross_device(error: &std::io::Error) -> bool {
 /// of the same directory, and the one that acts is the later.
 fn move_one(source: &Path, target: &Path, name: &str) -> Result<(), String> {
     let destination = target.join(name);
+    // A name with a date subdirectory needs that subdirectory in the target too;
+    // a flat name's parent is the target itself, where this is a no-op.
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法在目标位置创建文件夹：{error}"))?;
+    }
     if std::fs::symlink_metadata(&destination).is_ok() {
         return Err("目标位置已有同名文件".to_string());
     }
@@ -904,6 +940,68 @@ mod tests {
         assert_eq!(found.expect("it is there"), wanted);
     }
 
+    /// A name one level deep (`20260930/游戏-素材.mp4`) is looked up inside the
+    /// subdirectory, and the full path — with the subdirectory — is the answer,
+    /// which is what 「打开文件」 opens and what 「在文件夹中显示」 reveals the parent of.
+    #[test]
+    fn a_name_one_level_deep_comes_back_as_its_full_path() {
+        let root = scratch("subdir");
+        let subdir = root.join("20260930");
+        std::fs::create_dir_all(&subdir).expect("the date directory");
+        let wanted = subdir.join("三角洲行动-30.mp4");
+        std::fs::write(&wanted, b"x").expect("a downloaded file");
+
+        let found = find_in_the(&root, "20260930/三角洲行动-30.mp4");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(found.expect("it is there"), wanted);
+    }
+
+    /// A subdirectory is a place to look, never a thing to follow.
+    ///
+    /// `20260930` here is a link to the save directory's parent, where a file of
+    /// the name asked for lives: a lookup that descended through the link would
+    /// open a file the save directory does not contain.
+    #[test]
+    fn a_symlinked_subdirectory_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let parent = scratch("linked-subdir");
+        let save = parent.join("save");
+        std::fs::create_dir_all(&save).expect("the save directory");
+        std::fs::write(parent.join("secret.mp4"), b"x").expect("a file outside");
+        symlink(&parent, save.join("20260930")).expect("a link for the subdirectory");
+
+        let error = find_in_the(&save, "20260930/secret.mp4");
+
+        std::fs::remove_dir_all(&parent).ok();
+
+        let error = error.expect_err("a link must not be descended into");
+        assert!(
+            error.contains("不在本机已知的保存位置里"),
+            "the link was answered as nothing found, not as a file: {error}"
+        );
+    }
+
+    /// A subdirectory that is a file holds no download under it.
+    #[test]
+    fn a_subdirectory_that_is_a_file_is_not_descended_into() {
+        let root = scratch("file-subdir");
+        std::fs::write(root.join("20260930"), b"not a directory").expect("a file");
+
+        let error = find_in_the(&root, "20260930/三角洲行动-30.mp4");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            error
+                .expect_err("nothing to look in")
+                .contains("不在本机已知的保存位置里"),
+            "a file-shaped subdirectory holds no file under it"
+        );
+    }
+
     /// Every name a listing gives is looked up **as it is spelled**.
     ///
     /// The property the page depends on: the drawer shows names that came from the
@@ -978,15 +1076,16 @@ mod tests {
         assert!(!error.contains("不是一个文件名"), "{error}");
     }
 
-    /// A path is not a name, in every spelling that could name one — and the two
-    /// spellings that **are** one component are looked up rather than refused.
+    /// A path is not a name, in every spelling that could name one — and the
+    /// spellings that **are** a name (one component, or one subdirectory and one
+    /// component) are looked up rather than refused.
     ///
     /// Enumerated rather than sampled, and split along the rule's own boundary,
-    /// because the check is 「a name is one path component」 and not 「the text looks
-    /// tidy」: on this platform `\` and a space are ordinary characters, so
-    /// `C:\Windows` and `"   "` are names, and a test that claimed otherwise would
-    /// pass for the wrong reason. What matters for both groups is that neither
-    /// reaches anything outside the save directory.
+    /// because the check is 「a name is one or two path components」 and not 「the
+    /// text looks tidy」: on this platform `\` and a space are ordinary
+    /// characters, so `C:\Windows` and `"   "` are names, and a test that claimed
+    /// otherwise would pass for the wrong reason. What matters for both groups is
+    /// that neither reaches anything outside the save directory.
     #[test]
     fn a_path_is_not_a_name() {
         use std::os::unix::fs::symlink;
@@ -1008,12 +1107,18 @@ mod tests {
             "/",
             "/etc/passwd",
             "../secret.mp4",
-            "sub/secret.mp4",
-            "~/secret.mp4",
+            "a/b/secret.mp4",
+            "20260930/../secret.mp4",
             "file:///etc/passwd",
             outside_name.as_str(),
         ];
-        let one_component = ["   ", "C:\\Windows", "..hidden.mp4"];
+        let one_component = [
+            "   ",
+            "C:\\Windows",
+            "..hidden.mp4",
+            "sub/secret.mp4",
+            "~/secret.mp4",
+        ];
 
         let mut wrong = Vec::new();
         for name in not_a_name {
@@ -1049,7 +1154,7 @@ mod tests {
         assert_eq!(not_a_name.len(), 10, "the refused group, as written above");
         assert_eq!(
             one_component.len(),
-            3,
+            5,
             "the looked-up group, as written above"
         );
         let linked = linked.expect_err("a symlink is not a downloaded file");
@@ -1328,6 +1433,30 @@ mod tests {
         assert!(!found[0].current, "there is no place for it to be current");
     }
 
+    /// A download filed under a date subdirectory is in the save directory, and
+    /// its file is that directory's own — `directory` and `current` keep meaning
+    /// the save root, not the subdirectory inside it.
+    #[test]
+    fn a_file_in_a_date_subdirectory_is_present_and_current() {
+        let root = scratch("presence-subdir");
+        let current = empty(&root, "now");
+        std::fs::create_dir_all(current.join("20260930")).expect("the date directory");
+        std::fs::write(current.join("20260930/三角洲行动-30.mp4"), b"0123456789").expect("a file");
+
+        let found = presences(
+            &[current.clone()],
+            Some(&current),
+            &names(&["20260930/三角洲行动-30.mp4"]),
+        )
+        .expect("a read");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(found[0].directory.as_deref(), Some(current.as_path()));
+        assert!(found[0].current, "it is in the directory in use");
+        assert_eq!(found[0].bytes, Some(10));
+    }
+
     /// A symlink is not a downloadable file, so it is answered as 「不在这儿」.
     ///
     /// The answer is about *the download*, and the plan's own finer vocabulary is
@@ -1548,6 +1677,39 @@ mod tests {
         assert!(
             left_behind,
             "a file nobody named must still be where it was"
+        );
+    }
+
+    /// A file under a date subdirectory moves with its subdirectory.
+    #[test]
+    fn a_file_in_a_date_subdirectory_moves_with_its_subdirectory() {
+        let root = scratch("move-subdir");
+        let target = empty(&root, "now");
+        let older = empty(&root, "before");
+        std::fs::create_dir_all(older.join("20260930")).expect("the date directory");
+        std::fs::write(older.join("20260930/三角洲行动-30.mp4"), b"0123456789")
+            .expect("a downloaded file");
+
+        let report = move_files(
+            &[target.clone(), older.clone()],
+            &target,
+            &names(&["20260930/三角洲行动-30.mp4"]),
+        )
+        .expect("a move");
+
+        let moved = std::fs::read(target.join("20260930/三角洲行动-30.mp4")).ok();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            report.moved,
+            names(&["20260930/三角洲行动-30.mp4"]),
+            "{:?}",
+            report.failures
+        );
+        assert_eq!(
+            moved.as_deref(),
+            Some(&b"0123456789"[..]),
+            "the file came with its subdirectory"
         );
     }
 
