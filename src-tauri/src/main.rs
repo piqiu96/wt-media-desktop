@@ -242,6 +242,12 @@ fn main() {
             // the save directory: it names a place to look in, and new downloads
             // keep going where `save_dir` already points.
             commands::downloads::local_pick_search_directory,
+            // T-17's reveal, appended for the same reason as the twenty above.
+            // `local_open_saved_file` hands the file to whatever plays it; this
+            // opens the folder it is in. It takes a **name** for the same reason
+            // that one does, and it opens a directory rather than the file, so it
+            // adds no way for the page to reach a path of its own choosing.
+            commands::downloads::local_reveal_saved_file,
         ])
         .plugin(tauri_plugin_shell::init())
         // The folder picker. Registered next to the shell plugin rather than

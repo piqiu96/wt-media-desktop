@@ -103,8 +103,27 @@ fn place_of(label: &str) -> Result<Place, String> {
 
 /// Hand one directory to the platform's file manager.
 ///
+/// The wheel: `open` handles the three platforms' differences (the `open`
+/// binary, `explorer`, `xdg-open`) rather than a `match` of our own that no test
+/// on this machine could check beyond the one arm it runs.
+///
+/// Split out of [`reveal`] because it is the whole of what a page asking for a
+/// **downloaded** file's folder needs (`commands::downloads::local_reveal_saved_file`),
+/// and that command has no 「还不存在」refusal to make: the directory it opens is
+/// the one a file was just found in. Two copies of the `open::that` line would be
+/// two answers to 「这台机器怎么打开文件夹」.
+pub(crate) fn open_directory(directory: &Path) -> Result<(), String> {
+    open::that(directory).map_err(|error| format!("无法打开 {}：{error}", directory.display()))
+}
+
+/// Hand one of this app's own folders to the file manager, refusing one that is
+/// not there.
+///
 /// Returns the directory it opened, so the page can say which one — the same
-/// 「报告做成了什么」rule the cleanup and export commands follow.
+/// 「报告做成了什么」rule the cleanup and export commands follow. The `is_dir`
+/// check is this module's, not [`open_directory`]'s: a log tree or the data root
+/// that does not exist yet is a state the page has a sentence for, while a
+/// directory a download was just found in cannot be missing.
 fn reveal(directory: &Path) -> Result<String, String> {
     if !directory.is_dir() {
         return Err(format!(
@@ -112,10 +131,7 @@ fn reveal(directory: &Path) -> Result<String, String> {
             directory.display()
         ));
     }
-    // The wheel: `open` handles the three platforms' differences (the `open`
-    // binary, `explorer`, `xdg-open`) rather than a `match` of our own that no
-    // test on this machine could check beyond the one arm it runs.
-    open::that(directory).map_err(|error| format!("无法打开 {}：{error}", directory.display()))?;
+    open_directory(directory)?;
     Ok(directory.display().to_string())
 }
 

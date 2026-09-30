@@ -58,11 +58,11 @@ use crate::dto::{
 use crate::http::LocalAgentClient;
 use crate::saved_files::find_in_known;
 use crate::state::RuntimeBinding;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use super::{bind, settings};
+use super::{bind, reveal, settings};
 
 /// What Desktop posts to the Agent's save-directory route.
 ///
@@ -348,6 +348,47 @@ pub fn local_open_saved_file(name: String) -> Result<String, String> {
     let found = find_in_known(&places.search, &name)?;
     open::that(&found).map_err(|error| format!("无法打开 {}：{error}", found.display()))?;
     Ok(found.display().to_string())
+}
+
+/// The folder a downloaded file is in, or a refusal to open something else.
+///
+/// `find_in_known` joins the name onto a directory it was matched in, so the
+/// parent is that directory — the answer 「这份东西在哪个文件夹里」 is derived
+/// from the match rather than from the page, which is the same rule as the read
+/// commands: the page never names a location.
+///
+/// The empty arm is this function's own contract rather than a state the caller
+/// can reach today: a name with no directory above it would make `open::that`
+/// open the process's working directory, and 「打开一个我没打算打开的文件夹」is
+/// worth one comparison to rule out. See the T-17 evidence.
+fn containing_dir(found: &Path) -> Result<&Path, String> {
+    found
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| format!("{} 没有所在目录", found.display()))
+}
+
+/// Open the **directory** a downloaded file is in.
+///
+/// `local_open_saved_file` hands the file to whatever plays it; this shows where
+/// it is — the two questions the download centre already tells apart (「文件还在
+/// 原来的保存位置」). Same rule as that command, and the reason neither takes a
+/// path: a **name**, matched in every save directory this machine has used.
+///
+/// The directory, not the file selected with it: 「在文件管理器里选中这个文件」 is
+/// a per-platform flag (`open -R`, `/select,`, the `FileManager1` interface), and
+/// `bundle.targets` is `all` — see [`reveal::open_directory`], the wheel this repo
+/// already uses for the file manager.
+///
+/// The spawn is the untestable half, as in `commands::reveal`. Everything up to it
+/// is `find_in_known` (tested in `saved_files`) and [`containing_dir`], tested here.
+#[tauri::command]
+pub fn local_reveal_saved_file(name: String) -> Result<String, String> {
+    let places = settings::save_places()?;
+    let found = find_in_known(&places.search, &name)?;
+    let directory = containing_dir(&found)?;
+    reveal::open_directory(directory)?;
+    Ok(directory.display().to_string())
 }
 
 #[cfg(test)]
@@ -851,6 +892,63 @@ mod tests {
         );
     }
 
+    /// The folder the file was found in — taken from the match, not from the page.
+    ///
+    /// A name that looks like a path is just a path segment here: the page never
+    /// names a location, so whatever the executor wrote is joined onto the known
+    /// directory and this reads the directory back off that join.
+    #[test]
+    fn the_directory_is_the_one_the_file_was_found_in() {
+        let found = PathBuf::from("/Volumes/Movies/WTMedia/演示素材-42.mp4");
+        assert_eq!(
+            containing_dir(&found).expect("a directory above it"),
+            Path::new("/Volumes/Movies/WTMedia")
+        );
+
+        let spots = PathBuf::from("/Volumes/Movies/我的 视频/a b.mp4");
+        assert_eq!(
+            containing_dir(&spots).expect("a directory above it"),
+            Path::new("/Volumes/Movies/我的 视频")
+        );
+    }
+
+    /// A path with nothing above it is refused rather than handed to the opener.
+    ///
+    /// This arm is a contract of this function rather than a state
+    /// `find_in_known` can return today (it joins onto a directory it matched),
+    /// and it is the comparison that keeps 「打开文件所在目录」from becoming
+    /// 「打开这个进程当时所在的目录」: `open::that` on a path with an empty parent
+    /// opens the working directory.
+    #[test]
+    fn a_path_with_nothing_above_it_is_refused() {
+        let error = containing_dir(Path::new("a.mp4")).expect_err("nothing above it");
+
+        assert!(error.contains("没有所在目录"), "{error}");
+        assert!(error.contains("a.mp4"), "{error}");
+    }
+
+    /// The one line that cannot be tested: the spawn.
+    ///
+    /// **Not run**: this asserts the branch that opens a window, and it is
+    /// `#[ignore]`d for that reason — the same boundary and the same shape as
+    /// `commands::reveal`'s `reveal_opens_a_directory_that_is_there`. Run it by
+    /// hand with `cargo test -- --ignored reveal_saved_file`.
+    #[test]
+    #[ignore = "opens a Finder window on the machine that runs it"]
+    fn reveal_saved_file_opens_the_directory_the_file_is_in() {
+        let root =
+            std::env::temp_dir().join(format!("wt-media-reveal-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let file = root.join("演示素材-42.mp4");
+        std::fs::write(&file, b"a file to find").expect("a file to find");
+
+        let directory = containing_dir(&file).expect("the scratch directory");
+        reveal::open_directory(directory).expect("this machine has a file manager");
+
+        assert_eq!(directory, root);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Every command this module declares is registered, and no others are.
     ///
     /// A `#[tauri::command]` that nobody put in `generate_handler!` compiles,
@@ -921,7 +1019,7 @@ mod tests {
         );
         assert_eq!(
             declared.len(),
-            4,
+            5,
             "the denominator, measured here: {declared:?}"
         );
     }
