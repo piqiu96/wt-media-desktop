@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "WT Media",
         "width": 1280,
-        "height": 800
+        "height": 800,
+        "create": false
       }
     ],
     "security": {}

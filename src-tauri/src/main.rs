@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod diagnostic;
 mod dto;
+mod external_links;
 mod filesystem;
 mod http;
 mod local_agent;
@@ -165,7 +166,7 @@ fn main() {
         .manage(OperationId::default())
         .manage(RuntimeBindingState::default())
         .manage(SidecarLog::default())
-        .setup(|_app| {
+        .setup(|app| {
             // WebView 报错转发的注册点在**前端**（`web/src/apps/desktop/webviewErrors.js`），
             // 不在这里用 `window.eval`。
             //
@@ -174,6 +175,20 @@ fn main() {
             // 原生端因此一行报错都看不到（2026-09-23 实测确认）。
             // 前端入口本身就是 'self' 加载的脚本，不受该限制；这样也无需为了
             // 日志给 CSP 开 'unsafe-eval'。落点仍是下方 `log_js_error`。
+            //
+            // The window is built here rather than declared, because the new
+            // window handler has to be on its builder and `tauri.conf.json`'s
+            // declaration is built before this closure runs. It is the same
+            // window — `"create": false` only takes it out of Tauri's loop; see
+            // `external_links`' header. A launch that got this far without a
+            // window would be an app that looks hung, so a failure here is
+            // taken rather than swallowed: it arrives as `Error::Setup`, which
+            // is what `build`'s `.expect` below reports.
+            //
+            // Nothing is logged from here: the sink is installed after
+            // `build` returns, which is why the launch summary is the first
+            // record in `desktop.log`.
+            external_links::install(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
