@@ -35,7 +35,26 @@
 //! [`install`] rebuilds it with `WebviewWindowBuilder::from_config` — the very
 //! call that loop makes — so title, size and label all still come from one place.
 //!
-//! ## The line that cannot be tested here
+//! ## The preference this had to turn on
+//!
+//! A new window request is only the *first* gate. WebKit asks a second question
+//! — did the script have a user gesture? — and `javaScriptCanOpenWindowsAutomatically`,
+//! which wry sets on Android alone (`wry-0.55.1/src/android/kotlin/RustWebView.kt:26`),
+//! is left at WKWebView's default **false** here. Without it a `window.open`
+//! issued after an `await` never reaches the handler at all, because the
+//! activation a click grants does not survive the round trip: measured on
+//! macOS 25.4 with this shell's own delegate (see the task-27 evidence), an
+//! open 250 ms after the click arrives and one at 1000 ms does not. The
+//! drawer's address comes from a request, so leaving this shut would make the
+//! button a sub-second race rather than a mechanism.
+//!
+//! So the main window is built from a configuration with the preference on
+//! ([`webview_configuration`]). It buys nothing on its own: every request still
+//! goes through [`install`]'s handler, which denies the in-app window and hands
+//! on `http`/`https` alone. What it changes is that the page can *ask* without a
+//! gesture, which is what a page whose link is fetched asynchronously needs.
+//!
+//! ## The lines that cannot be tested here
 //!
 //! [`install`] hands an address to the platform's opener through the `open`
 //! crate. Whether the browser then comes to the front is not something a test can
@@ -43,6 +62,13 @@
 //! the suite. So the tested half is the decision — which addresses are handed
 //! over and which are refused — and the spawn itself is checked by hand on this
 //! machine, the same split `commands::reveal` registers.
+//!
+//! [`webview_configuration`] is the same kind of line and is untestable for a
+//! plainer reason: a `WKWebViewConfiguration` may only be made on the main
+//! thread, and libtest runs every test on a thread of its own. What the
+//! preference then *does* was measured against WKWebView directly (task 27,
+//! evidence) and is checked again on every acceptance run, by clicking the
+//! button.
 //!
 //! Nothing here records the address. A prepared material's video URL is a signed
 //! grant: it is a credential, and `logging::targets` would file it under a target
@@ -88,8 +114,8 @@ fn hands_to_the_system_browser(url: &Url) -> bool {
 /// leave a launch with no window at all.
 pub fn install(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
     let config = window_config(app)?;
-    let window = WebviewWindowBuilder::from_config(app, &config)?
-        .on_new_window(|url, _features| {
+    let builder =
+        WebviewWindowBuilder::from_config(app, &config)?.on_new_window(|url, _features| {
             if hands_to_the_system_browser(&url) {
                 // Dropped rather than reported: the request has already been
                 // answered by the `Deny` below, so there is no channel left to
@@ -98,9 +124,48 @@ pub fn install(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Err
                 let _ = open::that(url.as_str());
             }
             NewWindowResponse::Deny
-        })
-        .build()?;
+        });
+    // The page's second gate; see `webview_configuration` and the module header.
+    #[cfg(target_os = "macos")]
+    let builder = builder.with_webview_configuration(webview_configuration()?);
+    let window = builder.build()?;
     Ok(window)
+}
+
+/// The webview configuration this shell builds the main window from.
+///
+/// One preference away from what wry would have made anyway
+/// (`wry-0.55.1/src/wkwebview/mod.rs:206`: the caller's configuration is the
+/// base, and nothing here replaces it afterwards), because
+/// [`WebviewWindowBuilder::with_webview_configuration`] is the only way to reach
+/// a `WKWebViewConfiguration` before the webview exists. Handing over a
+/// configuration is otherwise free: wry only *reads* its preferences
+/// (`mod.rs:315`) and adds its own handlers to it, and this app sets no
+/// `data_store_identifier` that a fresh configuration could drop.
+///
+/// Refused rather than defaulted when the caller is not the main thread: making
+/// one elsewhere is an `objc2` violation, and a window that silently arrived
+/// without the preference would put 「打开云端视频」back to the race the module
+/// header describes.
+#[cfg(target_os = "macos")]
+fn webview_configuration(
+) -> Result<objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>, Box<dyn std::error::Error>>
+{
+    use objc2::MainThreadMarker;
+    use objc2_web_kit::WKWebViewConfiguration;
+
+    let main_thread =
+        MainThreadMarker::new().ok_or("the main window is being built off the main thread")?;
+    // Safety: the marker above proves this is the main thread, which is the
+    // configuration's `MainThreadOnly` precondition; `preferences()` hands back a
+    // live `WKPreferences` for it, retained as long as the configuration is.
+    let configuration = unsafe { WKWebViewConfiguration::new(main_thread) };
+    unsafe {
+        configuration
+            .preferences()
+            .setJavaScriptCanOpenWindowsAutomatically(true);
+    }
+    Ok(configuration)
 }
 
 /// The declaration this module builds the window from.

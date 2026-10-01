@@ -108,6 +108,23 @@ open = "5"
 # macOS hazard this avoids.
 tauri-plugin-dialog = "2"
 
+# macOS only, and for one line: the main window's webview configuration, which is
+# where `javaScriptCanOpenWindowsAutomatically` has to be set for a page to raise
+# a new window request that does not have a user gesture behind it (see
+# `external_links`). `WebviewWindowBuilder::with_webview_configuration` names
+# these types in its signature (tauri 2.11.5 `webview/webview_window.rs:1341`), so
+# they have to be namable here. Both crates are already in the lockfile as
+# tauri's own dependencies -- 0.6.4 and 0.3.2 -- which is what keeps this from
+# adding a crate to the graph; the feature list mirrors tauri's own
+# (`tauri-2.11.5/Cargo.toml:389`) except for `WKPreferences`, which tauri does
+# not need and this shell does.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "WKWebViewConfiguration",
+    "WKPreferences",
+] }
+
 # The same `tauri` the app already depends on, with one feature turned on, and
 # **only in test builds**: `test` is what exposes `tauri::test::mock_app`, whose
 # `MockRuntime` runs the real `tauri-plugin-shell` spawn path. That is what lets
