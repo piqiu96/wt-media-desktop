@@ -26,6 +26,8 @@ pub struct BindResponse {
 pub struct BindSessionArgs {
     pub binding_ticket: String,
     pub cloud_base_url: String,
+    #[serde(default)]
+    pub bind_device: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -38,6 +40,10 @@ pub struct RegisterLocalNodeRequest {
     pub binding_token: String,
     pub agent_id: String,
     pub device_id: String,
+    pub device_public_key: String,
+    pub device_signature: String,
+    pub device_name: String,
+    pub bind_device: bool,
     pub agent_version: String,
     pub contract_major_version: String,
     pub contract_revision: String,

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="起飞">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#1457e8"/><stop offset=".58" stop-color="#258bff"/><stop offset="1" stop-color="#5acbff"/></linearGradient>
+    <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#b6eaff"/><stop offset="1" stop-color="#fff"/></linearGradient>
+    <clipPath id="clip"><rect x="4" y="4" width="120" height="120" rx="32"/></clipPath>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect x="4" y="4" width="120" height="120" rx="32" fill="url(#sky)"/>
+    <path d="M-8 126C25 104 43 83 60 57L69 75C52 100 35 118 23 136Z" fill="#79c9ff" opacity=".85"/>
+    <path d="M18 133C49 108 58 82 69 60L75 77C68 103 57 124 49 140Z" fill="url(#trail)" opacity=".9"/>
+    <path d="M-4 92C26 90 45 76 63 56L65 67C43 91 23 105-4 110Z" fill="#d9f5ff" opacity=".65"/>
+    <path d="M35 51 106 27c4-1 7 2 6 6L89 106c-1 5-7 6-9 1L68 77 35 59c-5-2-5-6 0-8Z" fill="#fff"/>
+    <path d="M68 77 93 45 55 70Z" fill="#caeaff"/>
+    <path d="M68 77 80 107c1 3 4 4 6 3l-3-37Z" fill="#e5f6ff"/>
+  </g>
+</svg>
