@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "起飞 · 内容运营平台",
         "width": 1280,
-        "height": 800
+        "height": 800,
+        "create": false
       }
     ],
     "security": {}

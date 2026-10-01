@@ -5333,6 +5333,8 @@ dependencies = [
  "file-rotate",
  "flate2",
  "hex",
+ "objc2",
+ "objc2-web-kit",
  "open",
  "reqwest 0.12.28",
  "ring",
