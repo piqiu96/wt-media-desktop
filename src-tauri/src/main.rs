@@ -11,6 +11,7 @@ mod cleanup;
 mod commands;
 mod config;
 mod diagnostic;
+mod device_identity;
 mod dto;
 mod filesystem;
 mod http;
@@ -185,6 +186,7 @@ fn main() {
             commands::bind::local_agent_bind,
             commands::bind::local_agent_bind_session,
             commands::bind::local_agent_refresh_runtime,
+            device_identity::local_device_identity,
             commands::account::local_agent_account_check,
             commands::account::local_agent_cookie_read,
             commands::profile::local_agent_profile_scan,

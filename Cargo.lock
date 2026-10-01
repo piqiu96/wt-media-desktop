@@ -5328,12 +5328,14 @@ dependencies = [
 name = "wt-media-desktop-shell"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "file-rotate",
  "flate2",
  "hex",
  "open",
  "reqwest 0.12.28",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

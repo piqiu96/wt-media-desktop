@@ -5,6 +5,7 @@ use crate::dto::{
     BindResponse, BindSessionArgs, CloudEnvelope, LocalAgentStatus, LocalErrorBody,
     RefreshRuntimeArgs, RegisterLocalNodeRequest, RegisterLocalNodeResponse,
 };
+use crate::device_identity::DeviceIdentity;
 use crate::http::{CloudClient, LocalAgentClient};
 use crate::local_agent::BoundNodeFacts;
 use crate::preflight::{self, NO_BINDING_REFRESH, NO_CLOUD_ADDRESS_BIND, NO_CLOUD_ADDRESS_REFRESH};
@@ -104,6 +105,7 @@ pub(crate) async fn bind_node(
 /// back to Cloud. The credential is never returned to Vue.
 #[tauri::command]
 pub async fn local_agent_bind_session(
+    app: tauri::AppHandle,
     client: State<'_, LocalAgentClient>,
     cloud: State<'_, CloudClient>,
     binding_state: State<'_, RuntimeBindingState>,
@@ -119,17 +121,23 @@ pub async fn local_agent_bind_session(
     let status = local_agent_status(client.clone()).await?;
     preflight::require_verified_bitbrowser(&status)?;
 
+    let device = DeviceIdentity::for_app(&app)?;
+
     let register_url = format!("{}/api/v1/local-agent/nodes/register", cloud_base_url);
     let register_payload = RegisterLocalNodeRequest {
         binding_token: binding_ticket,
         agent_id: status.agent_id.clone(),
-        device_id: "desktop-local-device".into(),
+        device_id: device.device_id.clone(),
+        device_public_key: device.public_key(),
+        device_signature: device.sign_ticket(&binding_ticket),
+        device_name: device.device_name.clone(),
+        bind_device: args.bind_device,
         agent_version: status
             .agent_version
             .clone()
             .unwrap_or_else(|| "0.2.2".into()),
         contract_major_version: "v1".into(),
-        contract_revision: "2026.07.15.1".into(),
+        contract_revision: "2026.10.01.1".into(),
     };
     let register_resp = cloud
         .post(&register_url)

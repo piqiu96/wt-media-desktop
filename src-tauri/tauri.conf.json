@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WT Media",
+  "productName": "起飞",
   "version": "0.1.0",
   "identifier": "com.wtmedia.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "WT Media",
+        "title": "起飞 · 内容运营平台",
         "width": 1280,
         "height": 800
       }
@@ -21,6 +21,7 @@
   },
   "bundle": {
     "active": true,
+    "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "targets": "all",
     "externalBin": ["binaries/wt-media-agent"],
     "resources": ["resources/*.toml"],
