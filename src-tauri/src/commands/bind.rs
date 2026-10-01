@@ -1,11 +1,11 @@
 //! The bind flow: a one-use Cloud ticket becomes a Cloud node registration,
 //! then a Local Agent node write, then a runtime-fact report.
 
+use crate::device_identity::DeviceIdentity;
 use crate::dto::{
     BindResponse, BindSessionArgs, CloudEnvelope, LocalAgentStatus, LocalErrorBody,
     RefreshRuntimeArgs, RegisterLocalNodeRequest, RegisterLocalNodeResponse,
 };
-use crate::device_identity::DeviceIdentity;
 use crate::http::{CloudClient, LocalAgentClient};
 use crate::local_agent::BoundNodeFacts;
 use crate::preflight::{self, NO_BINDING_REFRESH, NO_CLOUD_ADDRESS_BIND, NO_CLOUD_ADDRESS_REFRESH};
@@ -124,12 +124,16 @@ pub async fn local_agent_bind_session(
     let device = DeviceIdentity::for_app(&app)?;
 
     let register_url = format!("{}/api/v1/local-agent/nodes/register", cloud_base_url);
+    // Signed before `binding_token` moves the ticket into the payload: the
+    // message the device proves ownership of is the ticket itself, so the
+    // signature has to be computed while it is still borrowable.
+    let device_signature = device.sign_ticket(&binding_ticket);
     let register_payload = RegisterLocalNodeRequest {
         binding_token: binding_ticket,
         agent_id: status.agent_id.clone(),
         device_id: device.device_id.clone(),
         device_public_key: device.public_key(),
-        device_signature: device.sign_ticket(&binding_ticket),
+        device_signature,
         device_name: device.device_name.clone(),
         bind_device: args.bind_device,
         agent_version: status
