@@ -197,7 +197,7 @@ impl Location {
             return if self.bundled {
                 Err(format!(
                     "随应用的 Local Agent 校验失败：包内缺少记录文件 {}。\
-                     这个安装包不完整，请重新安装完整的 WT Media 安装包。",
+                     这个安装包不完整，请重新安装完整的起飞安装包。",
                     self.manifest.display()
                 ))
             } else {
@@ -210,7 +210,7 @@ impl Location {
             return Err(format!(
                 "随应用的 Local Agent 校验失败：{} 的 SHA-256 与包内记录不一致\
                  （记录 {}，实际 {}）。这个文件已被替换或损坏，\
-                 请重新安装完整的 WT Media 安装包。",
+                 请重新安装完整的起飞安装包。",
                 self.sidecar.display(),
                 manifest.sha256,
                 actual

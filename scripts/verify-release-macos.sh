@@ -14,7 +14,11 @@ case "$(uname -m)" in
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 version="$(cd "$DESKTOP_DIR" && node -p 'require("./src-tauri/tauri.conf.json").version')"
-dmg_path="$DESKTOP_DIR/target/release/bundle/dmg/WT Media_${version}_${artifact_arch}.dmg"
+# Both halves of the DMG's name come from tauri.conf.json, which is also what
+# build-release-macos.sh names it after: a rename must not turn into "Expected DMG
+# is missing" for a DMG that was just built.
+app_name="$(cd "$DESKTOP_DIR" && node -p 'require("./src-tauri/tauri.conf.json").productName')"
+dmg_path="$DESKTOP_DIR/target/release/bundle/dmg/${app_name}_${version}_${artifact_arch}.dmg"
 if [[ ! -f "$dmg_path" ]]; then
   echo "Expected DMG is missing: $dmg_path" >&2
   exit 1
@@ -27,7 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT
 hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path" >/dev/null
-codesign --verify --deep --strict --verbose=2 "$mount_dir/WT Media.app"
+codesign --verify --deep --strict --verbose=2 "$mount_dir/$app_name.app"
 
 # The Agent's configuration, checked in the artifact rather than in the source
 # tree (ADR-0016 §6: `config_online/` reaches the product as `产物/config`, and
@@ -38,7 +42,7 @@ codesign --verify --deep --strict --verbose=2 "$mount_dir/WT Media.app"
 # step it lost.
 root_dir="$(cd "$DESKTOP_DIR/.." && pwd)"
 agent_config_dir="$root_dir/wt-media-agent/config_online"
-product_config_dir="$mount_dir/WT Media.app/Contents/Resources/config"
+product_config_dir="$mount_dir/$app_name.app/Contents/Resources/config"
 expected_files="$(find "$agent_config_dir" -type f | wc -l | tr -d ' ')"
 if [[ "$expected_files" -eq 0 ]]; then
   echo "config_online/ carries no files, so a mirror of it would prove nothing: $agent_config_dir" >&2
@@ -59,6 +63,6 @@ echo "Agent configuration in the DMG is a ${expected_files}-file mirror of confi
 # source tree: `--verify` recomputes the digest of the mounted app's resources and
 # compares it with the record the app carries, so a DMG assembled from a tree that
 # moved on after the build says so here instead of after installation.
-bash "$SCRIPT_DIR/release-versions.sh" --verify "$mount_dir/WT Media.app"
+bash "$SCRIPT_DIR/release-versions.sh" --verify "$mount_dir/$app_name.app"
 
 echo "macOS DMG contains a complete ad-hoc-signed app: $dmg_path"

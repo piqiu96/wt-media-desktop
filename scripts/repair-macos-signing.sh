@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_PATH="${1:?usage: repair-macos-signing.sh /path/to/WT Media.app}"
+APP_PATH="${1:?usage: repair-macos-signing.sh /path/to/App.app}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIDECAR_PATH="$APP_PATH/Contents/MacOS/wt-media-agent"

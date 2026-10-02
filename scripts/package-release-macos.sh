@@ -51,7 +51,8 @@ case "$(uname -m)" in
 esac
 
 VERSION="$(node -p 'require(process.argv[1]).version' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
-PACKAGE_NAME="WT-Media_${VERSION}_macos-${ARTIFACT_ARCH}"
+APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
+PACKAGE_NAME="${APP_NAME}_${VERSION}_macos-${ARTIFACT_ARCH}"
 PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
 ARCHIVE_PATH="$OUTPUT_DIR/$PACKAGE_NAME.zip"
 
@@ -70,8 +71,8 @@ fi
 cd "$DESKTOP_DIR"
 bash "$SCRIPT_DIR/build-release-macos.sh"
 
-APP_PATH="$DESKTOP_DIR/target/release/bundle/macos/WT Media.app"
-DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/WT Media_${VERSION}_${ARTIFACT_ARCH}.dmg"
+APP_PATH="$DESKTOP_DIR/target/release/bundle/macos/$APP_NAME.app"
+DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/${APP_NAME}_${VERSION}_${ARTIFACT_ARCH}.dmg"
 SIDECAR_MANIFEST="$DESKTOP_DIR/target/sidecar-manifest.json"
 for required in "$APP_PATH" "$DMG_PATH" "$SIDECAR_MANIFEST"; do
   [[ -e "$required" ]] || { echo "release build omitted required artifact: $required" >&2; exit 1; }
@@ -88,13 +89,13 @@ SIDECAR_PATH="$APP_PATH/Contents/MacOS/wt-media-agent"
 [[ -f "$SIDECAR_PATH" ]] || { echo "packaged app is missing Local Agent sidecar built from: $SIDECAR_BUILD_FILENAME" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR" "$PACKAGE_DIR"
-cp -R "$APP_PATH" "$PACKAGE_DIR/WT Media.app"
+cp -R "$APP_PATH" "$PACKAGE_DIR/$APP_NAME.app"
 cp "$DMG_PATH" "$PACKAGE_DIR/$(basename "$DMG_PATH")"
 cp "$SIDECAR_MANIFEST" "$PACKAGE_DIR/agent-build-manifest.json"
-codesign --verify --deep --strict --verbose=2 "$PACKAGE_DIR/WT Media.app"
+codesign --verify --deep --strict --verbose=2 "$PACKAGE_DIR/$APP_NAME.app"
 
-PACKAGED_SIDECAR="$PACKAGE_DIR/WT Media.app/Contents/MacOS/wt-media-agent"
-PACKAGED_MANIFEST="$PACKAGE_DIR/WT Media.app/Contents/Resources/sidecar-manifest.json"
+PACKAGED_SIDECAR="$PACKAGE_DIR/$APP_NAME.app/Contents/MacOS/wt-media-agent"
+PACKAGED_MANIFEST="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/sidecar-manifest.json"
 [[ -f "$PACKAGED_MANIFEST" ]] || { echo "the packaged app carries no sidecar record: $PACKAGED_MANIFEST" >&2; exit 1; }
 PACKAGED_SIDECAR_SHA="$(node -p 'require(process.argv[1]).sha256' "$PACKAGED_MANIFEST")"
 
@@ -120,11 +121,11 @@ VERSIONS_RECORD="$APP_PATH/Contents/Resources/versions.json"
 cp "$VERSIONS_RECORD" "$PACKAGE_DIR/versions.json"
 
 printf '%s\n' \
-  "WT Media ${VERSION} for macOS ${ARTIFACT_ARCH}" \
+  "${APP_NAME} ${VERSION} for macOS ${ARTIFACT_ARCH}" \
   '' \
   'Install using either artifact:' \
-  '- Open the DMG and drag WT Media.app to Applications.' \
-  '- Or copy the included WT Media.app directly.' \
+  "- Open the DMG and drag $APP_NAME.app to Applications." \
+  "- Or copy the included $APP_NAME.app directly." \
   '' \
   'The package embeds a native Local Agent sidecar. No customer Python installation is required.' \
   'The app is ad-hoc signed; macOS may require the normal first-open unknown-developer confirmation.' \

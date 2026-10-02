@@ -588,7 +588,7 @@ pub fn summary(
 pub fn manifest(host: &HostFacts, logs: &Logs, failures: &Failures, created_at: &str) -> String {
     let caps = Caps::default();
     let mut out = String::new();
-    out.push_str("WT Media 诊断包（脱敏）\n");
+    out.push_str("起飞诊断包（脱敏）\n");
     out.push_str(&format!("生成时间: {created_at}\n"));
     out.push_str(&format!(
         "Desktop {}（构建 {}）/ 环境 {} / 配置来源 {}\n",

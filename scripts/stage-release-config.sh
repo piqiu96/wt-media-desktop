@@ -20,8 +20,8 @@ set -euo pipefail
 # The copy is wholesale and read back (`build_desktop_sidecar.py::sync_config`),
 # and `verify-release-macos.sh` re-checks it in the DMG against `config_online/`.
 #
-# usage: stage-release-config.sh "/path/to/WT Media.app"
-APP_PATH="${1:?usage: stage-release-config.sh /path/to/WT Media.app}"
+# usage: stage-release-config.sh "/path/to/App.app"
+APP_PATH="${1:?usage: stage-release-config.sh /path/to/App.app}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
