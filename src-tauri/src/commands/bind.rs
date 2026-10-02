@@ -118,7 +118,7 @@ pub async fn local_agent_bind_session(
     let cloud_base_url =
         preflight::require_cloud_base_url(&args.cloud_base_url, NO_CLOUD_ADDRESS_BIND)?;
 
-    let status = local_agent_status(client.clone()).await?;
+    let status = local_agent_status(client.clone(), None).await?;
     preflight::require_verified_bitbrowser(&status)?;
 
     let device = DeviceIdentity::for_app(&app)?;
@@ -221,7 +221,7 @@ pub async fn local_agent_refresh_runtime(
     let cloud_base_url =
         preflight::require_cloud_base_url(&args.cloud_base_url, NO_CLOUD_ADDRESS_REFRESH)?;
     let binding = preflight::require_binding(&binding_state, NO_BINDING_REFRESH)?;
-    let status = local_agent_status(client.clone()).await?;
+    let status = local_agent_status(client.clone(), None).await?;
     preflight::sync_runtime_facts(
         &cloud,
         &cloud_base_url,

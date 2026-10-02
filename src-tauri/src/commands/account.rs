@@ -27,7 +27,7 @@ pub async fn local_agent_account_check(
         return Err("账号检查参数不完整".into());
     }
     let binding = preflight::require_binding(&binding_state, NO_BINDING_SENSITIVE)?;
-    let status = local_agent_status(client.clone()).await?;
+    let status = local_agent_status(client.clone(), None).await?;
     preflight::sync_runtime_facts(
         &cloud,
         &cloud_base_url,
@@ -98,7 +98,7 @@ pub async fn local_agent_cookie_read(
         return Err("Cookie读取参数不完整".into());
     }
     let binding = preflight::require_binding(&binding_state, NO_BINDING_SENSITIVE)?;
-    let status = local_agent_status(client.clone()).await?;
+    let status = local_agent_status(client.clone(), None).await?;
     preflight::sync_runtime_facts(
         &cloud,
         &cloud_base_url,

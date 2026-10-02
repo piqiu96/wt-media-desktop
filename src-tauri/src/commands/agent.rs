@@ -185,12 +185,29 @@ fn failed(message: String, log: &SidecarLog, session: Option<&str>) -> String {
     message + &drain::summary(log)
 }
 
+/// The status path for a caller that may or may not accept a reused scan.
+///
+/// `reuse_scan` is the top bar's background tick asking the Agent for a verdict
+/// without paying for a fresh BitBrowser scan every time; the live scan stays
+/// the default so that everything acting on `main_user_id` — the bind flow and
+/// the runtime report — keeps reading a just-observed account id.
+fn status_path(reuse_scan: bool) -> &'static str {
+    if reuse_scan {
+        "/api/v1/status?scan=reuse"
+    } else {
+        "/api/v1/status"
+    }
+}
+
+/// `reuse_scan` is `None` for every caller but the top bar's background tick,
+/// which passes `Some(true)`; see `status_path`.
 #[tauri::command]
 pub async fn local_agent_status(
     client: State<'_, LocalAgentClient>,
+    reuse_scan: Option<bool>,
 ) -> Result<LocalAgentStatus, String> {
     let resp = client
-        .get("/api/v1/status")
+        .get(status_path(reuse_scan.unwrap_or(false)))
         .send()
         .await
         .map_err(|e| format!("agent unreachable: {}", e))?;
@@ -618,7 +635,7 @@ pub async fn local_agent_task_status(
     _task_id: String,
 ) -> Result<LocalAgentStatus, String> {
     // Report back the current overall status; task_id is validated server-side.
-    local_agent_status(client).await
+    local_agent_status(client, None).await
 }
 
 #[cfg(test)]
@@ -2008,5 +2025,17 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status request is live unless the caller explicitly says otherwise.
+    ///
+    /// `None` is what every existing `invoke('local_agent_status')` sends, and it
+    /// has to keep asking for a live scan: the account id in the answer is what
+    /// the bind flow and the runtime report act on. Only `Some(true)` — the top
+    /// bar's automatic tick — may ask the Agent to reuse a scan.
+    #[test]
+    fn only_an_explicit_reuse_scan_asks_for_a_cached_status() {
+        assert_eq!(status_path(false), "/api/v1/status");
+        assert_eq!(status_path(true), "/api/v1/status?scan=reuse");
     }
 }
