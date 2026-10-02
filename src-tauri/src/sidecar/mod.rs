@@ -53,6 +53,12 @@ pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String,
             "WT_MEDIA_AGENT_RUNTIME_TOKEN".to_string(),
             token.expose().to_string(),
         ),
+        // The sidecar's task loops are gated on this and default to off, so
+        // without it the app ships an Agent that serves status and claims
+        // nothing. It reaches only the bundled sidecar in practice: the Python
+        // fallback assembles `local_api.server`, which starts no loops at all
+        // and stays a status surface whichever way this is set.
+        ("WT_MEDIA_AGENT_RUN_RUNNER".to_string(), "true".to_string()),
     ];
     // Omitted rather than sent empty — see the test below for why the difference
     // matters to the Agent.
@@ -133,7 +139,7 @@ pub fn start<R: Runtime>(
     }
     Err(match attempt {
         Attempt::Refused(reason) => reason,
-        _ => "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的 WT Media 安装包。".into(),
+        _ => "未找到或无法启动随应用提供的 Local Agent。请重新安装完整的起飞安装包。".into(),
     })
 }
 
@@ -339,7 +345,7 @@ mod tests {
             vars.get("WT_MEDIA_AGENT_RUNTIME_TOKEN").map(String::as_str),
             Some(token.expose())
         );
-        assert_eq!(vars.len(), 3, "nothing else is sent: {vars:?}");
+        assert_eq!(vars.len(), 4, "nothing else is sent: {vars:?}");
     }
 
     /// An unset data directory is **omitted**, not sent empty.
@@ -361,6 +367,28 @@ mod tests {
                 .get("WT_MEDIA_AGENT_DATA_DIR")
                 .map(String::as_str),
             Some("/Users/example/agent-data")
+        );
+    }
+
+    /// The Agent is told to run its task loops, not only to serve status.
+    ///
+    /// `run_runner` gates `start_task_loops` (`bootstrap/sidecar.py`) and the
+    /// config the package ships keeps it false on purpose — "an Agent started by
+    /// hand or by a health check must not begin claiming tasks". The other half
+    /// of that rule is this variable: without it the bundled sidecar answers
+    /// status and reports in, and every download queued against this machine
+    /// sits `pending` forever next to a live executor. The environment is the
+    /// only per-launch channel for it; the packaged config is not rewritten.
+    #[test]
+    fn the_agent_is_told_to_run_its_task_loops() {
+        let config = config_with("127.0.0.1", 8765, None);
+        let token = RuntimeToken::generate();
+
+        assert_eq!(
+            as_map(&environment(&config, &token))
+                .get("WT_MEDIA_AGENT_RUN_RUNNER")
+                .map(String::as_str),
+            Some("true")
         );
     }
 
