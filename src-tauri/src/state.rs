@@ -1,11 +1,17 @@
 //! Native state managed by Tauri and read by the command modules.
 //!
 //! None of this reaches Vue. `RuntimeBinding` holds the Cloud node credential,
-//! which by design never leaves native memory: the bind command returns only
-//! `BoundNodeFacts`.
+//! which by design never enters the WebView: the bind command returns only
+//! `BoundNodeFacts`. It is persisted to native app data (0600, like the device
+//! key) so a Desktop restart can restore it without re-binding.
 
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 use tauri_plugin_shell::process::CommandChild;
 use uuid::Uuid;
 
@@ -78,16 +84,140 @@ impl OperationId {
 pub struct SidecarLog(pub Arc<Mutex<VecDeque<String>>>);
 #[derive(Default)]
 pub struct RuntimeBindingState(pub Mutex<Option<RuntimeBinding>>);
-#[derive(Clone, Debug)]
+
+impl RuntimeBindingState {
+    /// Persist the current binding (if any) to native app data.
+    ///
+    /// Called by the bind command after it replaces the in-memory binding. A
+    /// failure only degrades the next launch to "not bound" — the current run
+    /// keeps working — so it is logged, not propagated.
+    pub fn persist(&self, app: &tauri::AppHandle) {
+        let Some(binding) = self.0.lock().ok().and_then(|slot| slot.clone()) else {
+            return;
+        };
+        let directory = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(target: "desktop.binding", "resolve app data dir: {err}");
+                return;
+            }
+        };
+        if let Err(err) = write_binding(&directory, &binding) {
+            tracing::warn!(target: "desktop.binding", "persist binding: {err}");
+        }
+    }
+
+    /// Restore the persisted binding (if any) into native memory.
+    ///
+    /// Called once in `.setup()`, where an `AppHandle` exists (it does not at
+    /// `.manage()` time). Absence is not an error — it is an unbound machine —
+    /// and neither is a corrupt file: treat it as no binding rather than
+    /// refusing to start.
+    pub fn restore(&self, app: &tauri::AppHandle) {
+        let Ok(directory) = app.path().app_data_dir() else {
+            return;
+        };
+        if let Some(binding) = read_binding(&directory) {
+            if let Ok(mut slot) = self.0.lock() {
+                *slot = Some(binding);
+            }
+        }
+    }
+}
+
+/// A Cloud node credential, persisted beside `device-identity.pk8` with the
+/// same 0600 protection. Never serialized to the WebView.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeBinding {
     pub node_id: String,
     pub node_credential: String,
+}
+
+const BINDING_FILE: &str = "runtime-binding.json";
+
+/// Write the binding atomically (temp file + rename) so a crash mid-write
+/// cannot leave a truncated file that later reads as a binding. Mirror of the
+/// device-identity write path, including the 0600 mode on unix.
+fn write_binding(directory: &Path, binding: &RuntimeBinding) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|_| "无法创建应用数据目录".to_string())?;
+    let path = directory.join(BINDING_FILE);
+    let temp = directory.join(format!("{BINDING_FILE}.tmp"));
+    let json = serde_json::to_vec(binding).map_err(|_| "无法序列化运行绑定".to_string())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .map_err(|_| "无法安全写入运行绑定".to_string())?;
+    file.write_all(&json)
+        .map_err(|_| "无法写入运行绑定".to_string())?;
+    file.sync_all()
+        .map_err(|_| "无法保存运行绑定".to_string())?;
+    fs::rename(&temp, &path).map_err(|_| "无法完成运行绑定保存".to_string())?;
+    Ok(())
+}
+
+fn read_binding(directory: &Path) -> Option<RuntimeBinding> {
+    let json = fs::read(directory.join(BINDING_FILE)).ok()?;
+    serde_json::from_slice(&json).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// The binding written in one process must read back intact in the next —
+    /// that is the whole point of persistence — and the file must not be
+    /// world-readable. The unix mode is asserted because a credential file
+    /// that anyone can read is a credential that might as well not be
+    /// protected; on the platforms where 0600 is meaningful, it is the rule.
+    #[test]
+    fn a_binding_written_reads_back_with_0600_permissions() {
+        let directory =
+            std::env::temp_dir().join(format!("wt-media-binding-{}", uuid::Uuid::new_v4()));
+        let original = RuntimeBinding {
+            node_id: "node-1".into(),
+            node_credential: "credential-1".into(),
+        };
+        write_binding(&directory, &original).unwrap();
+
+        let restored = read_binding(&directory).expect("binding must survive restart");
+        assert_eq!(restored.node_id, original.node_id);
+        assert_eq!(restored.node_credential, original.node_credential);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(directory.join(BINDING_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "credential file must be 0600");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A machine that never bound, and a corrupt binding file, both read as
+    /// absence — never as an error that would block startup.
+    #[test]
+    fn a_missing_or_corrupt_binding_reads_as_absence() {
+        let directory =
+            std::env::temp_dir().join(format!("wt-media-binding-{}", uuid::Uuid::new_v4()));
+        assert!(read_binding(&directory).is_none(), "no file, no binding");
+
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(BINDING_FILE), b"not json").unwrap();
+        assert!(
+            read_binding(&directory).is_none(),
+            "corrupt file, no binding"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     /// Nothing is supervised until a start says so.
     #[test]

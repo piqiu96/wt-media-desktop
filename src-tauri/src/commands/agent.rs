@@ -335,11 +335,11 @@ async fn start<R: tauri::Runtime>(
         // omission. An Agent that is already running is one of two things, and
         // neither needs a re-push: an Agent **this** Desktop started, which was
         // offered both facts when it started; or an Agent that outlived a
-        // Desktop restart, where the caller has no credential to offer — it is
-        // in native memory (`state::RuntimeBindingState`) and died with the
-        // previous process — and the save directory is already in the Agent's
-        // own store, which outlives Desktop. Pushing here would either repeat
-        // what is held or announce a shape of the problem this launch cannot fix.
+        // Desktop restart, where the caller holds the same credential it does —
+        // restored into native memory from `runtime-binding.json` at startup —
+        // and the save directory is already in the Agent's own store, which
+        // outlives Desktop. Pushing here would either repeat what is held or
+        // announce a shape of the problem this launch cannot fix.
         Occupancy::Running => {
             already_running(session.current().as_deref());
             return Ok("already_running".into());

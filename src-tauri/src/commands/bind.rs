@@ -198,6 +198,11 @@ pub async fn local_agent_bind_session(
             node_id: registration.node.id.clone(),
             node_credential: registration.node_credential,
         });
+    // The node credential now outlives this process: it is written to native
+    // app data (0600) so a Desktop restart restores it and the Agent can keep
+    // authenticating without a re-bind. Failure only means the next launch
+    // starts unbound; the current run keeps the in-memory credential.
+    binding_state.persist(&app);
 
     Ok(BoundNodeFacts {
         id: registration.node.id,

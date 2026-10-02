@@ -190,6 +190,12 @@ fn main() {
             // `build` returns, which is why the launch summary is the first
             // record in `desktop.log`.
             external_links::install(app.handle())?;
+            // Restore the node credential persisted by a previous bind so the
+            // Agent can keep authenticating after a Desktop restart. It must
+            // happen here rather than at `.manage()`: resolving the app data
+            // directory needs an `AppHandle`, which does not exist yet when
+            // state is registered. Absence is an unbound machine, not an error.
+            app.state::<RuntimeBindingState>().restore(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
