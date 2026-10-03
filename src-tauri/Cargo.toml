@@ -65,12 +65,9 @@ tauri-plugin-single-instance = "2"
 # `unsafe` statvfs: this crate has no `unsafe` in it, and rustix's wrapper is the
 # same call with the layout differences already handled.
 #
-# `process` (CHG-059 T-03) adds the two calls the exit protocol is built on:
-# `kill_process` for the ask and `test_kill_process` for the liveness reading
-# between the ask and the deadline. It is **not** in rustix's default features --
-# `default = ["std"]` only -- so it is asked for here, and the `unsafe` argument
-# above carries over: `process/kill.rs` is a safe wrapper over `kill(2)`, and
-# this crate still contains no `unsafe` of its own.
+# `process` (CHG-059 T-03) adds the Unix calls behind the graceful Sidecar stop.
+# Rustix gates that module out on Windows, where the shell plugin's own handle
+# remains the force-stop path and Win32 supplies the liveness probe below.
 rustix = { version = "1", features = ["fs", "process"] }
 # The support bundle's container (CHG-058 T-07, ruling Q-06: `tar` + `flate2`).
 # `flate2` is already in the lockfile as a dependency of `png`; `tar` is new to
@@ -109,6 +106,15 @@ open = "5"
 # is allowed to reach. `rfd`'s synchronous API on a Tauri command thread is the
 # macOS hazard this avoids.
 tauri-plugin-dialog = "2"
+
+# Windows process liveness for the Sidecar stop window. The crate is already in
+# the lockfile as a Tauri dependency; making it direct only lets this shell name
+# `OpenProcess` and `GetExitCodeProcess` instead of guessing from an error code.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
 
 # macOS only, and for one line: the main window's webview configuration, which is
 # where `javaScriptCanOpenWindowsAutomatically` has to be set for a page to raise

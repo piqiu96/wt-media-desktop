@@ -13,7 +13,9 @@
 use crate::config::DesktopConfig;
 use crate::state::SidecarLog;
 use crate::token::RuntimeToken;
+#[cfg(unix)]
 use rustix::io::Errno;
+#[cfg(unix)]
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_shell::process::CommandChild;
@@ -223,6 +225,7 @@ pub(crate) fn spawn_verified<R: Runtime>(
 /// means "every process in my process group", so a zero reaching the kernel is
 /// not a pid that cannot be signalled — it is a request to signal everything
 /// this app is attached to. Refused here rather than passed on.
+#[cfg(unix)]
 fn as_pid(pid: u32) -> Result<Pid, String> {
     i32::try_from(pid)
         .ok()
@@ -232,7 +235,7 @@ fn as_pid(pid: u32) -> Result<Pid, String> {
 
 /// Ask the sidecar to stop: `SIGTERM`, and nothing more.
 ///
-/// The counterpart of [`force`], and the first half of the exit protocol
+/// The counterpart of [`force`], and the first half of the Unix exit protocol
 /// (CHG-059 T-03). `SIGTERM` is what the Agent answers — `local_api.server.serve`
 /// installs a handler for it, stops accepting and waits for the requests already
 /// in flight — so once this returns `Ok`, the process has been asked to leave by
@@ -247,20 +250,27 @@ fn as_pid(pid: u32) -> Result<Pid, String> {
 /// An `Err` here is usually not a failure of the stop: it is `ESRCH`, the
 /// process already being gone — which is an outcome the caller should read as
 /// "nothing to wait for", not as "the ask did not work".
+#[cfg(unix)]
 pub fn ask(pid: u32) -> Result<(), String> {
     kill_process(as_pid(pid)?, Signal::TERM).map_err(|e| format!("agent stop failed: {}", e))
 }
 
+/// Windows has no pid-only equivalent of SIGTERM. Return an `Err` rather than
+/// pretending to have asked gracefully; the caller treats this as non-fatal and
+/// still uses the held `CommandChild` for the deadline force stop.
+#[cfg(windows)]
+pub fn ask(pid: u32) -> Result<(), String> {
+    Err(format!(
+        "agent pid {pid} has no graceful Windows stop; the force path will run"
+    ))
+}
+
 /// Is there still a process at `pid`?
 ///
-/// `kill(pid, 0)` — the existence probe, which sends nothing. Used between the
-/// ask and the deadline, so the reading is "it obeyed" rather than "enough time
-/// passed".
-///
-/// The one subtlety is the error that is not a "no": `EPERM` means the process
-/// exists and is not ours to signal, which is still an answer of "there is
-/// something there". Every other error is read as absent, `ESRCH` — the process
-/// is gone — being the one that actually occurs.
+/// On Unix this is `kill(pid, 0)`. On Windows it opens the process for limited
+/// query access and checks that the exit code is still `STILL_ACTIVE`. Used
+/// between the ask and the deadline, so the reading is "it obeyed" rather than
+/// "enough time passed".
 ///
 /// **Known limit, and it is the caller's to bound**: a pid is only unique among
 /// the processes alive at one moment. If this one exits and the kernel hands its
@@ -268,6 +278,7 @@ pub fn ask(pid: u32) -> Result<(), String> {
 /// stranger, and the deadline ends in [`force`] killing something Desktop never
 /// started. Not defended against here — the window is seconds and the id space
 /// is large — but it is why the caller's deadline is short and fixed.
+#[cfg(unix)]
 pub fn alive(pid: u32) -> bool {
     let Ok(pid) = as_pid(pid) else {
         return false;
@@ -276,6 +287,32 @@ pub fn alive(pid: u32) -> bool {
         Ok(()) => true,
         Err(Errno::PERM) => true,
         _ => false,
+    }
+}
+
+#[cfg(windows)]
+pub fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return false;
+    }
+
+    // SAFETY: the handle comes from and is consumed by Win32. `exit_code` is a
+    // plain out-parameter, and every successful open is closed on this path.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+
+        let mut exit_code = 0;
+        let readable = GetExitCodeProcess(process, &mut exit_code);
+        CloseHandle(process);
+        readable != 0 && exit_code == STILL_ACTIVE as u32
     }
 }
 
@@ -299,8 +336,11 @@ mod tests {
     use super::*;
     use crate::config::{load_with, Environment, PRODUCTION_TOML};
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::io::{BufRead, BufReader};
+    #[cfg(unix)]
     use std::process::{Child, Command, Stdio};
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn config_with(host: &str, port: u16, data_dir: Option<&str>) -> DesktopConfig {
@@ -459,6 +499,7 @@ mod tests {
     /// arriving before the trap tests the default disposition, not the ask —
     /// `sleep 0.2` in the loop then bounds how long answering may take, since a
     /// shell defers a trap until the foreground child returns.
+    #[cfg(unix)]
     fn with_trap(trap: &str) -> Child {
         let mut child = Command::new("sh")
             .args([
@@ -486,6 +527,7 @@ mod tests {
     /// `false` afterwards is a change of state rather than something that held
     /// all along.
     #[test]
+    #[cfg(unix)]
     fn an_ask_reaches_a_real_process_and_it_leaves() {
         let mut child = with_trap("'exit 0'");
         let pid = child.id();
@@ -529,6 +571,7 @@ mod tests {
     /// across `exec`, so nothing in the tree reacts and only `SIGKILL` ends it —
     /// which is how this test cleans up.
     #[test]
+    #[cfg(unix)]
     fn a_process_that_ignores_the_ask_is_still_alive() {
         let mut child = with_trap("''");
         let pid = child.id();
@@ -556,6 +599,7 @@ mod tests {
     /// this app is attached to. The type cannot express it (`Pid::from_raw`
     /// returns `None` for zero) and these two functions are where that shows.
     #[test]
+    #[cfg(unix)]
     fn a_pid_of_zero_is_refused_rather_than_signalled() {
         let refused = ask(0).expect_err("zero must never be signalled");
         assert!(

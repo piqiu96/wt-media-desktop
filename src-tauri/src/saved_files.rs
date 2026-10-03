@@ -39,6 +39,7 @@
 //! Collapsing the two is how 「没有这个文件」 becomes the answer for a directory
 //! nobody could open: see [`Unreadable`].
 
+#[cfg(unix)]
 use rustix::io::Errno;
 use std::path::{Path, PathBuf};
 
@@ -659,14 +660,24 @@ impl Report {
     }
 }
 
-/// Whether the error is a rename across two filesystems.
+/// The platform's cross-volume rename error code.
 ///
-/// `EXDEV`, spelled through `rustix` rather than as a number: it is 18 on the
-/// platforms this ships on, and that is a coincidence nobody should write down.
-/// `rename` can only report it at all because `rustix` is built with the
-/// operations feature — without it a cross-volume rename on macOS answers success.
+/// Unix spells `EXDEV` through `rustix` rather than as a number. Windows reports
+/// `ERROR_NOT_SAME_DEVICE`; keeping both here avoids treating an unrelated error
+/// as a reason to copy a potentially large file.
+#[cfg(unix)]
+fn cross_device_error_code() -> i32 {
+    Errno::XDEV.raw_os_error()
+}
+
+#[cfg(windows)]
+fn cross_device_error_code() -> i32 {
+    17 // ERROR_NOT_SAME_DEVICE
+}
+
+/// Whether the error is a rename across two filesystems.
 fn is_cross_device(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(Errno::XDEV.raw_os_error())
+    error.raw_os_error() == Some(cross_device_error_code())
 }
 
 /// Move one file into `target`, across volumes when it has to be.
@@ -2096,8 +2107,8 @@ mod tests {
     /// is a different error on another platform and never fires on this one.
     #[test]
     fn only_the_cross_device_error_is_cross_device() {
-        let xdev = std::io::Error::from_raw_os_error(Errno::XDEV.raw_os_error());
-        let other = std::io::Error::from_raw_os_error(Errno::NOENT.raw_os_error());
+        let xdev = std::io::Error::from_raw_os_error(cross_device_error_code());
+        let other = std::io::Error::from_raw_os_error(cross_device_error_code() + 1);
 
         assert!(is_cross_device(&xdev));
         assert!(!is_cross_device(&other));
