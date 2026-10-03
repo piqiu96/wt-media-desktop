@@ -137,7 +137,10 @@ impl Location {
         Ok(Self {
             sidecar: resolve_sidecar(&exe),
             manifest: resources.join(MANIFEST_NAME),
-            bundled: inside_a_bundle(&exe),
+            // Windows installers place the app beside its resources, with no
+            // `.app/Contents` directory to identify a bundle. A release-mode
+            // Windows executable must therefore require the packaged record.
+            bundled: inside_a_bundle(&exe) || cfg!(all(windows, not(debug_assertions))),
         })
     }
 
