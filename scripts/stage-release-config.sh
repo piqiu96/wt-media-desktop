@@ -26,13 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
 AGENT_DIR="$ROOT_DIR/wt-media-agent"
-PYTHON_BIN="${WT_MEDIA_AGENT_PYTHON:-$AGENT_DIR/.venv/bin/python}"
-
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "Local Agent build Python is unavailable: $PYTHON_BIN" >&2
-  echo "Create the Agent build environment with its 'build' dependency before creating a release." >&2
-  exit 1
-fi
+PYTHON_BIN="${WT_MEDIA_AGENT_PYTHON:-python3}"
 
 test -d "$APP_PATH/Contents/Resources"
 

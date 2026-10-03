@@ -21,6 +21,8 @@ port = 8765
 # `WT_MEDIA_AGENT_DATA_DIR`; when unset, the variable is not passed at all.
 
 [cloud]
+# Tagged release builds replace this local source default with the HTTPS Cloud
+# origin from the product Manifest before compiling the binary and bundling it.
 base_url = "http://127.0.0.1:18080"
 
 [browser]

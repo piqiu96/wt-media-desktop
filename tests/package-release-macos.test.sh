@@ -13,8 +13,9 @@ case "$(uname -m)" in
 esac
 
 VERSION="$(node -p 'require(process.argv[1]).version' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
-EXPECTED_DIR="$TEMP_DIR/WT-Media_${VERSION}_macos-${ARCH}"
+APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
+EXPECTED_DIR="$TEMP_DIR/${APP_NAME}_${VERSION}_macos-${ARCH}"
 
 OUTPUT="$(bash "$DESKTOP_DIR/scripts/package-release-macos.sh" --dry-run --output-dir "$TEMP_DIR")"
 grep -Fqx "release-dir=$EXPECTED_DIR" <<<"$OUTPUT"
-grep -Fqx "archive=$TEMP_DIR/WT-Media_${VERSION}_macos-${ARCH}.zip" <<<"$OUTPUT"
+grep -Fqx "archive=$TEMP_DIR/${APP_NAME}_${VERSION}_macos-${ARCH}.zip" <<<"$OUTPUT"

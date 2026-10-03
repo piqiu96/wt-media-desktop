@@ -48,6 +48,17 @@ if [[ ! -e "$SIDECAR" ]]; then
   chmod +x "$SIDECAR"
 fi
 
+# Tauri checks declared bundle resource paths while compiling tests too. These
+# placeholders satisfy that path check only; the release prebuild gate verifies
+# real Agent config and a real Sidecar digest before any package is created.
+mkdir -p "$DESKTOP_DIR/.generated/agent-config"
+if [[ ! -e "$DESKTOP_DIR/.generated/agent-config/agent.toml" ]]; then
+  printf '# Desktop test placeholder; never a release input.\n' > "$DESKTOP_DIR/.generated/agent-config/agent.toml"
+fi
+if [[ ! -e "$DESKTOP_DIR/.generated/sidecar-manifest.json" ]]; then
+  printf '{"test_placeholder":true}\n' > "$DESKTOP_DIR/.generated/sidecar-manifest.json"
+fi
+
 cd "$DESKTOP_DIR"
 cargo test --workspace
 

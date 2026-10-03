@@ -7,7 +7,7 @@
     "frontendDist": "../.generated/frontend",
     "devUrl": "http://127.0.0.1:5174",
     "beforeDevCommand": "cd ../wt-media-cloud/web && npm run dev:desktop",
-    "beforeBuildCommand": "bash scripts/prepare-release-sidecar.sh && bash ../wt-media-workspace/scripts/build-desktop-frontend.sh"
+    "beforeBuildCommand": "bash scripts/prepare-release-inputs.sh"
   },
   "app": {
     "windows": [
@@ -26,7 +26,11 @@
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "targets": "all",
     "externalBin": ["binaries/wt-media-agent"],
-    "resources": ["resources/*.toml"],
+    "resources": {
+      "resources/desktop.production.toml": "resources/desktop.production.toml",
+      "../.generated/agent-config/": "config/",
+      "../.generated/sidecar-manifest.json": "sidecar-manifest.json"
+    },
     "macOS": {
       "signingIdentity": "-"
     }
