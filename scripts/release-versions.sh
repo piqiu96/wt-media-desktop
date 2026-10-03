@@ -114,6 +114,31 @@ resource_files() {
   find "$1" -type f ! -name "$2" | wc -l | tr -d ' '
 }
 
+# sha256_digest <path|->: the digest only, from either platform's tool.
+#
+# macOS has `shasum`; GitHub's Windows Git Bash has `sha256sum` but not the Perl
+# wrapper. Refusing to silently emit an empty digest is part of the release gate.
+sha256_digest() {
+  local path="${1:--}" output
+  if command -v shasum >/dev/null 2>&1; then
+    if [[ "$path" == "-" ]]; then
+      output="$(shasum -a 256)" || return 127
+    else
+      output="$(shasum -a 256 "$path")" || return 127
+    fi
+  elif command -v sha256sum >/dev/null 2>&1; then
+    if [[ "$path" == "-" ]]; then
+      output="$(sha256sum)" || return 127
+    else
+      output="$(sha256sum "$path")" || return 127
+    fi
+  else
+    echo "neither shasum nor sha256sum is available" >&2
+    return 127
+  fi
+  printf '%s\n' "$output" | awk '{print $1}'
+}
+
 # resource_manifest <dir> <exclude-name>: `<relative path> <sha256>` per file,
 # sorted. Content only -- no timestamps, no inode facts -- so the same set of bytes
 # gives the same lines on any machine. Paths are ours, so a filename with a newline
@@ -123,7 +148,7 @@ resource_manifest() {
   (
     cd "$dir"
     find . -type f ! -name "$exclude" | LC_ALL=C sort | while IFS= read -r file; do
-      printf '%s %s\n' "${file#./}" "$(shasum -a 256 "$file" | awk '{print $1}')"
+      printf '%s %s\n' "${file#./}" "$(sha256_digest "$file")"
     done
   )
 }
@@ -131,7 +156,7 @@ resource_manifest() {
 # resource_digest <dir> <exclude-name>: one sha256 over those lines, so an artifact
 # carries one identity that changes exactly when the set changes.
 resource_digest() {
-  resource_manifest "$1" "$2" | shasum -a 256 | awk '{print $1}'
+  resource_manifest "$1" "$2" | sha256_digest -
 }
 
 # name_changes <json file> <field>: reads manifest lines on stdin and prints the
