@@ -126,13 +126,13 @@ pub struct Plan {
 pub fn plan(
     config: &DesktopConfig,
     build_environment: Environment,
-    home: Option<&Path>,
+    system: &crate::system_paths::SystemPaths,
     manifest_dir: &Path,
 ) -> Plan {
     Plan {
         levels: levels(&config.logging.level, build_environment),
         limits: limits_of(config),
-        directory: resolve_directory(build_environment, home, manifest_dir),
+        directory: resolve_directory(build_environment, system, manifest_dir),
         configured_level: config.logging.level.clone(),
         config_environment: config.environment,
         build_environment,
@@ -256,23 +256,15 @@ pub fn limits_of(config: &DesktopConfig) -> Limits {
 /// built from the manifest directory and never reads it.
 fn resolve_directory(
     build_environment: Environment,
-    home: Option<&Path>,
+    system: &crate::system_paths::SystemPaths,
     manifest_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let prepared = match (build_environment, home) {
-        // The empty path is a placeholder `paths::directory` ignores in this arm
-        // by construction (`paths::tests::
-        // each_layout_reads_one_input_and_ignores_the_other` pins that it does),
-        // so a missing `HOME` cannot take the development layout away.
-        (Environment::Development, _) => {
-            paths::prepare(Path::new(""), build_environment, manifest_dir)
-        }
-        (Environment::Production, Some(home)) => {
-            paths::prepare(home, build_environment, manifest_dir)
-        }
-        (Environment::Production, None) => {
-            return Err("HOME is not set, so the installed layout has no directory".to_string())
-        }
+    let prepared = if build_environment == Environment::Development {
+        paths::prepare(system, build_environment, manifest_dir)
+    } else if system.production_base().is_ok() {
+        paths::prepare(system, build_environment, manifest_dir)
+    } else {
+        paths::prepare_at(&system.log_fallback())
     };
     prepared.map_err(|error| error.to_string())
 }
@@ -300,6 +292,15 @@ fn level_name(filter: LevelFilter) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::{load_with, LOG_LEVELS, PRODUCTION_TOML};
+
+    fn system(home: Option<&Path>) -> crate::system_paths::SystemPaths {
+        crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::SystemPaths::current_platform(),
+            home.map(Path::to_path_buf),
+            None,
+            std::env::temp_dir(),
+        )
+    }
 
     fn scratch(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -392,7 +393,12 @@ mod tests {
         let installed_home = scratch("plan-home");
         std::fs::create_dir_all(&installed_home).expect("scratch");
 
-        let development = plan(&config, Environment::Development, Some(&home()), &manifest);
+        let development = plan(
+            &config,
+            Environment::Development,
+            &system(Some(&home())),
+            &manifest,
+        );
         let directory = development
             .directory
             .as_ref()
@@ -410,10 +416,11 @@ mod tests {
         assert!(development.directory.as_ref().expect("usable").exists());
 
         // The other direction, so this is a rule rather than a constant.
+        let production_system = system(Some(&installed_home));
         let production = plan(
             &config,
             Environment::Production,
-            Some(&installed_home),
+            &production_system,
             &manifest,
         );
         let directory = production.directory.as_ref().expect("a writable home");
@@ -435,16 +442,23 @@ mod tests {
             "the production build's `auto` is INFO"
         );
 
+        let fallback_system = system(None);
         assert_eq!(
-            plan(&config, Environment::Production, None, &manifest).directory,
-            Err("HOME is not set, so the installed layout has no directory".to_string())
+            plan(
+                &config,
+                Environment::Production,
+                &fallback_system,
+                &manifest
+            )
+            .directory,
+            Ok(fallback_system.log_fallback())
         );
 
         // The numbers travel with the plan rather than being re-decided at
         // installation time.
         config.logging.max_record_bytes = 4096;
         assert_eq!(
-            plan(&config, Environment::Development, None, &manifest)
+            plan(&config, Environment::Development, &system(None), &manifest,)
                 .limits
                 .max_record_bytes,
             4096
@@ -454,7 +468,7 @@ mod tests {
         // code would have picked: the summary names what the file said, so a
         // hard-wired `auto` there would describe a launch that did not happen.
         config.logging.level = "trace".to_string();
-        let explicit = plan(&config, Environment::Production, None, &manifest);
+        let explicit = plan(&config, Environment::Production, &system(None), &manifest);
         assert_eq!(explicit.configured_level, "trace");
         assert_eq!(explicit.levels.default, LevelFilter::TRACE);
 
@@ -475,7 +489,7 @@ mod tests {
         let problem = plan(
             &shipped(),
             Environment::Development,
-            Some(&home()),
+            &system(Some(&home())),
             &manifest,
         )
         .directory

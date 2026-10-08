@@ -647,10 +647,16 @@ mod probe {
     fn probe_real_machine() {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let paths = app_paths::resolve(home.as_deref(), Environment::Development, manifest)
+        let system = crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::Platform::Darwin,
+            home.clone(),
+            None,
+            manifest.to_path_buf(),
+        );
+        let paths = app_paths::resolve(&system, Environment::Development, manifest)
             .expect("the development layout");
-        let agent_logs = crate::logging::paths::agent_directory(home.as_deref(), None)
-            .expect("the Agent's tree");
+        let agent_logs =
+            crate::logging::paths::agent_directory(&system, None).expect("the Agent's tree");
         let base = std::env::temp_dir().join(format!("wt-media-t07-probe-{}", std::process::id()));
         // A scratch home with a `Downloads`, so the probe writes where the
         // export would on a normal machine and not into this crate's tree.

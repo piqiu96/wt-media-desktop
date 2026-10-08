@@ -40,6 +40,7 @@ use crate::bootstrap;
 use crate::config::Environment;
 use crate::dto::{SearchDirectoryView, SettingsView};
 use crate::settings::{self, UserSettings};
+use crate::system_paths::SystemPaths;
 use std::path::{Path, PathBuf};
 
 /// The three inputs the layout is decided by, read once each.
@@ -47,9 +48,9 @@ use std::path::{Path, PathBuf};
 /// Read here rather than passed in because a `#[tauri::command]` may not consult
 /// the environment itself without becoming untestable — the rules below take them
 /// as arguments, and this is the one place that looks.
-fn layout() -> (Option<PathBuf>, Environment, &'static Path) {
+fn layout() -> (SystemPaths, Environment, &'static Path) {
     (
-        std::env::var_os("HOME").map(PathBuf::from),
+        SystemPaths::current(),
         bootstrap::build_environment(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
     )
@@ -57,11 +58,11 @@ fn layout() -> (Option<PathBuf>, Environment, &'static Path) {
 
 /// The data root as it is, without touching the filesystem.
 fn read_root(
-    home: Option<&Path>,
+    system: &SystemPaths,
     environment: Environment,
     manifest: &Path,
 ) -> Result<PathBuf, String> {
-    app_paths::resolve(home, environment, manifest)
+    app_paths::resolve(system, environment, manifest)
         .map(|paths| paths.data)
         .map_err(|error| format!("无法确定设置目录：{error}"))
 }
@@ -71,20 +72,12 @@ fn read_root(
 /// Returns the directory it proved rather than the one it was asked for, so the
 /// caller cannot write into a path that was never checked.
 fn write_root(
-    home: Option<&Path>,
+    system: &SystemPaths,
     environment: Environment,
     manifest: &Path,
 ) -> Result<PathBuf, String> {
-    // An installed layout with no `HOME` is refused by `directory` itself; the
-    // empty path stands in for 「there is none」 in the development layout, which
-    // never reads it.
-    app_paths::prepare(
-        Root::Data,
-        home.unwrap_or(Path::new("")),
-        environment,
-        manifest,
-    )
-    .map_err(|error| format!("无法准备设置目录：{error}"))
+    app_paths::prepare(Root::Data, system, environment, manifest)
+        .map_err(|error| format!("无法准备设置目录：{error}"))
 }
 
 /// The settings file this page reads and writes.
@@ -181,8 +174,8 @@ fn add_search_dir(root: &Path, dir: &Path) -> Result<SearchDirectoryView, String
 /// `write_root` rather than `read_root`: this call stores something, so the data
 /// root is about to be needed — the same choice `set_save_dir` makes.
 pub(crate) fn store_search_dir(dir: &Path) -> Result<SearchDirectoryView, String> {
-    let (home, environment, manifest) = layout();
-    let root = write_root(home.as_deref(), environment, manifest)?;
+    let (system, environment, manifest) = layout();
+    let root = write_root(&system, environment, manifest)?;
     add_search_dir(&root, dir)
 }
 
@@ -255,8 +248,8 @@ pub(crate) fn places_of(root: &Path) -> Result<SavePlaces, String> {
 /// read is an `Err`: a machine whose settings are unreadable has no directories
 /// to search, and answering 「没有下载」 for it would be a different fact.
 pub(crate) fn save_places() -> Result<SavePlaces, String> {
-    let (home, environment, manifest) = layout();
-    let root = read_root(home.as_deref(), environment, manifest)?;
+    let (system, environment, manifest) = layout();
+    let root = read_root(&system, environment, manifest)?;
     places_of(&root)
 }
 
@@ -273,8 +266,8 @@ pub(crate) fn stored_save_dir(root: &Path) -> Result<Option<String>, String> {
 
 /// [`stored_save_dir`] against the real data root.
 pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
-    let (home, environment, manifest) = layout();
-    let root = read_root(home.as_deref(), environment, manifest)?;
+    let (system, environment, manifest) = layout();
+    let root = read_root(&system, environment, manifest)?;
     stored_save_dir(&root)
 }
 
@@ -286,16 +279,16 @@ pub(crate) fn chosen_save_dir() -> Result<Option<String>, String> {
 /// `check_save_dir` — a second path into the settings file is a second chance for
 /// a directory the tasks cannot use to be stored.
 pub(crate) fn set_save_dir(save_dir: Option<&str>) -> Result<SettingsView, String> {
-    let (home, environment, manifest) = layout();
-    let root = write_root(home.as_deref(), environment, manifest)?;
+    let (system, environment, manifest) = layout();
+    let root = write_root(&system, environment, manifest)?;
     write(&root, save_dir)
 }
 
 /// Read the operator's settings.
 #[tauri::command]
 pub fn local_settings_get() -> Result<SettingsView, String> {
-    let (home, environment, manifest) = layout();
-    let root = read_root(home.as_deref(), environment, manifest)?;
+    let (system, environment, manifest) = layout();
+    let root = read_root(&system, environment, manifest)?;
     read(&root)
 }
 
@@ -313,6 +306,15 @@ mod tests {
     use super::*;
     use crate::config::{load_with, PRODUCTION_TOML};
     use std::collections::BTreeMap;
+
+    fn development_system(home: PathBuf) -> SystemPaths {
+        SystemPaths::from_parts(
+            SystemPaths::current_platform(),
+            Some(home),
+            None,
+            std::env::temp_dir(),
+        )
+    }
 
     /// A scratch directory of this test's own, removed by the caller.
     fn scratch(label: &str) -> PathBuf {
@@ -920,8 +922,8 @@ mod tests {
             .paths
             .data;
 
-        let (home, environment, manifest) = layout();
-        let mine = read_root(home.as_deref(), environment, manifest).expect("this module's root");
+        let (system, environment, manifest) = layout();
+        let mine = read_root(&system, environment, manifest).expect("this module's root");
 
         assert_eq!(mine, theirs, "two answers to 「设置文件在哪」");
     }
@@ -940,11 +942,16 @@ mod tests {
         let manifest = scratch_root.join("crate");
         std::fs::create_dir_all(&manifest).expect("a stand-in manifest dir");
 
-        let resolved =
-            read_root(Some(&scratch_root), Environment::Development, &manifest).expect("resolve");
+        let resolved = read_root(
+            &development_system(scratch_root.clone()),
+            Environment::Development,
+            &manifest,
+        )
+        .expect("resolve");
         let created_by_read = resolved.exists();
+        let write_root_system = development_system(scratch_root.clone());
         let prepared =
-            write_root(Some(&scratch_root), Environment::Development, &manifest).expect("prepare");
+            write_root(&write_root_system, Environment::Development, &manifest).expect("prepare");
         let created_by_write = prepared.is_dir();
 
         std::fs::remove_dir_all(&scratch_root).ok();

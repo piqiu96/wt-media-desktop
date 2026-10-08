@@ -66,6 +66,7 @@
 //! than a registered gap.
 
 use crate::config::Environment;
+use crate::system_paths::{Platform, SystemPathError, SystemPaths};
 use std::path::{Path, PathBuf};
 
 /// The application directory under the user's `Library`.
@@ -122,51 +123,73 @@ impl Root {
     }
 }
 
-/// Where one root is, for a given build and home. Pure: creates nothing, reads
-/// nothing, and does not consult the environment.
+/// Where one root is, for a given system and build. Pure: creates nothing,
+/// reads nothing, and does not consult the environment.
 ///
-/// `home` is injected rather than read from `$HOME`: a function that reads the
-/// environment cannot be asked "where would you put this for *that* home", and a
-/// test that called `std::env::home_dir` would write into whoever ran it. A
-/// development layout ignores `home` entirely — `logging::paths` asserts the same
-/// absence on both sides for the same reason, and it is what lets a caller pass
-/// an empty path when the process has no `HOME`.
+/// `SystemPaths` is injected rather than re-read per caller. A development
+/// layout ignores it entirely; production reads only the platform's approved
+/// system root, never `HOME`, `LOCALAPPDATA`, the executable directory, or cwd.
 pub fn directory(
     root: Root,
-    home: &Path,
+    system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> PathBuf {
-    match (environment, root) {
-        // Not computed here. The log tree has one owner, and `logging::paths` is
-        // it; this module names the root rather than restating the path, so a
-        // later move has one place to change. `the_log_root_is_the_logging_
-        // modules_own_answer` is what fails when the two drift apart.
-        (_, Root::Logs) => crate::logging::paths::directory(home, environment, manifest_dir),
+    if environment == Environment::Development {
+        return match root {
+            Root::Logs => crate::logging::paths::directory(system, environment, manifest_dir),
+            Root::Versions => {
+                directory(Root::Data, system, environment, manifest_dir).join(Root::Versions.name())
+            }
+            Root::Data => manifest_dir
+                .join(DEVELOPMENT_DIR)
+                .join(DEVELOPMENT_DATA_DIR),
+            Root::Cache => manifest_dir.join(DEVELOPMENT_DIR).join(Root::Cache.name()),
+        };
+    }
 
-        // Versions is under data in both layouts, as on the Agent: one rule,
-        // stated once, so the two can never disagree about it.
-        (_, Root::Versions) => {
-            directory(Root::Data, home, environment, manifest_dir).join(Root::Versions.name())
-        }
-
-        (Environment::Development, Root::Data) => manifest_dir
-            .join(DEVELOPMENT_DIR)
-            .join(DEVELOPMENT_DATA_DIR),
-        (Environment::Development, Root::Cache) => {
-            manifest_dir.join(DEVELOPMENT_DIR).join(Root::Cache.name())
-        }
-
-        (Environment::Production, Root::Data) => home
-            .join("Library")
-            .join("Application Support")
+    let installed = match system.platform {
+        Platform::Windows => system
+            .local_app_data
+            .as_deref()
+            .unwrap_or_else(|| Path::new(""))
             .join(APPLICATION_DIR)
             .join(COMPONENT_DIR),
-        (Environment::Production, Root::Cache) => home
-            .join("Library")
-            .join("Caches")
-            .join(APPLICATION_DIR)
-            .join(COMPONENT_DIR),
+        Platform::Darwin | Platform::Unix => {
+            let home = system.home.as_deref().unwrap_or_else(|| Path::new(""));
+            match root {
+                Root::Logs => {
+                    return crate::logging::paths::directory(system, environment, manifest_dir)
+                }
+                Root::Versions => {
+                    return directory(Root::Data, system, environment, manifest_dir)
+                        .join(Root::Versions.name())
+                }
+                Root::Data => {
+                    return home
+                        .join("Library")
+                        .join("Application Support")
+                        .join(APPLICATION_DIR)
+                        .join(COMPONENT_DIR)
+                }
+                Root::Cache => {
+                    return home
+                        .join("Library")
+                        .join("Caches")
+                        .join(APPLICATION_DIR)
+                        .join(COMPONENT_DIR)
+                }
+            }
+        }
+    };
+
+    match root {
+        Root::Logs => crate::logging::paths::directory(system, environment, manifest_dir),
+        Root::Versions => {
+            directory(Root::Data, system, environment, manifest_dir).join(Root::Versions.name())
+        }
+        Root::Data => installed.join("data"),
+        Root::Cache => installed.join("cache"),
     }
 }
 
@@ -179,6 +202,8 @@ pub enum ResolveError {
     /// process happens to be in — which is a silently wrong answer, and this
     /// module's contract is that the answer is either right or refused.
     NoHome,
+    /// Windows production cannot invent the per-user tree without Local AppData.
+    NoLocalAppData,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -188,6 +213,12 @@ impl std::fmt::Display for ResolveError {
                 write!(
                     f,
                     "HOME is not set, so the installed layout has no directory"
+                )
+            }
+            ResolveError::NoLocalAppData => {
+                write!(
+                    f,
+                    "LOCALAPPDATA is not set, so the Windows user layout has no directory"
                 )
             }
         }
@@ -215,24 +246,22 @@ pub struct AppPaths {
 /// installed layout: the development layout is built from the manifest directory
 /// and never reads it, so a checkout still resolves with no `HOME` at all.
 pub fn resolve(
-    home: Option<&Path>,
+    system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> Result<AppPaths, ResolveError> {
-    let home = match (environment, home) {
-        (Environment::Production, None) => return Err(ResolveError::NoHome),
-        // The empty path is a placeholder `directory` ignores in this arm by
-        // construction — `each_layout_reads_one_input_and_ignores_the_other`
-        // pins that it does — so a missing `HOME` cannot take the development
-        // layout away.
-        (Environment::Development, None) => Path::new(""),
-        (_, Some(home)) => home,
-    };
+    if environment == Environment::Production {
+        system.production_base().map_err(|error| match error {
+            SystemPathError::NoHome => ResolveError::NoHome,
+            SystemPathError::NoLocalAppData => ResolveError::NoLocalAppData,
+        })?;
+    }
+
     Ok(AppPaths {
-        data: directory(Root::Data, home, environment, manifest_dir),
-        versions: directory(Root::Versions, home, environment, manifest_dir),
-        logs: directory(Root::Logs, home, environment, manifest_dir),
-        cache: directory(Root::Cache, home, environment, manifest_dir),
+        data: directory(Root::Data, system, environment, manifest_dir),
+        versions: directory(Root::Versions, system, environment, manifest_dir),
+        logs: directory(Root::Logs, system, environment, manifest_dir),
+        cache: directory(Root::Cache, system, environment, manifest_dir),
     })
 }
 
@@ -271,11 +300,11 @@ impl std::error::Error for DirectoryError {}
 /// a fact about the filesystem rather than a second rule here.)
 pub fn prepare(
     root: Root,
-    home: &Path,
+    system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> Result<PathBuf, DirectoryError> {
-    let path = directory(root, home, environment, manifest_dir);
+    let path = directory(root, system, environment, manifest_dir);
     if let Err(reason) = std::fs::create_dir_all(&path) {
         return Err(DirectoryError { root, path, reason });
     }
@@ -317,6 +346,14 @@ mod tests {
         PathBuf::from("/crate")
     }
 
+    fn system() -> SystemPaths {
+        SystemPaths::from_parts(Platform::Darwin, Some(home()), None, PathBuf::from("/tmp"))
+    }
+
+    fn no_home_system() -> SystemPaths {
+        SystemPaths::from_parts(Platform::Darwin, None, None, PathBuf::from("/tmp"))
+    }
+
     /// What the installed layout has to be, spelled out rather than derived from
     /// the implementation: data and versions under Application Support, logs
     /// under Logs, cache under Caches. Asserted as literal paths so a change to
@@ -325,7 +362,7 @@ mod tests {
     fn the_installed_layout_is_the_architecture_baselines() {
         let root = PathBuf::from("/home/operator/Library");
         assert_eq!(
-            directory(Root::Data, &home(), Environment::Production, &manifest()),
+            directory(Root::Data, &system(), Environment::Production, &manifest()),
             root.join("Application Support")
                 .join("WTMedia")
                 .join("Desktop")
@@ -333,7 +370,7 @@ mod tests {
         assert_eq!(
             directory(
                 Root::Versions,
-                &home(),
+                &system(),
                 Environment::Production,
                 &manifest()
             ),
@@ -343,11 +380,11 @@ mod tests {
                 .join("versions")
         );
         assert_eq!(
-            directory(Root::Logs, &home(), Environment::Production, &manifest()),
+            directory(Root::Logs, &system(), Environment::Production, &manifest()),
             root.join("Logs").join("WTMedia").join("Desktop")
         );
         assert_eq!(
-            directory(Root::Cache, &home(), Environment::Production, &manifest()),
+            directory(Root::Cache, &system(), Environment::Production, &manifest()),
             root.join("Caches").join("WTMedia").join("Desktop")
         );
     }
@@ -358,24 +395,29 @@ mod tests {
     fn the_development_layout_is_under_the_crates_local_directory() {
         let local = manifest().join(DEVELOPMENT_DIR);
         assert_eq!(
-            directory(Root::Data, &home(), Environment::Development, &manifest()),
+            directory(Root::Data, &system(), Environment::Development, &manifest()),
             local.join("data")
         );
         assert_eq!(
             directory(
                 Root::Versions,
-                &home(),
+                &system(),
                 Environment::Development,
                 &manifest()
             ),
             local.join("data").join("versions")
         );
         assert_eq!(
-            directory(Root::Logs, &home(), Environment::Development, &manifest()),
+            directory(Root::Logs, &system(), Environment::Development, &manifest()),
             local.join("logs")
         );
         assert_eq!(
-            directory(Root::Cache, &home(), Environment::Development, &manifest()),
+            directory(
+                Root::Cache,
+                &system(),
+                Environment::Development,
+                &manifest()
+            ),
             local.join("cache")
         );
     }
@@ -391,8 +433,8 @@ mod tests {
     fn the_log_root_is_the_logging_modules_own_answer() {
         for environment in [Environment::Development, Environment::Production] {
             assert_eq!(
-                directory(Root::Logs, &home(), environment, &manifest()),
-                crate::logging::paths::directory(&home(), environment, &manifest()),
+                directory(Root::Logs, &system(), environment, &manifest()),
+                crate::logging::paths::directory(&system(), environment, &manifest()),
                 "the log root must be logging::paths' answer, not a second rule"
             );
         }
@@ -411,9 +453,9 @@ mod tests {
     #[test]
     fn cache_is_never_inside_the_data_root() {
         for environment in [Environment::Development, Environment::Production] {
-            let data = directory(Root::Data, &home(), environment, &manifest());
-            let versions = directory(Root::Versions, &home(), environment, &manifest());
-            let cache = directory(Root::Cache, &home(), environment, &manifest());
+            let data = directory(Root::Data, &system(), environment, &manifest());
+            let versions = directory(Root::Versions, &system(), environment, &manifest());
+            let cache = directory(Root::Cache, &system(), environment, &manifest());
 
             assert!(
                 versions.starts_with(&data),
@@ -445,8 +487,8 @@ mod tests {
     #[test]
     fn the_log_root_is_never_inside_the_data_root() {
         for environment in [Environment::Development, Environment::Production] {
-            let data = directory(Root::Data, &home(), environment, &manifest());
-            let logs = directory(Root::Logs, &home(), environment, &manifest());
+            let data = directory(Root::Data, &system(), environment, &manifest());
+            let logs = directory(Root::Logs, &system(), environment, &manifest());
 
             assert!(
                 !logs.starts_with(&data),
@@ -472,7 +514,7 @@ mod tests {
         let roots = [Root::Data, Root::Versions, Root::Logs, Root::Cache];
 
         for root in roots {
-            let installed = directory(root, &home(), Environment::Production, &manifest());
+            let installed = directory(root, &system(), Environment::Production, &manifest());
             assert!(
                 installed.starts_with(home()),
                 "installed {root:?} must be under the home it was given: {installed:?}"
@@ -482,7 +524,7 @@ mod tests {
                 "installed {root:?} must not be built under the manifest directory: {installed:?}"
             );
 
-            let local = directory(root, &home(), Environment::Development, &manifest());
+            let local = directory(root, &system(), Environment::Development, &manifest());
             assert!(
                 local.starts_with(manifest()),
                 "development {root:?} must be under the manifest directory: {local:?}"
@@ -507,8 +549,8 @@ mod tests {
             for (index, left) in roots.iter().enumerate() {
                 for right in &roots[index + 1..] {
                     assert_ne!(
-                        directory(*left, &home(), environment, &manifest()),
-                        directory(*right, &home(), environment, &manifest()),
+                        directory(*left, &system(), environment, &manifest()),
+                        directory(*right, &system(), environment, &manifest()),
                         "{left:?} and {right:?} must not be the same directory"
                     );
                 }
@@ -521,14 +563,14 @@ mod tests {
     #[test]
     fn resolve_gathers_the_four_roots_directory_reports() {
         for environment in [Environment::Development, Environment::Production] {
-            let resolved = resolve(Some(&home()), environment, &manifest()).expect("a home");
+            let resolved = resolve(&system(), environment, &manifest()).expect("a home");
             assert_eq!(
                 resolved,
                 AppPaths {
-                    data: directory(Root::Data, &home(), environment, &manifest()),
-                    versions: directory(Root::Versions, &home(), environment, &manifest()),
-                    logs: directory(Root::Logs, &home(), environment, &manifest()),
-                    cache: directory(Root::Cache, &home(), environment, &manifest()),
+                    data: directory(Root::Data, &system(), environment, &manifest()),
+                    versions: directory(Root::Versions, &system(), environment, &manifest()),
+                    logs: directory(Root::Logs, &system(), environment, &manifest()),
+                    cache: directory(Root::Cache, &system(), environment, &manifest()),
                 }
             );
         }
@@ -543,23 +585,12 @@ mod tests {
     /// depend on the process's working directory.
     #[test]
     fn an_installed_layout_without_a_home_is_an_error() {
-        let error = resolve(None, Environment::Production, &manifest())
+        let error = resolve(&no_home_system(), Environment::Production, &manifest())
             .expect_err("production needs a home");
         assert!(matches!(error, ResolveError::NoHome));
         assert!(
             error.to_string().contains("HOME"),
             "the message must name what is missing: {error}"
-        );
-
-        let placeholder = directory(
-            Root::Data,
-            Path::new(""),
-            Environment::Production,
-            &manifest(),
-        );
-        assert!(
-            placeholder.is_relative(),
-            "this is what is being refused, and why: {placeholder:?}"
         );
     }
 
@@ -568,8 +599,8 @@ mod tests {
     #[test]
     fn a_development_layout_resolves_without_a_home() {
         assert_eq!(
-            resolve(None, Environment::Development, &manifest()).expect("no home needed"),
-            resolve(Some(&home()), Environment::Development, &manifest()).expect("the same")
+            resolve(&system(), Environment::Development, &manifest()).expect("no home needed"),
+            resolve(&system(), Environment::Development, &manifest()).expect("the same")
         );
     }
 
@@ -595,8 +626,8 @@ mod tests {
     fn prepare_creates_the_root_and_reports_the_same_path() {
         let root = scratch("prepare");
         for kind in [Root::Data, Root::Versions, Root::Logs, Root::Cache] {
-            let expected = directory(kind, &root, Environment::Development, &root);
-            let got = prepare(kind, &root, Environment::Development, &root)
+            let expected = directory(kind, &system(), Environment::Development, &root);
+            let got = prepare(kind, &system(), Environment::Development, &root)
                 .unwrap_or_else(|error| panic!("a writable scratch root: {error}"));
             assert_eq!(got, expected);
             assert!(got.is_dir(), "prepare must have created it: {got:?}");
@@ -616,10 +647,10 @@ mod tests {
     #[test]
     fn preparing_one_root_does_not_create_the_others() {
         let root = scratch("lazy");
-        prepare(Root::Data, &root, Environment::Development, &root).expect("data");
+        prepare(Root::Data, &system(), Environment::Development, &root).expect("data");
 
         for kind in [Root::Versions, Root::Logs, Root::Cache] {
-            let path = directory(kind, &root, Environment::Development, &root);
+            let path = directory(kind, &system(), Environment::Development, &root);
             assert!(
                 !path.exists(),
                 "{kind:?} must not have been created: {path:?}"
@@ -633,8 +664,8 @@ mod tests {
     #[test]
     fn prepare_is_repeatable() {
         let root = scratch("repeat");
-        prepare(Root::Data, &root, Environment::Development, &root).expect("first");
-        prepare(Root::Data, &root, Environment::Development, &root).expect("second");
+        prepare(Root::Data, &system(), Environment::Development, &root).expect("first");
+        prepare(Root::Data, &system(), Environment::Development, &root).expect("second");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -642,7 +673,7 @@ mod tests {
     #[test]
     fn prepare_leaves_no_probe_file() {
         let root = scratch("clean");
-        let directory = prepare(Root::Data, &root, Environment::Development, &root)
+        let directory = prepare(Root::Data, &system(), Environment::Development, &root)
             .expect("a writable scratch root");
 
         let leftovers: Vec<String> = std::fs::read_dir(&directory)
@@ -669,12 +700,12 @@ mod tests {
     #[test]
     fn a_stale_probe_file_does_not_make_the_root_unusable() {
         let root = scratch("stale");
-        let target =
-            prepare(Root::Data, &root, Environment::Development, &root).expect("create it first");
+        let target = prepare(Root::Data, &system(), Environment::Development, &root)
+            .expect("create it first");
         let stale = target.join(format!("{}{}", PROBE_PREFIX, std::process::id()));
         std::fs::write(&stale, b"left behind by a process that died mid-probe").expect("plant it");
 
-        let got = prepare(Root::Data, &root, Environment::Development, &root);
+        let got = prepare(Root::Data, &system(), Environment::Development, &root);
 
         let still_there = stale.exists();
         std::fs::remove_dir_all(&root).ok();
@@ -700,11 +731,11 @@ mod tests {
     #[test]
     fn a_root_occupied_by_a_file_is_an_error_rather_than_a_panic() {
         let root = scratch("occupied");
-        let occupied = directory(Root::Cache, &root, Environment::Development, &root);
+        let occupied = directory(Root::Cache, &system(), Environment::Development, &root);
         std::fs::create_dir_all(occupied.parent().expect("parent")).expect("scratch parent");
         std::fs::write(&occupied, b"not a directory").expect("occupy the path");
 
-        let error = prepare(Root::Cache, &root, Environment::Development, &root)
+        let error = prepare(Root::Cache, &system(), Environment::Development, &root)
             .expect_err("must not succeed");
 
         assert_eq!(
@@ -731,8 +762,8 @@ mod tests {
     #[test]
     fn a_root_that_exists_but_cannot_be_written_is_an_error() {
         let root = scratch("readonly");
-        let target =
-            prepare(Root::Data, &root, Environment::Development, &root).expect("create it first");
+        let target = prepare(Root::Data, &system(), Environment::Development, &root)
+            .expect("create it first");
         let original = std::fs::metadata(&target).expect("stat").permissions();
         let mut readonly = original.clone();
         readonly.set_readonly(true);
@@ -754,7 +785,7 @@ mod tests {
         }
 
         let outcome = if premise_held {
-            prepare(Root::Data, &root, Environment::Development, &root).map(|_| ())
+            prepare(Root::Data, &system(), Environment::Development, &root).map(|_| ())
         } else {
             Ok(())
         };
@@ -784,5 +815,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn darwin_system(home: &Path) -> SystemPaths {
+        SystemPaths::from_parts(
+            Platform::Darwin,
+            Some(home.to_path_buf()),
+            None,
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    fn windows_system(local: &Path) -> SystemPaths {
+        SystemPaths::from_parts(
+            Platform::Windows,
+            None,
+            Some(local.to_path_buf()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    #[test]
+    fn windows_installed_layout_uses_local_app_data() {
+        let system = windows_system(Path::new("/local"));
+        assert_eq!(
+            directory(Root::Data, &system, Environment::Production, &manifest()),
+            PathBuf::from("/local/WTMedia/Desktop/data")
+        );
+        assert_eq!(
+            directory(
+                Root::Versions,
+                &system,
+                Environment::Production,
+                &manifest()
+            ),
+            PathBuf::from("/local/WTMedia/Desktop/data/versions")
+        );
+        assert_eq!(
+            directory(Root::Logs, &system, Environment::Production, &manifest()),
+            PathBuf::from("/local/WTMedia/Desktop/logs")
+        );
+        assert_eq!(
+            directory(Root::Cache, &system, Environment::Production, &manifest()),
+            PathBuf::from("/local/WTMedia/Desktop/cache")
+        );
+    }
+
+    #[test]
+    fn windows_resolve_refuses_without_local_app_data() {
+        let system = SystemPaths::from_parts(Platform::Windows, None, None, PathBuf::from("/tmp"));
+        assert!(matches!(
+            resolve(&system, Environment::Production, &manifest()),
+            Err(ResolveError::NoLocalAppData)
+        ));
+    }
+
+    #[test]
+    fn macos_resolve_keeps_the_home_layout() {
+        let system = darwin_system(&home());
+        let got = resolve(&system, Environment::Production, &manifest()).expect("mac paths");
+        assert_eq!(
+            got.data,
+            PathBuf::from("/home/operator/Library/Application Support/WTMedia/Desktop")
+        );
+        assert_eq!(
+            got.logs,
+            PathBuf::from("/home/operator/Library/Logs/WTMedia/Desktop")
+        );
+        assert_eq!(
+            got.cache,
+            PathBuf::from("/home/operator/Library/Caches/WTMedia/Desktop")
+        );
     }
 }

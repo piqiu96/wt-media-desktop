@@ -183,8 +183,17 @@ mod tests {
 
     /// The Desktop's four roots, installed layout, for the operator above.
     fn installed() -> AppPaths {
-        app_paths::resolve(Some(&home()), Environment::Production, &manifest())
+        app_paths::resolve(&system(), Environment::Production, &manifest())
             .expect("a home is given")
+    }
+
+    fn system() -> crate::system_paths::SystemPaths {
+        crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::Platform::Darwin,
+            Some(home()),
+            None,
+            manifest(),
+        )
     }
 
     /// The Agent's data root for the same home.
@@ -367,7 +376,13 @@ mod tests {
     /// installed one.
     #[test]
     fn the_development_layout_gets_the_same_rule() {
-        let paths = app_paths::resolve(None, Environment::Development, &manifest())
+        let system = crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::Platform::Darwin,
+            Some(home()),
+            None,
+            manifest(),
+        );
+        let paths = app_paths::resolve(&system, Environment::Development, &manifest())
             .expect("a checkout needs no home");
         let [settings_file, versions] = desktop_write_sites(&paths);
 
@@ -395,7 +410,7 @@ mod tests {
             versions,
             app_paths::directory(
                 Root::Versions,
-                &home(),
+                &system(),
                 Environment::Production,
                 &manifest()
             )

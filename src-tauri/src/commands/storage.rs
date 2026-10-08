@@ -62,6 +62,7 @@ use crate::logging::{
     reader::{self, LogFile, Source, TAIL_LINES},
 };
 use crate::storage;
+use crate::system_paths::SystemPaths;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -112,10 +113,10 @@ impl Resolved {
 
 /// Resolve every root this module reads, or say which input was unusable.
 pub(crate) fn resolve(config: &DesktopConfig) -> Result<Resolved, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let system = SystemPaths::current();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    let paths = app_paths::resolve(home.as_deref(), bootstrap::build_environment(), manifest)
+    let paths = app_paths::resolve(&system, bootstrap::build_environment(), manifest)
         .map_err(|error| format!("无法确定运行目录: {error}"))?;
 
     // An installed layout with no `HOME` is already refused by `resolve`, so these
@@ -126,13 +127,13 @@ pub(crate) fn resolve(config: &DesktopConfig) -> Result<Resolved, String> {
     for root in [&paths.data, &paths.versions, &paths.logs, &paths.cache] {
         if !root.is_absolute() {
             return Err(format!(
-                "运行目录不是绝对路径（{}），无法确定它在哪：请检查 HOME 环境变量",
+                "运行目录不是绝对路径（{}），无法确定它在哪：请检查系统用户目录",
                 root.display()
             ));
         }
     }
 
-    let agent_logs = log_paths::agent_directory(home.as_deref(), config.agent.data_dir.as_deref())
+    let agent_logs = log_paths::agent_directory(&system, config.agent.data_dir.as_deref())
         .map_err(|error| format!("无法确定 Agent 日志目录: {error}"))?;
 
     Ok(Resolved { paths, agent_logs })
@@ -584,19 +585,22 @@ mod tests {
         );
 
         let resolved = resolve(&config).expect("resolvable");
+        let system = SystemPaths::current();
 
         let expected = log_paths::directory(
-            &PathBuf::from(std::env::var_os("HOME").expect("a home in tests")),
+            &system,
             bootstrap::build_environment(),
             Path::new(env!("CARGO_MANIFEST_DIR")),
         );
         assert_eq!(resolved.paths.logs, expected);
-        assert!(
-            !resolved.paths.logs.starts_with(
-                PathBuf::from(std::env::var_os("HOME").expect("a home")).join("Library")
-            ),
-            "a development build must not read the installed tree: {:?}",
-            resolved.paths.logs
+        let installed_logs = log_paths::directory(
+            &system,
+            crate::config::Environment::Production,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_ne!(
+            resolved.paths.logs, installed_logs,
+            "a development build must not read the installed tree"
         );
         assert!(resolved.paths.logs.is_absolute());
     }

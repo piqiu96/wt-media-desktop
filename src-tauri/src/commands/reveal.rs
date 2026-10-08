@@ -294,9 +294,15 @@ mod tests {
     fn the_places_are_the_roots_app_paths_resolves() {
         let home = Path::new("/Users/operator");
         let manifest = Path::new("/build/src-tauri");
-        let paths = app_paths::resolve(Some(home), Environment::Production, manifest)
+        let system = crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::Platform::Darwin,
+            Some(home.to_path_buf()),
+            None,
+            manifest.to_path_buf(),
+        );
+        let paths = app_paths::resolve(&system, Environment::Production, manifest)
             .expect("an installed layout resolves");
-        let agent_logs = crate::logging::paths::agent_directory(Some(home), None)
+        let agent_logs = crate::logging::paths::agent_directory(&system, None)
             .expect("the Agent's tree resolves without a data_dir");
         let resolved = Resolved {
             paths: paths.clone(),
@@ -343,8 +349,8 @@ mod tests {
     #[test]
     #[ignore = "opens a Finder window on the machine that runs it"]
     fn reveal_opens_a_directory_that_is_there() {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let directory = crate::logging::paths::agent_directory(home.as_deref(), None)
+        let system = crate::system_paths::SystemPaths::from_current_env();
+        let directory = crate::logging::paths::agent_directory(&system, None)
             .expect("the Agent's tree resolves");
 
         let opened = reveal(&directory).expect("the tree exists on this machine");
