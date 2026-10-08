@@ -3,7 +3,7 @@
 //!
 //! **Read-only is a property of this module, not of its callers.** Nothing here
 //! creates a directory, deletes a file, or touches the config; the only side
-//! effects are `statvfs` and `read`. Cleanup (T-06) is a different module
+//! effects are the platform free-space API and `read`. Cleanup (T-06) is a different module
 //! precisely so that "the page was looking at something" and "the page removed
 //! something" cannot be the same request.
 //!
