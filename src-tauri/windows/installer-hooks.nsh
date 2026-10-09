@@ -14,6 +14,7 @@
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-installed-agent.ps1" "$INSTDIR\wt-media-agent.exe"'
   Pop $R0
   ${If} $R0 != 0
+    SetErrorLevel 1
     Abort "无法停止当前安装目录下的 Agent，安装或卸载已中止（退出码 $R0）。"
   ${EndIf}
 !macroend
@@ -27,6 +28,11 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ${If} ${FileExists} "$INSTDIR\wt-media-agent.exe"
+    SetErrorLevel 1
+    Abort "Agent 程序仍在安装目录，卸载未完成；请检查文件占用与权限。"
+  ${EndIf}
+
   ; Tauri's checkbox only removes the bundle-id directory. Our runtime roots
   ; have separate Desktop/Agent paths. Never touch the operator's save folders.
   ${If} $DeleteAppDataCheckboxState = 1
@@ -54,6 +60,7 @@
     ${OrIf} ${FileExists} "$PROFILE\Library\Logs\WTMedia\Desktop"
     ${OrIf} ${FileExists} "$PROFILE\Library\Logs\WTMedia\Agent"
     ${OrIf} ${FileExists} "$PROFILE\Library\Caches\WTMedia\Desktop"
+      SetErrorLevel 1
       Abort "应用数据或日志未能完全清理，请检查文件占用与权限。"
     ${EndIf}
   ${EndIf}

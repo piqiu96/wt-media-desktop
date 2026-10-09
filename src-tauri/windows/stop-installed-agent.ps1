@@ -20,7 +20,9 @@ try {
     }
 
     foreach ($agent in (& $findInstalledAgent)) {
-        Stop-Process -Id $agent.ProcessId -Force -ErrorAction Stop
+        # A PyInstaller parent and child can exit together. A PID disappearing
+        # between the snapshot and this call is success, not an install error.
+        Stop-Process -Id $agent.ProcessId -Force -ErrorAction SilentlyContinue
     }
 
     # Wait for the executable handle to close before NSIS overwrites/deletes it.
