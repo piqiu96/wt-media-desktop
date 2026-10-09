@@ -173,7 +173,10 @@ pub async fn gate(
         }
 
         if Instant::now() >= deadline {
-            return Err(timed_out(timeout_ms, seen.as_ref().map(|(line, _)| line.as_str())));
+            return Err(timed_out(
+                timeout_ms,
+                seen.as_ref().map(|(line, _)| line.as_str()),
+            ));
         }
         tokio::time::sleep(POLL).await;
     }
@@ -536,12 +539,8 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        let ready = outcome.unwrap_or_else(|why| {
-            panic!(
-                "真机闸门失败：{why}\n缓冲：{:?}",
-                drain::tail(&log, 20)
-            )
-        });
+        let ready = outcome
+            .unwrap_or_else(|why| panic!("真机闸门失败：{why}\n缓冲：{:?}", drain::tail(&log, 20)));
         assert_eq!(
             ready.line,
             format!("{ANNOUNCEMENT}127.0.0.1:{port}"),

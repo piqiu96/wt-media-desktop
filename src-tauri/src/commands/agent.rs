@@ -211,11 +211,33 @@ pub async fn local_agent_status(
         .send()
         .await
         .map_err(|e| format!("agent unreachable: {}", e))?;
-    let body: LocalAgentStatusResponse = resp
-        .json()
+    let status = resp.status();
+    let body = resp
+        .bytes()
         .await
-        .map_err(|e| format!("invalid status response: {}", e))?;
+        .map_err(|e| format!("读取Local Agent状态失败: {}", e))?;
+    let body = decode_status_response(status, &body)?;
     Ok(LocalAgentStatus::from(body.data))
+}
+
+/// Decode the status answer after its transport has finished.
+///
+/// Reqwest's `json()` hides the status code and body behind a generic decoding
+/// error. A restart race or token mismatch can answer 401 with the Agent's
+/// error envelope; naming both halves makes the next occurrence diagnosable.
+fn decode_status_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<LocalAgentStatusResponse, String> {
+    if !status.is_success() {
+        return Err(format!(
+            "invalid status response: HTTP {}: {}",
+            status,
+            String::from_utf8_lossy(body)
+        ));
+    }
+    serde_json::from_slice(body)
+        .map_err(|error| format!("invalid status response: HTTP {status}: {error}"))
 }
 /// The health check itself, without Tauri.
 ///
@@ -2037,5 +2059,26 @@ mod tests {
     fn only_an_explicit_reuse_scan_asks_for_a_cached_status() {
         assert_eq!(status_path(false), "/api/v1/status");
         assert_eq!(status_path(true), "/api/v1/status?scan=reuse");
+    }
+
+    #[test]
+    fn a_non_success_status_answer_names_the_http_code_and_body() {
+        let error = decode_status_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            br#"{"error":"unauthorized"}"#,
+        )
+        .expect_err("a 401 is not a status answer");
+
+        assert!(error.contains("HTTP 401"), "{error}");
+        assert!(error.contains(r#"{"error":"unauthorized"}"#), "{error}");
+    }
+
+    #[test]
+    fn a_malformed_success_answer_names_the_http_code_and_decode_error() {
+        let error = decode_status_response(reqwest::StatusCode::OK, b"not-json")
+            .expect_err("this is not the envelope");
+
+        assert!(error.contains("HTTP 200"), "{error}");
+        assert!(error.contains("expected ident"), "{error}");
     }
 }

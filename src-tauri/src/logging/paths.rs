@@ -63,6 +63,7 @@
 //! the arm an unset `data_dir` predicts.
 
 use crate::config::Environment;
+use crate::system_paths::{Platform, SystemPaths};
 use std::path::{Path, PathBuf};
 
 /// The application directory, under the user's `Library/Logs`.
@@ -95,25 +96,32 @@ const PROBE_PREFIX: &str = ".wt-media-write-probe-";
 /// `home` is injected rather than read from the environment: a test that called
 /// `std::env::home_dir` would write into whoever ran it, and a function that
 /// reads the environment cannot be asked "what would you do with *this* home".
-pub fn directory(home: &Path, environment: Environment, manifest_dir: &Path) -> PathBuf {
-    match environment {
-        Environment::Production => home
+pub fn directory(system: &SystemPaths, environment: Environment, manifest_dir: &Path) -> PathBuf {
+    if environment == Environment::Development {
+        return manifest_dir
+            .join(DEVELOPMENT_DIR[0])
+            .join(DEVELOPMENT_DIR[1]);
+    }
+
+    let base = match system.platform {
+        Platform::Windows => system
+            .local_app_data
+            .as_deref()
+            .unwrap_or_else(|| Path::new("")),
+        Platform::Darwin | Platform::Unix => {
+            system.home.as_deref().unwrap_or_else(|| Path::new(""))
+        }
+    };
+    match system.platform {
+        Platform::Windows => base.join(APPLICATION_DIR).join(COMPONENT_DIR).join("logs"),
+        Platform::Darwin | Platform::Unix => base
             .join("Library")
             .join("Logs")
             .join(APPLICATION_DIR)
             .join(COMPONENT_DIR),
-        Environment::Development => {
-            let mut path = manifest_dir.to_path_buf();
-            for part in DEVELOPMENT_DIR {
-                path.push(part);
-            }
-            path
-        }
     }
 }
 
-/// Why a log directory could not be used. Holds no credentials: a log directory
-/// path is a directory path.
 #[derive(Debug)]
 pub struct LogDirectoryError {
     pub path: PathBuf,
@@ -132,6 +140,8 @@ pub enum AgentDirectoryError {
     /// home to build it from — the same input `app_paths::resolve` refuses to
     /// guess at for the installed layout, refused for the same reason.
     NoHome,
+    /// Windows production cannot derive the Agent tree without Local AppData.
+    NoLocalAppData,
     /// A configured value that cannot be resolved from this process.
     Unresolvable {
         /// The value, quoted back so whoever set it sees what was refused. It
@@ -150,6 +160,10 @@ impl std::fmt::Display for AgentDirectoryError {
                 "the Agent's log directory is under the user's home ({}), and this process has no \
                  home directory set",
                 AGENT_COMPONENT_DIR
+            ),
+            AgentDirectoryError::NoLocalAppData => write!(
+                f,
+                "LOCALAPPDATA is not set, so the Windows Agent tree cannot be resolved"
             ),
             AgentDirectoryError::Unresolvable { configured, reason } => write!(
                 f,
@@ -184,52 +198,71 @@ impl std::error::Error for AgentDirectoryError {}
 /// treated as absent — an empty or relative `HOME` would produce a relative
 /// answer that resolves against whatever directory this process happens to be in.
 pub fn agent_directory(
-    home: Option<&Path>,
-    data_dir: Option<&str>,
+    system: &SystemPaths,
+    configured: Option<&str>,
 ) -> Result<PathBuf, AgentDirectoryError> {
-    let configured = data_dir.unwrap_or("").trim();
-
-    if configured.is_empty() {
-        // The Agent's own default, and the arm a non-frozen production Agent
-        // takes: `INSTALLED_LOGS_DIR`, beside this component's directory.
-        let home = real_home(home)?;
-        return Ok(home
-            .join("Library")
-            .join("Logs")
-            .join(APPLICATION_DIR)
-            .join(AGENT_COMPONENT_DIR));
-    }
-
-    let base = if let Some(rest) = configured.strip_prefix("~/") {
-        real_home(home)?.join(rest)
-    } else if configured == "~" {
-        // Python's `expanduser` maps a bare `~` to the home as well, so this arm
-        // is the same rule and not a special case.
-        real_home(home)?.to_path_buf()
-    } else if configured.starts_with('~') {
-        // `~someone/…`: refused rather than left to name a directory literally
-        // called `~someone`, which is what it would be if not expanded.
-        return Err(AgentDirectoryError::Unresolvable {
-            configured: configured.to_string(),
-            reason: "`~` is expanded only for this user's home (`~` and `~/…`); another \
-                     user's home needs the password database, which is not this side's to read",
-        });
-    } else if Path::new(configured).is_absolute() {
-        PathBuf::from(configured)
-    } else {
-        return Err(AgentDirectoryError::Unresolvable {
-            configured: configured.to_string(),
-            reason: "it is not absolute, so the Agent's own working directory would decide \
-                     where its logs are",
-        });
+    let configured = configured
+        .map(str::trim)
+        .filter(|configured| !configured.is_empty());
+    let base = match configured {
+        Some(configured) if configured.starts_with('~') => {
+            let rest = configured.strip_prefix('~').unwrap_or("");
+            let absolute_home = rest
+                .strip_prefix('/')
+                .or_else(|| rest.strip_prefix('\\'))
+                .unwrap_or("");
+            let has_separator = rest.starts_with('/') || rest.starts_with('\\');
+            if rest.is_empty() || has_separator {
+                let home = system
+                    .home
+                    .as_deref()
+                    .filter(|path| path.is_absolute())
+                    .ok_or(AgentDirectoryError::NoHome)?;
+                if rest.is_empty() {
+                    home.to_path_buf()
+                } else {
+                    home.join(absolute_home)
+                }
+            } else {
+                return Err(AgentDirectoryError::Unresolvable {
+                    configured: configured.to_string(),
+                    reason: "another user's home is not a path this process can resolve",
+                });
+            }
+        }
+        Some(configured) => {
+            let configured = Path::new(configured.trim());
+            if configured.is_absolute() {
+                configured.to_path_buf()
+            } else {
+                return Err(AgentDirectoryError::Unresolvable {
+                    configured: configured.display().to_string(),
+                    reason: "it is not absolute, so the Agent's own working directory would decide where its logs are",
+                });
+            }
+        }
+        None => {
+            let root = match system.platform {
+                Platform::Windows => system
+                    .local_app_data
+                    .as_deref()
+                    .ok_or(AgentDirectoryError::NoLocalAppData)?
+                    .join(APPLICATION_DIR)
+                    .join(AGENT_COMPONENT_DIR),
+                Platform::Darwin | Platform::Unix => system
+                    .home
+                    .as_deref()
+                    .filter(|path| path.is_absolute())
+                    .ok_or(AgentDirectoryError::NoHome)?
+                    .join("Library")
+                    .join("Application Support")
+                    .join(APPLICATION_DIR)
+                    .join(AGENT_COMPONENT_DIR),
+            };
+            root
+        }
     };
     Ok(base.join(AGENT_DATA_LOGS_SUBDIR))
-}
-
-/// The home to build the Agent's installed path from, if this process has one.
-fn real_home(home: Option<&Path>) -> Result<&Path, AgentDirectoryError> {
-    home.filter(|path| path.is_absolute())
-        .ok_or(AgentDirectoryError::NoHome)
 }
 
 impl std::fmt::Display for LogDirectoryError {
@@ -252,11 +285,11 @@ impl std::error::Error for LogDirectoryError {}
 /// the `Err` arm, because the caller's response to all of them is the same —
 /// log to stderr and carry on.
 pub fn prepare(
-    home: &Path,
+    system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> Result<PathBuf, LogDirectoryError> {
-    let directory = directory(home, environment, manifest_dir);
+    let directory = directory(system, environment, manifest_dir);
     if let Err(reason) = std::fs::create_dir_all(&directory) {
         return Err(LogDirectoryError {
             path: directory,
@@ -270,6 +303,23 @@ pub fn prepare(
         });
     }
     Ok(directory)
+}
+
+/// Prepare an already-selected fallback path without pretending it is the normal tree.
+pub fn prepare_at(directory: &Path) -> Result<PathBuf, LogDirectoryError> {
+    if let Err(reason) = std::fs::create_dir_all(directory) {
+        return Err(LogDirectoryError {
+            path: directory.to_path_buf(),
+            reason,
+        });
+    }
+    if let Err(reason) = probe_write(directory) {
+        return Err(LogDirectoryError {
+            path: directory.to_path_buf(),
+            reason,
+        });
+    }
+    Ok(directory.to_path_buf())
 }
 
 /// Create, then remove, one file — the only honest way to ask "writable?".
@@ -304,6 +354,14 @@ mod tests {
         PathBuf::from("/crate")
     }
 
+    fn system() -> SystemPaths {
+        SystemPaths::from_parts(Platform::Darwin, Some(home()), None, PathBuf::from("/tmp"))
+    }
+
+    fn no_home_system() -> SystemPaths {
+        SystemPaths::from_parts(Platform::Darwin, None, None, PathBuf::from("/tmp"))
+    }
+
     /// A scratch directory of this test's own. Named after the test binary's pid
     /// so two concurrent runs cannot collide, and removed by the caller.
     fn scratch(label: &str) -> PathBuf {
@@ -326,19 +384,20 @@ mod tests {
     /// rather than asserted as a suffix so the component directory is pinned too.
     #[test]
     fn an_unset_agent_data_dir_lands_in_the_agents_installed_tree() {
-        let installed = PathBuf::from("/home/operator/Library/Logs/WTMedia/Agent");
+        let installed =
+            PathBuf::from("/home/operator/Library/Application Support/WTMedia/Agent/logs");
         assert_eq!(
-            agent_directory(Some(&home()), None).expect("determinable"),
+            agent_directory(&system(), None).expect("determinable"),
             installed
         );
         // The shipped default is the empty string, not an absent key, and the two
         // mean the same thing to the Agent (`(data_dir or "").strip()`).
         assert_eq!(
-            agent_directory(Some(&home()), Some("")).expect("determinable"),
+            agent_directory(&system(), Some("")).expect("determinable"),
             installed
         );
         assert_eq!(
-            agent_directory(Some(&home()), Some("   ")).expect("determinable"),
+            agent_directory(&system(), Some("   ")).expect("determinable"),
             installed,
             "the Agent strips the setting before using it, and so does this"
         );
@@ -350,14 +409,17 @@ mod tests {
     /// page Desktop's files — which a shared parent would make look plausible.
     #[test]
     fn the_agent_tree_is_not_desktops_tree() {
-        let desktop = directory(&home(), Environment::Production, &manifest());
-        let agent = agent_directory(Some(&home()), None).expect("determinable");
+        let desktop_logs = directory(&system(), Environment::Production, &manifest());
+        let agent = agent_directory(&system(), None).expect("determinable");
 
-        assert_ne!(desktop, agent);
-        assert_eq!(
-            desktop.parent(),
-            agent.parent(),
-            "the two components share the application directory"
+        assert_ne!(desktop_logs, agent);
+        assert!(
+            desktop_logs.ends_with("Library/Logs/WTMedia/Desktop"),
+            "Desktop logs keep the logging layout: {desktop_logs:?}"
+        );
+        assert!(
+            agent.ends_with("Library/Application Support/WTMedia/Agent/logs"),
+            "Agent logs stay inside its data root: {agent:?}"
         );
     }
 
@@ -369,20 +431,19 @@ mod tests {
     #[test]
     fn a_configured_agent_data_dir_puts_the_logs_beside_it() {
         assert_eq!(
-            agent_directory(Some(&home()), Some("/Volumes/Scratch/agent-data"))
-                .expect("determinable"),
+            agent_directory(&system(), Some("/Volumes/Scratch/agent-data")).expect("determinable"),
             PathBuf::from("/Volumes/Scratch/agent-data/logs")
         );
         assert_eq!(
-            agent_directory(Some(&home()), Some("~/agent-data")).expect("determinable"),
+            agent_directory(&system(), Some("~/agent-data")).expect("determinable"),
             PathBuf::from("/home/operator/agent-data/logs")
         );
         assert_eq!(
-            agent_directory(Some(&home()), Some(" ~/agent-data ")).expect("determinable"),
+            agent_directory(&system(), Some(" ~/agent-data ")).expect("determinable"),
             PathBuf::from("/home/operator/agent-data/logs")
         );
         assert_eq!(
-            agent_directory(Some(&home()), Some("~")).expect("determinable"),
+            agent_directory(&system(), Some("~")).expect("determinable"),
             PathBuf::from("/home/operator/logs"),
             "a bare `~` is the home, and its logs subdirectory is the Agent's rule"
         );
@@ -399,7 +460,7 @@ mod tests {
             "../agent-data",
             "~someone/agent-data",
         ] {
-            let refused = agent_directory(Some(&home()), Some(configured))
+            let refused = agent_directory(&system(), Some(configured))
                 .expect_err("must not resolve a path this process cannot know");
             match &refused {
                 AgentDirectoryError::Unresolvable {
@@ -425,22 +486,23 @@ mod tests {
     #[test]
     fn no_home_refuses_the_arms_that_need_one() {
         assert!(matches!(
-            agent_directory(None, None),
+            agent_directory(&no_home_system(), None),
             Err(AgentDirectoryError::NoHome)
         ));
         assert!(matches!(
-            agent_directory(None, Some("~/agent-data")),
+            agent_directory(&no_home_system(), Some("~/agent-data")),
             Err(AgentDirectoryError::NoHome)
         ));
         // A relative HOME is as unusable as none: it would resolve against this
         // process's working directory rather than the user's home.
         assert!(matches!(
-            agent_directory(Some(Path::new("")), None),
+            agent_directory(&no_home_system(), None),
             Err(AgentDirectoryError::NoHome)
         ));
 
         assert_eq!(
-            agent_directory(None, Some("/Volumes/Scratch/agent-data")).expect("needs no home"),
+            agent_directory(&no_home_system(), Some("/Volumes/Scratch/agent-data"))
+                .expect("needs no home"),
             PathBuf::from("/Volumes/Scratch/agent-data/logs"),
             "an absolute data directory is answerable without a home"
         );
@@ -451,8 +513,8 @@ mod tests {
     /// the one the Agent is writing to.
     #[test]
     fn the_refusal_does_not_fall_back_to_the_installed_tree() {
-        let refused = agent_directory(Some(&home()), Some("agent-data"));
-        let installed = agent_directory(Some(&home()), None).expect("determinable");
+        let refused = agent_directory(&system(), Some("agent-data"));
+        let installed = agent_directory(&system(), None).expect("determinable");
 
         assert!(
             matches!(&refused, Err(error) if !error.to_string().contains(&installed.display().to_string())),
@@ -463,7 +525,7 @@ mod tests {
     #[test]
     fn production_writes_under_the_injected_home() {
         assert_eq!(
-            directory(&home(), Environment::Production, &manifest()),
+            directory(&system(), Environment::Production, &manifest()),
             PathBuf::from("/home/operator/Library/Logs/WTMedia/Desktop")
         );
     }
@@ -471,7 +533,7 @@ mod tests {
     #[test]
     fn development_writes_under_the_injected_manifest_directory() {
         assert_eq!(
-            directory(&home(), Environment::Development, &manifest()),
+            directory(&system(), Environment::Development, &manifest()),
             PathBuf::from("/crate/.local/logs")
         );
     }
@@ -485,7 +547,7 @@ mod tests {
     /// swapped or combined implementation fails rather than looking reasonable.
     #[test]
     fn each_layout_reads_one_input_and_ignores_the_other() {
-        let production = directory(&home(), Environment::Production, &manifest());
+        let production = directory(&system(), Environment::Production, &manifest());
         assert!(
             production.starts_with(home()),
             "production must be under the home it was given: {production:?}"
@@ -495,7 +557,7 @@ mod tests {
             "production must not be built under the manifest directory: {production:?}"
         );
 
-        let development = directory(&home(), Environment::Development, &manifest());
+        let development = directory(&system(), Environment::Development, &manifest());
         assert!(
             development.starts_with(manifest()),
             "development must be under the manifest directory it was given: {development:?}"
@@ -515,7 +577,7 @@ mod tests {
     /// keep the component level.
     #[test]
     fn the_production_directory_ends_at_the_component_level() {
-        let path = directory(&home(), Environment::Production, &manifest());
+        let path = directory(&system(), Environment::Production, &manifest());
 
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
@@ -532,9 +594,10 @@ mod tests {
     #[test]
     fn prepare_creates_the_directory_and_reports_the_same_path() {
         let root = scratch("prepare");
-        let expected = directory(&root, Environment::Development, &root);
+        let expected = directory(&system(), Environment::Development, &root);
 
-        let got = prepare(&root, Environment::Development, &root).expect("writable scratch dir");
+        let got =
+            prepare(&system(), Environment::Development, &root).expect("writable scratch dir");
 
         assert_eq!(got, expected);
         assert!(got.is_dir(), "prepare must have created it: {got:?}");
@@ -547,8 +610,8 @@ mod tests {
     fn prepare_is_repeatable() {
         let root = scratch("repeat");
 
-        prepare(&root, Environment::Development, &root).expect("first");
-        prepare(&root, Environment::Development, &root).expect("second");
+        prepare(&system(), Environment::Development, &root).expect("first");
+        prepare(&system(), Environment::Development, &root).expect("second");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -557,7 +620,7 @@ mod tests {
     #[test]
     fn prepare_leaves_no_probe_file() {
         let root = scratch("clean");
-        let directory = prepare(&root, Environment::Development, &root).expect("writable");
+        let directory = prepare(&system(), Environment::Development, &root).expect("writable");
 
         let leftovers: Vec<String> = std::fs::read_dir(&directory)
             .expect("read back")
@@ -583,11 +646,11 @@ mod tests {
     #[test]
     fn a_stale_probe_file_does_not_make_the_directory_unusable() {
         let root = scratch("stale");
-        let target = prepare(&root, Environment::Development, &root).expect("create it first");
+        let target = prepare(&system(), Environment::Development, &root).expect("create it first");
         let stale = target.join(format!("{}{}", PROBE_PREFIX, std::process::id()));
         std::fs::write(&stale, b"left behind by a process that died mid-probe").expect("plant it");
 
-        let got = prepare(&root, Environment::Development, &root);
+        let got = prepare(&system(), Environment::Development, &root);
 
         let still_there = stale.exists();
         std::fs::remove_dir_all(&root).ok();
@@ -607,11 +670,12 @@ mod tests {
     #[test]
     fn a_target_that_is_a_file_is_an_error_rather_than_a_panic() {
         let root = scratch("occupied");
-        let occupied = directory(&root, Environment::Development, &root);
+        let occupied = directory(&system(), Environment::Development, &root);
         std::fs::create_dir_all(occupied.parent().expect("parent")).expect("scratch parent");
         std::fs::write(&occupied, b"not a directory").expect("occupy the path");
 
-        let error = prepare(&root, Environment::Development, &root).expect_err("must not succeed");
+        let error =
+            prepare(&system(), Environment::Development, &root).expect_err("must not succeed");
 
         assert_eq!(
             error.path, occupied,
@@ -641,7 +705,7 @@ mod tests {
     #[test]
     fn a_directory_that_exists_but_cannot_be_written_is_an_error() {
         let root = scratch("readonly");
-        let target = prepare(&root, Environment::Development, &root).expect("create it first");
+        let target = prepare(&system(), Environment::Development, &root).expect("create it first");
         let original = std::fs::metadata(&target).expect("stat").permissions();
         let mut readonly = original.clone();
         readonly.set_readonly(true);
@@ -664,7 +728,7 @@ mod tests {
         }
 
         let outcome = if premise_held {
-            prepare(&root, Environment::Development, &root).map(|_| ())
+            prepare(&system(), Environment::Development, &root).map(|_| ())
         } else {
             Ok(())
         };
@@ -693,5 +757,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn darwin_system() -> SystemPaths {
+        SystemPaths::from_parts(Platform::Darwin, Some(home()), None, PathBuf::from("/tmp"))
+    }
+
+    fn windows_system(local: &Path) -> SystemPaths {
+        SystemPaths::from_parts(
+            Platform::Windows,
+            None,
+            Some(local.to_path_buf()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    #[test]
+    fn windows_production_log_is_under_local_app_data() {
+        assert_eq!(
+            directory(
+                &windows_system(Path::new("/local")),
+                Environment::Production,
+                &manifest()
+            ),
+            PathBuf::from("/local/WTMedia/Desktop/logs")
+        );
+    }
+
+    #[test]
+    fn windows_agent_log_defaults_to_the_agent_tree() {
+        let got = agent_directory(&windows_system(Path::new("/local")), None)
+            .expect("windows agent default");
+        assert_eq!(got, PathBuf::from("/local/WTMedia/Agent/logs"));
+    }
+
+    #[test]
+    fn windows_agent_log_missing_local_app_data_is_refused() {
+        let system = SystemPaths::from_parts(Platform::Windows, None, None, PathBuf::from("/tmp"));
+        assert!(matches!(
+            agent_directory(&system, None),
+            Err(AgentDirectoryError::NoLocalAppData)
+        ));
     }
 }

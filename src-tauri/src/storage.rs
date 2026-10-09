@@ -25,17 +25,14 @@
 //!
 //! ## Where free space comes from
 //!
-//! `statvfs`, through `rustix`'s safe wrapper. No `unsafe` in this crate, and no
-//! new crate either — `rustix` is already in the lockfile as a transitive
-//! dependency of the tauri stack, so this only asks for its `fs` feature. The
-//! alternative was `libc` plus a hand-written `unsafe` call, which buys nothing
-//! here: `f_bavail` (what an unprivileged process may actually use, not
-//! `f_bfree`) multiplied by `f_frsize` is the whole computation.
+//! The answer is platform-specific on purpose. Unix uses `statvfs` through
+//! `rustix`'s safe wrapper; Windows uses `GetDiskFreeSpaceExW` through
+//! `windows-sys`, which is already in the lockfile as a Tauri dependency. Both
+//! report the bytes available to the current caller rather than raw blocks that
+//! only an administrator could use.
 //!
-//! Non-unix targets get an honest refusal rather than a guess: this crate has
-//! never been built for Windows and the layouts it resolves are macOS shapes
-//! (`logging::paths`), so a Windows free-space reading would be a number with no
-//! layout behind it. `available_bytes` says so instead.
+//! Targets outside the supported desktop platforms still get an honest refusal
+//! rather than a guessed number.
 //!
 //! ## Symlinks are not followed
 //!
@@ -127,7 +124,7 @@ pub fn directory_bytes(root: &Path) -> Result<u64, StorageError> {
 /// no ordinary process can write into, and a storage panel that quotes it
 /// promises room the user does not have.
 ///
-/// `path` must exist — `statvfs` fails with `NotFound` otherwise, and that is
+/// `path` must exist — the platform free-space API fails with `NotFound` otherwise, and that is
 /// reported rather than rounded to zero. The caller passes a root it has already
 /// prepared (`app_paths::prepare`), so "the path I measure" and "the path I use"
 /// are the same directory.
@@ -151,7 +148,7 @@ pub fn available_bytes(path: &Path) -> Result<u64, StorageError> {
 /// Both are true statements about different questions.
 ///
 /// A path with no existing ancestor at all (a bare relative name) is an error:
-/// the walk stops at the last component and reports what `statvfs` said there.
+/// the walk stops at the last component and reports what the platform API said there.
 pub fn available_bytes_for(path: &Path) -> Result<u64, StorageError> {
     let mut candidate = path;
     loop {
@@ -195,13 +192,45 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod platform {
+    use super::{Path, StorageError};
+    use std::os::windows::ffi::OsStrExt;
+
+    pub(super) fn available_bytes(path: &Path) -> Result<u64, StorageError> {
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut available = 0_u64;
+        let mut total = 0_u64;
+        let mut total_free = 0_u64;
+        let measured = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut available,
+                &mut total,
+                &mut total_free,
+            )
+        };
+        if measured == 0 {
+            return Err(StorageError::Unreadable {
+                path: path.to_path_buf(),
+                reason: std::io::Error::last_os_error(),
+            });
+        }
+        Ok(available)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod platform {
     use super::{Path, StorageError};
 
     pub(super) fn available_bytes(_path: &Path) -> Result<u64, StorageError> {
         Err(StorageError::Unsupported {
-            reason: "free space is read with statvfs, which this target does not provide".into(),
+            reason: "this desktop target has no supported free-space API".into(),
         })
     }
 }
@@ -245,6 +274,18 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!(total.expect("measurable"), 3024);
+    }
+
+    /// Windows reports through `GetDiskFreeSpaceExW`; this pins the command to
+    /// a real reading rather than the old non-Unix refusal.
+    #[cfg(windows)]
+    #[test]
+    fn windows_available_bytes_is_measurable() {
+        let measured = available_bytes(&std::env::temp_dir());
+        assert!(
+            matches!(measured, Ok(bytes) if bytes > 0),
+            "expected a positive free-space reading, got {measured:?}"
+        );
     }
 
     /// The milestone's 不是 0 MB, half one: absent really is zero, and the walk
@@ -399,7 +440,7 @@ mod tests {
         );
     }
 
-    /// A path that is not there cannot be asked about: `statvfs` has no answer
+    /// A path that is not there cannot be asked about: the platform API has no answer
     /// for it, and 0 would read as "the disk is full".
     #[test]
     fn free_space_for_an_absent_path_is_an_error_not_zero() {
@@ -480,7 +521,7 @@ mod tests {
     }
 
     /// A path with nothing behind it stops at its last component and reports what
-    /// `statvfs` said, rather than walking up to a directory the caller never
+    /// the platform API said, rather than walking up to a directory the caller never
     /// mentioned.
     ///
     /// A relative name with no separator is the case: its "parent" is the empty

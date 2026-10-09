@@ -349,9 +349,15 @@ mod tests {
 
         let mut checked = 0_usize;
         for environment in [Environment::Production, Environment::Development] {
-            let paths = app_paths::resolve(Some(home), environment, manifest).expect("the layout");
+            let system = crate::system_paths::SystemPaths::from_parts(
+                crate::system_paths::Platform::Darwin,
+                Some(home.to_path_buf()),
+                None,
+                manifest.to_path_buf(),
+            );
+            let paths = app_paths::resolve(&system, environment, manifest).expect("the layout");
             let agent_logs =
-                log_paths::agent_directory(Some(home), Some(agent_data)).expect("the Agent's tree");
+                log_paths::agent_directory(&system, Some(agent_data)).expect("the Agent's tree");
             let reachable = [&paths.cache, &paths.logs, &agent_logs];
 
             for relative in relatives {

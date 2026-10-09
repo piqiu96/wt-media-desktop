@@ -32,7 +32,7 @@
 //!
 //! ## Free space is measured, and a failed measurement is an `Err`
 //!
-//! [`storage::available_bytes_for`] is `statvfs` on the target's volume. A plan
+//! [`storage::available_bytes_for`] uses the target's platform free-space API. A plan
 //! built from `0` when that failed would tell the operator 「需要 230 MB、剩余
 //! 0 字节」 — or, worse, the reverse: a plan that read the failure as "plenty of
 //! room" and offered a move that cannot finish. Neither is a sentence this module

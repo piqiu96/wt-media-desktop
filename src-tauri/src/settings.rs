@@ -1450,16 +1450,19 @@ mod tests {
     fn the_settings_file_lands_in_the_data_root_app_paths_resolves() {
         let home = Path::new("/Users/operator");
         let manifest = Path::new("/build/src-tauri");
+        let system = crate::system_paths::SystemPaths::from_parts(
+            crate::system_paths::Platform::Darwin,
+            Some(home.to_path_buf()),
+            None,
+            manifest.to_path_buf(),
+        );
 
         let installed =
-            crate::app_paths::resolve(Some(home), crate::config::Environment::Production, manifest)
+            crate::app_paths::resolve(&system, crate::config::Environment::Production, manifest)
                 .expect("an installed layout with a home resolves");
-        let development = crate::app_paths::resolve(
-            Some(home),
-            crate::config::Environment::Development,
-            manifest,
-        )
-        .expect("a development layout resolves");
+        let development =
+            crate::app_paths::resolve(&system, crate::config::Environment::Development, manifest)
+                .expect("a development layout resolves");
 
         assert_eq!(
             path(&installed.data),

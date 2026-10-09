@@ -5,6 +5,11 @@
 // `local_agent_task_status` reads a status snapshot.
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app_paths;
 mod bootstrap;
 mod cleanup;
@@ -18,6 +23,7 @@ mod filesystem;
 mod http;
 mod local_agent;
 mod logging;
+mod migration;
 mod paths;
 mod preflight;
 mod saved_files;
@@ -27,6 +33,7 @@ mod sidecar;
 mod state;
 mod storage;
 mod system;
+mod system_paths;
 mod token;
 mod updater;
 // T-07's criterion is a test-only module on purpose: there is no upgrade action
@@ -37,7 +44,6 @@ mod upgrade;
 
 use http::{CloudClient, LocalAgentClient};
 use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
-use std::path::PathBuf;
 use tauri::{Manager, RunEvent};
 use token::RuntimeToken;
 
@@ -70,6 +76,7 @@ mod tests {
 // ---- App Entry Point ----
 
 fn main() {
+    let system = crate::system_paths::SystemPaths::init_from_env();
     // The config is resolved *before* the app is built, because the CSP has to
     // be set on the `Context`: Tauri copies the context's config into the
     // `AppManager`, and that copy is what it reads when it serves the window.
@@ -103,6 +110,11 @@ fn main() {
     // token reaching this list is a wiring line, registered as a boundary in the
     // T-07 evidence rather than claimed as tested.
     let secrets = vec![secret];
+    let windows_migration = std::sync::Arc::new(std::sync::Mutex::new(
+        Ok(None) as Result<Option<migration::MigrationReport>, String>
+    ));
+    let setup_migration = std::sync::Arc::clone(&windows_migration);
+    let migration_system = system.clone();
 
     // ---- The builder, up to and including its plugin phase ----
     //
@@ -161,13 +173,44 @@ fn main() {
             secrets.clone(),
         ))
         .manage(AgentProcess::default())
+        .manage(system.clone())
         // Beside the process handle, because the two answer the same question:
         // `start` sets the id when it stores a child, `stop` clears it when it
         // takes the child away. In-process only (D-10).
         .manage(OperationId::default())
         .manage(RuntimeBindingState::default())
         .manage(SidecarLog::default())
-        .setup(|app| {
+        .setup(move |app| {
+            // Preserve data written by the first Windows layout before the main
+            // window exists. The single-instance plugin has already initialized,
+            // so a second launch does not reach this filesystem copy, and no
+            // frontend command can observe the old/new roots mid-migration.
+            *setup_migration
+                .lock()
+                .expect("Windows migration report lock poisoned") =
+                if migration_system.platform == system_paths::Platform::Windows {
+                    let new_data = app_paths::resolve(
+                        &migration_system,
+                        bootstrap::build_environment(),
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                    )
+                    .map(|paths| paths.data)
+                    .map_err(|error| format!("无法确定 Windows Desktop 数据目录: {error}"));
+                    migration_system
+                        .legacy_windows_desktop_data_dir()
+                        .map_err(|error| format!("无法确定旧 Windows Desktop 数据目录: {error}"))
+                        .and_then(|old| {
+                            let new_data = match new_data {
+                                Ok(new_data) => new_data,
+                                Err(error) => return Err(error),
+                            };
+                            migration::migrate_windows_legacy_data(&old, &new_data)
+                                .map_err(|error| error.to_string())
+                        })
+                } else {
+                    Ok(None)
+                };
+
             // WebView 报错转发的注册点在**前端**（`web/src/apps/desktop/webviewErrors.js`），
             // 不在这里用 `window.eval`。
             //
@@ -301,9 +344,7 @@ fn main() {
     let plan = logging::setup::plan(
         &startup.config,
         bootstrap::build_environment(),
-        // `HOME` is read here and injected downward: `logging::paths` never
-        // touches the environment, so its layout rules stay askable.
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        &system,
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
     );
     let installed = logging::setup::install(plan, secrets);
@@ -317,6 +358,31 @@ fn main() {
         // The summary is the one line a launch must not lose, so it falls back
         // to the plain write this replaces.
         eprintln!("[wt-media-desktop] {summary}");
+    }
+
+    // The copy itself ran during `setup`; only the report waits for the sink.
+    match windows_migration
+        .lock()
+        .expect("Windows migration report lock poisoned")
+        .clone()
+    {
+        Ok(Some(report)) if report.copied_files > 0 || report.skipped_files > 0 => {
+            tracing::info!(
+                target: "desktop.startup",
+                copied_files = report.copied_files,
+                skipped_files = report.skipped_files,
+                "Windows legacy data migration completed"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                target: "desktop.startup",
+                error = %error,
+                "Windows legacy data migration did not run"
+            );
+            eprintln!("[wt-media-desktop] {error}");
+        }
     }
 
     app.run(|app, event| {

@@ -12,6 +12,7 @@
 
 use crate::config::DesktopConfig;
 use crate::state::SidecarLog;
+use crate::system_paths::{Platform, SystemPaths};
 use crate::token::RuntimeToken;
 #[cfg(unix)]
 use rustix::io::Errno;
@@ -41,7 +42,11 @@ const FALLBACK_ARGS: [&str; 2] = ["-m", "wt_media_agent.local_api.server"];
 /// side is not a compile error, it is a sidecar that binds a different port than
 /// the one the client calls, or one that never demands the token the client
 /// sends.
-pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String, String)> {
+pub fn environment(
+    config: &DesktopConfig,
+    token: &RuntimeToken,
+    system: &SystemPaths,
+) -> Result<Vec<(String, String)>, String> {
     let mut vars = vec![
         (
             "WT_MEDIA_LOCAL_API_HOST".to_string(),
@@ -62,12 +67,26 @@ pub fn environment(config: &DesktopConfig, token: &RuntimeToken) -> Vec<(String,
         // and stays a status surface whichever way this is set.
         ("WT_MEDIA_AGENT_RUN_RUNNER".to_string(), "true".to_string()),
     ];
+    // An explicit configuration is the operator's decision on every platform.
+    // On Windows only, an unset value is completed from the same per-user system
+    // root Desktop uses for itself; macOS and Unix keep the Agent's own default.
+    let data_dir = match (&config.agent.data_dir, system.platform) {
+        (Some(data_dir), _) => Some(data_dir.clone()),
+        (None, Platform::Windows) => Some(
+            system
+                .agent_default_data_dir()
+                .map_err(|error| format!("无法确定 Windows Agent 数据目录: {error}"))?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (None, Platform::Darwin | Platform::Unix) => None,
+    };
     // Omitted rather than sent empty — see the test below for why the difference
     // matters to the Agent.
-    if let Some(data_dir) = &config.agent.data_dir {
-        vars.push(("WT_MEDIA_AGENT_DATA_DIR".to_string(), data_dir.clone()));
+    if let Some(data_dir) = data_dir {
+        vars.push(("WT_MEDIA_AGENT_DATA_DIR".to_string(), data_dir));
     }
-    vars
+    Ok(vars)
 }
 
 /// Start the Local Agent, returning the path label and the child handle.
@@ -112,7 +131,7 @@ pub fn start<R: Runtime>(
 ) -> Result<(&'static str, CommandChild), String> {
     const FALLBACK: &str = "started";
 
-    let vars = environment(config, token);
+    let vars = environment(config, token, &SystemPaths::current())?;
     let with_vars = |command: tauri_plugin_shell::process::Command| {
         command.envs(
             vars.iter()
@@ -361,6 +380,18 @@ mod tests {
         vars.iter().cloned().collect()
     }
 
+    fn system(
+        platform: crate::system_paths::Platform,
+        local_app_data: Option<&str>,
+    ) -> SystemPaths {
+        SystemPaths::from_parts(
+            platform,
+            Some(std::path::PathBuf::from("/home/operator")),
+            local_app_data.map(std::path::PathBuf::from),
+            std::env::temp_dir(),
+        )
+    }
+
     /// The Agent is told where to listen and what to demand.
     ///
     /// Values, not just key names: a function that returned the right four keys
@@ -371,7 +402,14 @@ mod tests {
         let config = config_with("127.0.0.1", 18765, None);
         let token = RuntimeToken::generate();
 
-        let vars = as_map(&environment(&config, &token));
+        let vars = as_map(
+            &environment(
+                &config,
+                &token,
+                &system(SystemPaths::current_platform(), None),
+            )
+            .expect("environment"),
+        );
 
         assert_eq!(
             vars.get("WT_MEDIA_LOCAL_API_HOST").map(String::as_str),
@@ -399,15 +437,54 @@ mod tests {
         let token = RuntimeToken::generate();
 
         let unset = config_with("127.0.0.1", 8765, None);
-        assert!(!as_map(&environment(&unset, &token)).contains_key("WT_MEDIA_AGENT_DATA_DIR"));
+        let paths = system(SystemPaths::current_platform(), None);
+        assert!(
+            !as_map(&environment(&unset, &token, &paths).expect("environment"))
+                .contains_key("WT_MEDIA_AGENT_DATA_DIR")
+        );
 
         let set = config_with("127.0.0.1", 8765, Some("/Users/example/agent-data"));
         assert_eq!(
-            as_map(&environment(&set, &token))
+            as_map(&environment(&set, &token, &paths).expect("environment"))
                 .get("WT_MEDIA_AGENT_DATA_DIR")
                 .map(String::as_str),
             Some("/Users/example/agent-data")
         );
+    }
+
+    /// Windows gets a per-user Agent root without requiring a shipped config.
+    ///
+    /// An explicit setting still wins: it is the operator's override, not a
+    /// second default to reconcile.
+    #[test]
+    fn windows_unset_data_dir_is_per_user_and_explicit_data_dir_wins() {
+        let token = RuntimeToken::generate();
+        let paths = system(Platform::Windows, Some("/local"));
+
+        let unset = config_with("127.0.0.1", 8765, None);
+        let vars = as_map(&environment(&unset, &token, &paths).expect("environment"));
+        assert_eq!(
+            vars.get("WT_MEDIA_AGENT_DATA_DIR").map(String::as_str),
+            Some("/local/WTMedia/Agent")
+        );
+
+        let set = config_with("127.0.0.1", 8765, Some("/chosen/agent-data"));
+        assert_eq!(
+            as_map(&environment(&set, &token, &paths).expect("environment"))
+                .get("WT_MEDIA_AGENT_DATA_DIR")
+                .map(String::as_str),
+            Some("/chosen/agent-data")
+        );
+    }
+
+    /// A missing Windows system root is a start failure, not an invitation to
+    /// invent a cwd or install-directory fallback.
+    #[test]
+    fn windows_default_data_dir_requires_local_app_data() {
+        let config = config_with("127.0.0.1", 8765, None);
+        let paths = system(Platform::Windows, None);
+
+        assert!(environment(&config, &RuntimeToken::generate(), &paths).is_err());
     }
 
     /// The Agent is told to run its task loops, not only to serve status.
@@ -425,9 +502,16 @@ mod tests {
         let token = RuntimeToken::generate();
 
         assert_eq!(
-            as_map(&environment(&config, &token))
-                .get("WT_MEDIA_AGENT_RUN_RUNNER")
-                .map(String::as_str),
+            as_map(
+                &environment(
+                    &config,
+                    &token,
+                    &system(SystemPaths::current_platform(), None),
+                )
+                .expect("environment"),
+            )
+            .get("WT_MEDIA_AGENT_RUN_RUNNER")
+            .map(String::as_str),
             Some("true")
         );
     }
@@ -445,14 +529,23 @@ mod tests {
         let first = RuntimeToken::generate();
         let second = RuntimeToken::generate();
 
-        let from_first = as_map(&environment(
-            &config,
-            crate::http::LocalAgentClient::new(&config, first.clone()).token(),
-        ));
-        let from_second = as_map(&environment(
-            &config,
-            crate::http::LocalAgentClient::new(&config, second.clone()).token(),
-        ));
+        let paths = system(SystemPaths::current_platform(), None);
+        let from_first = as_map(
+            &environment(
+                &config,
+                crate::http::LocalAgentClient::new(&config, first.clone()).token(),
+                &paths,
+            )
+            .expect("environment"),
+        );
+        let from_second = as_map(
+            &environment(
+                &config,
+                crate::http::LocalAgentClient::new(&config, second.clone()).token(),
+                &paths,
+            )
+            .expect("environment"),
+        );
 
         assert_eq!(
             from_first
