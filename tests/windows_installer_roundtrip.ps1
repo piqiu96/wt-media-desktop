@@ -5,9 +5,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
-$installDir = Join-Path $env:LOCALAPPDATA '起飞'
-$sidecar = Join-Path $installDir 'wt-media-agent.exe'
-$uninstaller = Join-Path $installDir 'uninstall.exe'
+$productName = ([System.IO.Path]::GetFileName($Installer) -split '_', 2)[0]
+if (-not $productName) { throw "Could not derive product name from $Installer." }
+$uninstallKey = Join-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' $productName
+$expectedInstallDir = Join-Path $env:LOCALAPPDATA $productName
+$installDir = $null
+$sidecar = $null
+$uninstaller = $null
 $sentinel = Join-Path $env:LOCALAPPDATA 'WTMedia\Desktop\data\ci-reinstall-preserve.txt'
 $running = $null
 
@@ -31,12 +35,19 @@ function Start-Agent {
 }
 
 try {
-    if (Test-Path $installDir) {
-        throw "Installer smoke test requires a clean runner: $installDir already exists."
+    if (Test-Path -LiteralPath $expectedInstallDir) {
+        throw "Installer smoke test requires a clean runner: $expectedInstallDir already exists."
     }
 
     Invoke-Setup $Installer
-    if (-not (Test-Path $sidecar)) { throw 'First install did not place the Agent executable.' }
+    $registration = Get-ItemProperty -LiteralPath $uninstallKey -ErrorAction Stop
+    $installDir = $registration.InstallLocation.Trim('"')
+    $sidecar = Join-Path $installDir 'wt-media-agent.exe'
+    $uninstaller = Join-Path $installDir 'uninstall.exe'
+    Write-Host "Registered install directory: $installDir"
+    if (-not (Test-Path -LiteralPath $sidecar)) {
+        throw "First install did not place the Agent executable at $sidecar."
+    }
     New-Item -ItemType Directory -Path (Split-Path $sentinel) -Force | Out-Null
     Set-Content -Path $sentinel -Value 'keep on reinstall'
 
