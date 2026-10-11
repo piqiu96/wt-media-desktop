@@ -172,30 +172,30 @@ mod tests {
     #[test]
     fn only_loopback_destinations_are_treated_as_local() {
         for local in [
-            "http://127.0.0.1:18080/healthz",
+            "http://127.0.0.1:8188/healthz",
             "http://127.0.0.2/healthz",
             "http://127.255.255.254/healthz",
-            "http://localhost:18080/healthz",
+            "http://localhost:8188/healthz",
             "http://LOCALHOST/healthz",
-            "http://[::1]:18080/healthz",
+            "http://[::1]:8188/healthz",
         ] {
             assert!(is_loopback_url(local), "{local} is this machine");
         }
 
         for remote in [
             // Unspecified, not loopback, and a legal `cloud.base_url`.
-            "http://0.0.0.0:18080/healthz",
-            "http://192.168.1.10:18080/healthz",
+            "http://0.0.0.0:8188/healthz",
+            "http://192.168.1.10:8188/healthz",
             "https://cloud.example.test/healthz",
             // A name that contains a local one is still a remote name.
             "http://localhost.evil.test/healthz",
             "http://127.0.0.1.evil.test/healthz",
-            "http://[::2]:18080/healthz",
+            "http://[::2]:8188/healthz",
             // The reason this parses instead of searching for a substring: the
             // host here is `evil.test` and `localhost` is only the userinfo.
             "http://localhost@evil.test/healthz",
             // No scheme at all — `Url::parse` reads `127.0.0.1` as the scheme.
-            "127.0.0.1:18080",
+            "127.0.0.1:8188",
             "",
             "http:///healthz",
         ] {

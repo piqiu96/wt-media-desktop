@@ -617,8 +617,8 @@ mod tests {
             ),
             (
                 "cloud url without a scheme",
-                "base_url = \"http://127.0.0.1:18080\"",
-                "base_url = \"127.0.0.1:18080\"",
+                "base_url = \"http://127.0.0.1:8188\"",
+                "base_url = \"127.0.0.1:8188\"",
                 "cloud.base_url",
             ),
             (
@@ -629,7 +629,7 @@ mod tests {
             ),
             (
                 "empty csp connect-src in production",
-                "csp_connect_src = \"ipc: http://ipc.localhost http://127.0.0.1:18080\"",
+                "csp_connect_src = \"ipc: http://ipc.localhost http://127.0.0.1:8188\"",
                 "csp_connect_src = \"\"",
                 "browser.csp_connect_src",
             ),
@@ -746,8 +746,8 @@ mod tests {
     #[test]
     fn rejected_values_are_not_echoed_in_validation_errors() {
         let text = PRODUCTION_TOML.replace(
-            "base_url = \"http://127.0.0.1:18080\"",
-            "base_url = \"wt-user:wt-secret@127.0.0.1:18080\"",
+            "base_url = \"http://127.0.0.1:8188\"",
+            "base_url = \"wt-user:wt-secret@127.0.0.1:8188\"",
         );
 
         let error = load_with(&BTreeMap::new(), &text, Environment::Production)
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn empty_cloud_address_is_development_only() {
         let text =
-            development_toml().replace("base_url = \"http://127.0.0.1:18080\"", "base_url = \"\"");
+            development_toml().replace("base_url = \"http://127.0.0.1:8188\"", "base_url = \"\"");
 
         let development = load_with(&BTreeMap::new(), &text, Environment::Development);
         assert!(development.is_ok(), "{development:?}");

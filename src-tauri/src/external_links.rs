@@ -205,7 +205,7 @@ mod tests {
         // The control arm: a platform link, http rather than https, is also a
         // web address.
         assert!(hands_to_the_system_browser(&parse(
-            "http://127.0.0.1:18080/api/v1/health"
+            "http://127.0.0.1:8188/api/v1/health"
         )));
     }
 

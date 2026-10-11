@@ -438,12 +438,12 @@ mod tests {
     #[test]
     fn cloud_base_url_is_normalized_then_checked() {
         assert_eq!(
-            require_cloud_base_url("  http://127.0.0.1:18080/  ", NO_CLOUD_ADDRESS_BIND).unwrap(),
-            "http://127.0.0.1:18080"
+            require_cloud_base_url("  http://127.0.0.1:8188/  ", NO_CLOUD_ADDRESS_BIND).unwrap(),
+            "http://127.0.0.1:8188"
         );
         assert_eq!(
-            require_cloud_base_url("http://127.0.0.1:18080//", NO_CLOUD_ADDRESS_REFRESH).unwrap(),
-            "http://127.0.0.1:18080"
+            require_cloud_base_url("http://127.0.0.1:8188//", NO_CLOUD_ADDRESS_REFRESH).unwrap(),
+            "http://127.0.0.1:8188"
         );
 
         // Every spelling of "empty" the four flows can receive, including the

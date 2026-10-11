@@ -23,7 +23,7 @@ port = 8765
 [cloud]
 # Tagged release builds replace this local source default with the HTTPS Cloud
 # origin from the product Manifest before compiling the binary and bundling it.
-base_url = "http://127.0.0.1:18080"
+base_url = "http://127.0.0.1:8188"
 
 [browser]
 # Injected as `connect-src` when the window is created, so the addresses live
@@ -34,7 +34,7 @@ base_url = "http://127.0.0.1:18080"
 # match it and the explicit host is what clears those refusals; macOS has a
 # `postMessage` fallback, which is why a missing entry costs refusals rather than
 # a dead window. Measured: adding both dropped `ipc://` refusals from 3 to 0.
-csp_connect_src = "ipc: http://ipc.localhost http://127.0.0.1:18080"
+csp_connect_src = "ipc: http://ipc.localhost http://127.0.0.1:8188"
 
 [http]
 # Both must be > 0. `reqwest::Client` has no timeout by default, which means a

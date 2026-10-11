@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(
             csp_policy(&shipped()),
             "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost \
-             http://127.0.0.1:18080; style-src 'self' 'unsafe-inline'; img-src 'self' https:"
+             http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https:"
         );
     }
 
@@ -317,7 +317,7 @@ mod tests {
             "{policy}"
         );
         assert!(
-            !policy.contains("127.0.0.1:18080"),
+            !policy.contains("127.0.0.1:8188"),
             "the literal must not survive: {policy}"
         );
     }

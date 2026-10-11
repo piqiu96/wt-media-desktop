@@ -18,7 +18,7 @@ use reqwest::{Client, RequestBuilder};
 /// from `config.cloud.base_url` instead would be wrong, because that is not
 /// reliably where requests go — `require_cloud_base_url` only trims and rejects
 /// empty, it does not compare against the configured value, and the shipped
-/// default *is* `http://127.0.0.1:18080` while the front end has two producers
+/// default *is* `http://127.0.0.1:8188` while the front end has two producers
 /// that disagree about it (one returns `PublicConfig.cloud_base_url`, which may
 /// be remote; others hard-code a loopback literal). So today nearly every Cloud
 /// call is a loopback call, and before this each of them left the machine
@@ -83,8 +83,8 @@ mod tests {
         let cloud = client();
 
         for local in [
-            "http://127.0.0.1:18080/api/v1/nodes",
-            "http://localhost:18080/api/v1/nodes",
+            "http://127.0.0.1:8188/api/v1/nodes",
+            "http://localhost:8188/api/v1/nodes",
         ] {
             assert!(
                 std::ptr::eq(cloud.client_for(local), &cloud.direct),
@@ -94,7 +94,7 @@ mod tests {
 
         for remote in [
             "https://cloud.example.test/api/v1/nodes",
-            "http://192.168.1.10:18080/api/v1/nodes",
+            "http://192.168.1.10:8188/api/v1/nodes",
         ] {
             assert!(
                 std::ptr::eq(cloud.client_for(remote), &cloud.proxied),
