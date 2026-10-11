@@ -4,7 +4,7 @@
   "consumes": {
     "cloud_agent_api": "v1@2026.10.01.1",
     "task_schemas": "v1@2026.07.15.1",
-    "local_agent_api": "v1@2026.07.14.7",
+    "local_agent_api": "v1@2026.10.03.1",
     "local_event_schemas": "profile-guard@2026.07.14.8",
     "local_status_enums": "status@2026.07.14.8"
   }
