@@ -70,9 +70,8 @@
 //! evidence) and is checked again on every acceptance run, by clicking the
 //! button.
 //!
-//! Nothing here records the address. A prepared material's video URL is a signed
-//! grant: it is a credential, and `logging::targets` would file it under a target
-//! whose whole point is being readable later.
+//! Nothing here records the address. Prepared material video links use the public
+//! data-bucket read domain; other platform links can carry their own query data.
 
 use tauri::{
     utils::config::WindowConfig,
@@ -194,12 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn the_signed_object_address_the_drawer_hands_over_is_handed_on() {
-        // The one this module exists for, in the shape the API returns it:
-        // https, host, path-style, query carrying the signature.
+    fn the_public_object_address_the_drawer_hands_over_is_handed_on() {
+        // The material drawer converts the S3 path-style address to the public
+        // data-bucket read URL before requesting a system-browser window.
         let url = parse(
-            "https://s3.oss.longyanyue.cn/data/dev/materials/30/2afa51e6.mp4\
-             ?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=stub",
+            "https://data.bucket.oss.longyanyue.cn/wt_media/dev/materials/30/2afa51e6.mp4",
         );
         assert!(hands_to_the_system_browser(&url));
         // The control arm: a platform link, http rather than https, is also a

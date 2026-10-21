@@ -162,14 +162,12 @@ pub fn resolve(package_info: &tauri::PackageInfo) -> Startup {
 
 /// The CSP the window is served under, built from the config.
 ///
-/// The four directives are the ones `tauri.conf.json` carried as a literal; the
-/// origin that is deployment-specific — Cloud's — is the one value taken from
-/// the file. Keeping the rest fixed is deliberate: this function exists to move
-/// *that* value out of the source tree, not to make the policy a second thing an
-/// operator has to get right.
+/// The existing directives keep their established values. The public data-bucket
+/// origin is allowed only for video playback; Cloud's connect origin still comes
+/// from the desktop config.
 pub fn csp_policy(config: &DesktopConfig) -> String {
     format!(
-        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' https:",
+        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' https:; media-src 'self' https://data.bucket.oss.longyanyue.cn",
         config.browser.csp_connect_src
     )
 }
@@ -282,7 +280,8 @@ mod tests {
         assert_eq!(
             csp_policy(&shipped()),
             "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost \
-             http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https:"
+             http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https:; \
+             media-src 'self' https://data.bucket.oss.longyanyue.cn"
         );
     }
 
