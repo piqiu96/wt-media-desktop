@@ -14,9 +14,9 @@ cargo tauri build --bundles app
 
 APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
 APP_PATH="$DESKTOP_DIR/target/release/bundle/macos/$APP_NAME.app"
-# The name is read rather than written because the app was renamed once and every
-# script here kept looking for the old one. `stage-release-config.sh` reports that
-# as a bare exit status under `set -e`, so the build looked like it had finished.
+# Read the name rather than write it: productName in tauri.conf.json is the only
+# place the app name is defined, and a name that drifts from it fails the build
+# instead of producing a bundle nobody can find.
 if [[ ! -d "$APP_PATH" ]]; then
   echo "cargo tauri build produced no app bundle at: $APP_PATH" >&2
   echo "The name comes from productName in src-tauri/tauri.conf.json." >&2
