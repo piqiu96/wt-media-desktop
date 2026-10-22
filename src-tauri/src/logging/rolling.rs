@@ -1,11 +1,8 @@
 //! The live log file, its hourly history, and the one record that must not grow.
 //!
-//! **The rotator is `file-rotate`, not ours** (the user's ruling D-02: 尽量使用
-//! 开源，尽可能不改轮子). This module used to carry a hand-written rotator --
-//! a date-and-index name, a `create_new` name claim, an age rule and a byte
-//! budget. The ruling that replaced it (D-01/D-03) asks for exactly what the
-//! crate already does, so what is left here is the wrapper and the one bound the
-//! crate does not have.
+//! **The rotator is `file-rotate`, not ours** (ruling D-02: 尽量使用开源，尽可能
+//! 不改轮子). Rotation, archive naming and age-based deletion are the crate's;
+//! what is left here is the wrapper and the one bound the crate does not have.
 //!
 //! The shape, on both sides of the product (ruling D-01):
 //!
@@ -18,9 +15,9 @@
 //! the only one of the two with **rename-on-roll**. `tracing-appender` opens the
 //! dated file directly, so `Rotation::HOURLY` and a stable name cannot both be
 //! had from it. `file-rotate` also brings `FileLimit::Age`, which is **real
-//! age-based deletion** -- measured, not taken from its docs: planting archives
-//! 20, 15 and 2 days old and rotating once deletes the first two and keeps the
-//! third. That is what removed the last hand-rolled rule.
+//! age-based deletion**, measured rather than taken from its docs: planting
+//! archives 20, 15 and 2 days old and rotating once deletes the first two and
+//! keeps the third.
 //!
 //! Four measured consequences, all of them registered rather than implied:
 //!
@@ -48,10 +45,9 @@
 //!   (ruling D-04).
 //!
 //! What is **ours** is the truncation marker: a single record that cannot fit is
-//! cut and marked with the size it had. It is orthogonal to rotation and it is
-//! the ruling's 超长单条 rule (CHG-057 D-05), which the cap ruling did not
-//! revoke -- it only removed the number the old threshold came from. The number
-//! is now its own, much larger, and configurable.
+//! cut and marked with the size it had. It is orthogonal to rotation and carries
+//! the 超长单条 rule (D-05): a single record must never grow a file without
+//! bound. The bound is its own, far above any real record, and configurable.
 
 use std::io::{Error as IoError, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
@@ -86,11 +82,9 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 14;
 
 /// How long one record may be, as shipped.
 ///
-/// Not the ruling's number -- the ruling cancelled the cap it used to be (D-03),
-/// and a single record still must not be able to grow a file without bound
-/// (CHG-057 D-05). 1 MiB is far above any real record (a webview stack trace is
-/// kilobytes) and is configurable, so the threshold can be lowered without a
-/// code change. Registered as CHG-058 Q-01.
+/// A single record must not be able to grow a file without bound (D-05). 1 MiB
+/// is far above any real record (a webview stack trace is kilobytes) and is
+/// configurable, so the threshold can be lowered without a code change.
 pub const DEFAULT_MAX_RECORD_BYTES: u64 = 1024 * 1024;
 
 /// What a truncated record is marked with. Byte-for-byte the Agent's marker
@@ -101,9 +95,8 @@ pub const TRUNCATION_MARKER: &str = " truncate=true original_size=";
 
 /// How long history is kept, and how long one record may be.
 ///
-/// Two fields where there used to be three: the byte budget across the directory
-/// is gone (D-03 -- "不需要控制总量"), and so is the per-file cap that the record
-/// cap used to be derived from.
+/// There is deliberately no byte budget across the directory (D-03 -- "不需要控制
+/// 总量"), and no per-file cap that the record bound would derive from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     /// Days of archives to keep. Deletion past this is the crate's rule.
@@ -339,9 +332,7 @@ mod tests {
     ///
     /// The format is written out here rather than read from [`ARCHIVE_FORMAT`]
     /// on purpose: an expectation built from the constant it is checking moves
-    /// with the constant and cannot fail. Measured -- with `.format(ARCHIVE_FORMAT)`
-    /// here, mutating the constant to `%Y-%m-%d` was caught by nothing but a
-    /// slice panic in a sibling test.
+    /// with the constant and cannot fail.
     fn stamp(hours_ago: i64) -> String {
         (chrono::Local::now() - chrono::Duration::hours(hours_ago))
             .format("%Y-%m-%d-%H")
@@ -525,15 +516,12 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// **A behaviour that changed, pinned rather than only registered.**
+    /// **Pinned, not only registered.**
     ///
-    /// The hand-rolled rotator created nothing until the first record arrived
-    /// (its test was `nothing_is_created_before_the_first_record`).
-    /// `FileRotate::new` opens the live file eagerly, so `Writer::open` now
-    /// leaves an empty `desktop.log` behind even on a launch that logs nothing
-    /// -- including `logging.level = "off"`. A consequence worth a test and not
-    /// only a comment: the shipped config's own note about it would otherwise be
-    /// a claim nothing checks.
+    /// `FileRotate::new` opens the live file eagerly, so `Writer::open` leaves
+    /// an empty `desktop.log` behind even on a launch that logs nothing --
+    /// including `logging.level = "off"`. The shipped config's own note about it
+    /// would otherwise be a claim nothing checks.
     #[test]
     fn the_live_file_exists_as_soon_as_the_writer_does() {
         let root = scratch("eager");

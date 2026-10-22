@@ -32,11 +32,9 @@ impl Clock for Fixed {
 /// The local time 2026-09-24 10:11:12, so an expected line can be written out in
 /// full.
 ///
-/// Built from local fields rather than as a fixed UTC second, because a stamp is
-/// now local: a `Fixed` holding `UNIX_EPOCH + n` would render differently on
-/// every machine and the expected line would have to carry this machine's offset
-/// (CHG-058 D-09). The instant is the same fact either way — what changes is that
-/// the *assertion* is now portable.
+/// Built from local fields rather than as a fixed UTC second: a `Fixed` holding
+/// `UNIX_EPOCH + n` would render differently on every machine, and the expected
+/// line would have to carry this machine's offset.
 pub(crate) fn clock() -> Arc<dyn Clock + Send + Sync> {
     let when = chrono::Local
         .with_ymd_and_hms(2026, 9, 24, 10, 11, 12)
@@ -89,16 +87,15 @@ pub(crate) fn options(directory: Option<&Path>) -> Options {
 /// directory that was never created reads as no records, which is what a
 /// launch that logged nothing produces.
 ///
-/// **What "in order" means now that the file name is stable.** The live file is
-/// `desktop.log` and the archives are `desktop.log.<YYYY-MM-DD-HH>`, so the
-/// live file is the one `file-rotate` is currently appending to and the
-/// archives are the hours that ended — oldest first, and the live file last.
-/// The old filter (`extension() == "log"`) happened to work, but for the wrong
-/// reason: it was written when every file in the family was a `.log` and the
-/// union of them was what a test wanted. It would now silently *exclude* the
-/// archives, and a test that ran across a real hour boundary would lose the
-/// records written before it and fail somewhere unrelated. Named explicitly
-/// instead, so the archive case is at least handled the same way it was.
+/// **What "in order" means.** The live file is `desktop.log` and the archives
+/// are `desktop.log.<YYYY-MM-DD-HH>`, so the live file is the one `file-rotate`
+/// is currently appending to and the archives are the hours that ended — oldest
+/// first, and the live file last.
+///
+/// The filter names both shapes explicitly. An `extension() == "log"` filter
+/// would silently *exclude* the archives, and a test that ran across a real hour
+/// boundary would lose the records written before it and fail somewhere
+/// unrelated.
 pub(crate) fn written(directory: &Path) -> String {
     let mut text = String::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
