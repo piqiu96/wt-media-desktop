@@ -39,14 +39,14 @@
 //! ## Why a start re-pushes what it already pushed
 //!
 //! The Agent is a child process of this one and keeps no memory across a restart:
-//! the node credential is held **in memory only** (T-04's ruling) and the save
-//! directory is in the Agent's own SQLite, which can be older than the choice on
-//! disk. A `local_agent_start` that succeeded is therefore the one moment where
-//! saying both again is cheap and correct, and the two `offer_*` functions below
-//! are that moment's whole content. They are best-effort **and separate**: the
-//! Agent is up and healthy by the time they run, so a push that fails must not
-//! turn a start that plainly worked into an error, and the credential failing
-//! must not stop the directory from being offered.
+//! the Agent Token is held **in memory only** and the save directory is in the
+//! Agent's own SQLite, which can be older than the choice on disk. A
+//! `local_agent_start` that succeeded is therefore the one moment where saying
+//! both again is cheap and correct, and the two `offer_*` functions below are
+//! that moment's whole content. They are best-effort **and separate**: the Agent
+//! is up and healthy by the time they run, so a push that fails must not turn a
+//! start that plainly worked into an error, and the token failing must not stop
+//! the directory from being offered.
 //!
 //! Both are split out of the start for the reason the record functions in
 //! `commands::agent` are: a command takes `State`, which no test can build, and
@@ -57,12 +57,12 @@ use crate::dto::{
 };
 use crate::http::LocalAgentClient;
 use crate::saved_files::find_in_known;
-use crate::state::RuntimeBinding;
+use crate::state::AgentToken;
 use std::path::{Path, PathBuf};
 use tauri::State;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use super::{bind, reveal, settings};
+use super::{agent_token, reveal, settings};
 
 /// What Desktop posts to the Agent's save-directory route.
 ///
@@ -111,26 +111,23 @@ pub(crate) async fn push(
     Ok(answer.data)
 }
 
-/// Tell a freshly started Agent the Cloud identity it has to report under.
+/// Tell a freshly started Agent the Agent Token it has to report under.
 ///
-/// `None` when there is nothing to say or it was said: no binding means this
-/// Desktop has not been bound in this launch, and the credential that would be
-/// pushed is one Cloud issues at bind time — Desktop holds nothing to re-state.
-/// `Some(reason)` only when an attempt was made and failed, which is the case
-/// worth a record: the Agent is running with no way to report a download.
+/// `None` when there is nothing to say or it was said: no token means this
+/// Desktop has not exchanged one in this launch, and Desktop holds nothing to
+/// re-state. `Some(reason)` only when an attempt was made and failed, which is
+/// the case worth a record: the Agent is running with no way to report a
+/// download.
 ///
-/// The push itself is `bind::bind_node`, the **same** function the bind flow
-/// calls. A second implementation would be the one that drifted, and the drift
+/// The push itself is `agent_token::push`, the **same** function the exchange
+/// uses. A second implementation would be the one that drifted, and the drift
 /// would be silent — the Agent would answer 200 to both and only the download
 /// would notice.
-pub(crate) async fn offer_credential(
+pub(crate) async fn offer_agent_token(
     client: &crate::http::LocalAgentClient,
-    binding: Option<&RuntimeBinding>,
+    token: Option<&AgentToken>,
 ) -> Option<String> {
-    let held = binding?;
-    bind::bind_node(client, &held.node_id, &held.node_credential)
-        .await
-        .err()
+    agent_token::push(client, token?).await.err()
 }
 
 /// Tell a freshly started Agent which folder this machine's downloads go in.
@@ -172,11 +169,11 @@ pub(crate) async fn offer_directory(
 /// cases.
 pub(crate) async fn offer_stored_choices(
     client: &crate::http::LocalAgentClient,
-    binding: Option<&RuntimeBinding>,
+    token: Option<&AgentToken>,
     chosen: Result<Option<String>, String>,
 ) -> Vec<String> {
     let mut failures = Vec::new();
-    if let Some(reason) = offer_credential(client, binding).await {
+    if let Some(reason) = offer_agent_token(client, token).await {
         failures.push(reason);
     }
     match chosen {
@@ -409,7 +406,7 @@ mod tests {
     /// a message. Absolute, because the Agent refuses anything else, and under
     /// `/Volumes` so it reads as a path on this machine rather than as a fixture.
     const FOLDER: &str = "/Volumes/Movies/WTMedia";
-    const CREDENTIAL: &str = "node-credential-77c1-secret";
+    const ISSUED: &str = "v1.agent-token-77c1-secret";
 
     fn client_to(port: u16) -> LocalAgentClient {
         let text = PRODUCTION_TOML.replace("port = 8765", &format!("port = {port}"));
@@ -518,11 +515,16 @@ mod tests {
         server.local_addr().expect("the bound address").port()
     }
 
-    fn binding() -> RuntimeBinding {
-        RuntimeBinding {
-            node_id: "node-a".into(),
-            node_credential: CREDENTIAL.into(),
+    fn token() -> AgentToken {
+        AgentToken {
+            token: ISSUED.into(),
+            expires_at: Some(1_800_000_000),
         }
+    }
+
+    /// The Agent's answer to a token it accepted.
+    fn accepted() -> String {
+        r#"{"data":{"has_agent_token":true,"expires_at":1800000000}}"#.into()
     }
 
     /// The body is one key, spelled the Agent's way.
@@ -623,47 +625,41 @@ mod tests {
         assert_eq!(returned, None, "nothing to say, so nothing is said");
     }
 
-    /// An unbound Desktop has no credential to re-state.
+    /// A Desktop that has not exchanged a token has nothing to re-state.
     #[test]
-    fn an_unbound_desktop_offers_no_credential() {
+    fn a_desktop_without_a_token_offers_nothing() {
         let port = silent_port();
 
-        let returned = tauri::async_runtime::block_on(offer_credential(&client_to(port), None));
+        let returned = tauri::async_runtime::block_on(offer_agent_token(&client_to(port), None));
 
         assert_eq!(returned, None);
     }
 
     /// Both things a start says arrive, over their two routes.
     #[test]
-    fn a_start_offers_the_credential_and_the_folder_together() {
-        let (port, seen) = serving(|path| {
-            match path {
-            "/api/v1/bind" => (
-                "200 OK".into(),
-                r#"{"node_id":"node-a","session_token":"s","status":"active","has_node_credential":true}"#
-                    .into(),
-            ),
+    fn a_start_offers_the_token_and_the_folder_together() {
+        let (port, seen) = serving(|path| match path {
+            "/api/v1/agent-token" => ("200 OK".into(), accepted()),
             _ => ("200 OK".into(), stored(FOLDER)),
-        }
         });
 
         let failures = tauri::async_runtime::block_on(offer_stored_choices(
             &client_to(port),
-            Some(&binding()),
+            Some(&token()),
             Ok(Some(FOLDER.to_string())),
         ));
 
         assert_eq!(failures, Vec::<String>::new(), "nothing to report");
         let requests = received(&seen);
-        assert_eq!(arrivals(&seen, "/api/v1/bind"), 1);
+        assert_eq!(arrivals(&seen, "/api/v1/agent-token"), 1);
         assert_eq!(arrivals(&seen, "/api/v1/save-directory"), 1);
-        let bind = requests
+        let offered = requests
             .iter()
-            .find(|request| request.contains("/api/v1/bind"))
-            .expect("the bind request");
+            .find(|request| request.contains("/api/v1/agent-token"))
+            .expect("the token request");
         assert!(
-            bind.contains(CREDENTIAL) && bind.contains("node-a"),
-            "the credential and the node it belongs to: {bind}"
+            offered.contains(ISSUED) && offered.contains("1800000000"),
+            "the token travels with the expiry it was issued for: {offered}"
         );
         let directory = requests
             .iter()
@@ -675,18 +671,18 @@ mod tests {
     /// One push failing does not stop the other.
     ///
     /// The property `offer_stored_choices` is a separate function for, and one
-    /// `?` would undo: the Agent answers a 503 to the credential route and a 200
+    /// `?` would undo: the Agent answers a 503 to the token route and a 200
     /// to the directory route, and **both** requests arrive. Without this arm a
     /// composition that propagated the first failure would be indistinguishable
     /// from a correct one in every other test here, and the folder would go
     /// unset for a reason that has nothing to do with the folder.
     #[test]
-    fn a_refused_credential_does_not_stop_the_folder_from_being_offered() {
+    fn a_refused_token_does_not_stop_the_folder_from_being_offered() {
         let (port, seen) = serving(|path| {
-            if path == "/api/v1/bind" {
+            if path == "/api/v1/agent-token" {
                 (
                     "503 Service Unavailable".into(),
-                    r#"{"error":{"code":"node_credential_unavailable"}}"#.into(),
+                    r#"{"error":{"code":"agent_token_unavailable"}}"#.into(),
                 )
             } else {
                 ("200 OK".into(), stored(FOLDER))
@@ -695,7 +691,7 @@ mod tests {
 
         let failures = tauri::async_runtime::block_on(offer_stored_choices(
             &client_to(port),
-            Some(&binding()),
+            Some(&token()),
             Ok(Some(FOLDER.to_string())),
         ));
 
@@ -705,7 +701,7 @@ mod tests {
             "one refusal, reported once: {failures:?}"
         );
         assert!(
-            failures[0].contains("node_credential_unavailable"),
+            failures[0].contains("agent_token_unavailable"),
             "{failures:?}"
         );
         assert_eq!(
@@ -720,21 +716,15 @@ mod tests {
     /// The `Err` arm of `chosen`: a corrupt or foreign-schema settings file is a
     /// reason the folder will not be set, and it is a different sentence from
     /// 「没有选择」 — so it is recorded rather than read as 「nothing chosen」. The
-    /// credential push still happens, because the two have nothing to do with
+    /// token push still happens, because the two have nothing to do with
     /// each other.
     #[test]
     fn a_settings_file_that_cannot_be_read_is_reported_and_offers_nothing() {
-        let (port, seen) = serving(|_| {
-            (
-                "200 OK".into(),
-                r#"{"node_id":"node-a","session_token":"s","status":"active","has_node_credential":true}"#
-                    .into(),
-            )
-        });
+        let (port, seen) = serving(|_| ("200 OK".into(), accepted()));
 
         let failures = tauri::async_runtime::block_on(offer_stored_choices(
             &client_to(port),
-            Some(&binding()),
+            Some(&token()),
             Err("读取设置失败：schema_version 不认识".into()),
         ));
 
@@ -746,9 +736,9 @@ mod tests {
             "a value that could not be read must not be guessed at"
         );
         assert_eq!(
-            arrivals(&seen, "/api/v1/bind"),
+            arrivals(&seen, "/api/v1/agent-token"),
             1,
-            "and the credential still goes"
+            "and the token still goes"
         );
     }
 
@@ -765,13 +755,13 @@ mod tests {
 
         let failures = tauri::async_runtime::block_on(offer_stored_choices(
             &client_to(port),
-            Some(&binding()),
+            Some(&token()),
             Ok(Some(FOLDER.to_string())),
         ));
 
         assert_eq!(failures.len(), 2, "{failures:?}");
         assert!(
-            failures[0].contains("写入Local Agent节点失败"),
+            failures[0].contains("写入Local Agent执行凭证失败"),
             "{failures:?}"
         );
         assert!(
@@ -780,7 +770,7 @@ mod tests {
         );
         for reason in &failures {
             assert!(
-                !reason.contains("Movies") && !reason.contains(CREDENTIAL),
+                !reason.contains("Movies") && !reason.contains(ISSUED),
                 "no path and no secret on the way to a record: {reason}"
             );
         }

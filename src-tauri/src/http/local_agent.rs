@@ -129,7 +129,7 @@ mod tests {
         for (client, token) in [(&one, &first), (&other, &second)] {
             let expected = format!("Bearer {}", token.expose());
             assert_eq!(header_of(client.get("/healthz")), expected);
-            assert_eq!(header_of(client.post("/api/v1/bind")), expected);
+            assert_eq!(header_of(client.post("/api/v1/agent-token")), expected);
         }
         assert_ne!(
             first.expose(),
@@ -155,7 +155,7 @@ mod tests {
         for path in [
             "/healthz",
             "/api/v1/status",
-            "/api/v1/bind",
+            "/api/v1/agent-token",
             "/api/v1/health",
         ] {
             let request = client.get(path).build().expect("the request must build");

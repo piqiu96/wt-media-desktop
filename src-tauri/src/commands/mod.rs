@@ -5,7 +5,8 @@
 
 pub mod account;
 pub mod agent;
-pub mod bind;
+pub mod agent_token;
+pub mod bit_account;
 pub mod cleanup;
 pub mod diagnostic;
 pub mod downloads;
@@ -16,3 +17,6 @@ pub mod saved_files;
 pub mod settings;
 pub mod storage;
 pub mod webview;
+
+#[cfg(test)]
+pub(crate) mod testing;

@@ -1,8 +1,8 @@
 // WT Media Desktop — Tauri v2 shell with a real Local Agent HTTP bridge.
 //
 // The bridge is HTTP only: the Agent does expose a `text/event-stream` endpoint
-// (`local_api/server.py`), but nothing here consumes a stream —
-// `local_agent_task_status` reads a status snapshot.
+// (`local_api/server.py`), but nothing here consumes a stream — task progress
+// reaches the page through Cloud.
 // M1-R5: replaces the M0 mock with real reqwest HTTP calls.
 
 #![cfg_attr(
@@ -15,13 +15,11 @@ mod bootstrap;
 mod cleanup;
 mod commands;
 mod config;
-mod device_identity;
 mod diagnostic;
 mod dto;
 mod external_links;
 mod filesystem;
 mod http;
-mod local_agent;
 mod logging;
 mod migration;
 mod paths;
@@ -43,7 +41,7 @@ mod updater;
 mod upgrade;
 
 use http::{CloudClient, LocalAgentClient};
-use state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
+use state::{AgentProcess, AgentTokenState, OperationId, SidecarLog};
 use tauri::{Manager, RunEvent};
 use token::RuntimeToken;
 
@@ -178,7 +176,10 @@ fn main() {
         // `start` sets the id when it stores a child, `stop` clears it when it
         // takes the child away. In-process only (D-10).
         .manage(OperationId::default())
-        .manage(RuntimeBindingState::default())
+        // The Agent Token lives here and nowhere else: not on disk, not in the
+        // page. `local_agent_configure_token` fills it, the download start
+        // re-pushes it to a fresh sidecar, and the diagnostic bundle masks it.
+        .manage(AgentTokenState::default())
         .manage(SidecarLog::default())
         .setup(move |app| {
             // Preserve data written by the first Windows layout before the main
@@ -233,12 +234,6 @@ fn main() {
             // `build` returns, which is why the launch summary is the first
             // record in `desktop.log`.
             external_links::install(app.handle())?;
-            // Restore the node credential persisted by a previous bind so the
-            // Agent can keep authenticating after a Desktop restart. It must
-            // happen here rather than at `.manage()`: resolving the app data
-            // directory needs an `AppHandle`, which does not exist yet when
-            // state is registered. Absence is an unbound machine, not an error.
-            app.state::<RuntimeBindingState>().restore(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -246,11 +241,9 @@ fn main() {
             commands::agent::local_agent_health,
             commands::agent::local_agent_start,
             commands::agent::local_agent_stop,
-            commands::agent::local_agent_task_status,
-            commands::bind::local_agent_bind,
-            commands::bind::local_agent_bind_session,
-            commands::bind::local_agent_refresh_runtime,
-            device_identity::local_device_identity,
+            commands::agent_token::local_agent_configure_token,
+            commands::agent_token::local_agent_token_facts,
+            commands::bit_account::local_agent_bit_account_bind,
             commands::account::local_agent_account_check,
             commands::account::local_agent_cookie_read,
             commands::profile::local_agent_profile_scan,
@@ -284,7 +277,7 @@ fn main() {
             commands::reveal::local_open_place,
             // T-04's three, appended for the same reason as the eleven above.
             // The picker is the only one that reaches a native surface; the other
-            // two are the same loopback HTTP as `local_agent_bind`. Note that
+            // two are the same loopback HTTP as the Agent Token push. Note that
             // `local_open_saved_file` takes a **name**, not a path, so it adds no
             // way for the page to name a file this process may open.
             commands::downloads::local_pick_save_directory,

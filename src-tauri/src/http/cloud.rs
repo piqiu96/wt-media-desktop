@@ -6,12 +6,11 @@ use reqwest::{Client, RequestBuilder};
 
 /// Talks to Cloud.
 ///
-/// Holds no base URL and no credential: the base URL arrives as a command
-/// argument and the credential comes from the node registration performed during
-/// binding, so both are per-request facts rather than client state. Unlike the
-/// Local Agent client, this one attaches nothing by itself — a Cloud call that
-/// needs a credential says so at the call site with `bearer_auth`, and the
-/// registration call correctly has none.
+/// Holds no base URL and no credential: both arrive as command arguments, so
+/// they are per-request facts rather than client state. Unlike the Local Agent
+/// client, this one attaches nothing by itself — a Cloud call that needs a
+/// credential says so at the call site (the session token header on the Agent
+/// Token exchange, `bearer_auth` on Agent-token routes).
 ///
 /// Which proxy a request uses is a third per-request fact, and it is decided at
 /// the same moment and for the same reason as the URL: from the URL. Building
