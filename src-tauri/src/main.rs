@@ -15,6 +15,7 @@ mod bootstrap;
 mod cleanup;
 mod commands;
 mod config;
+mod device_identity;
 mod diagnostic;
 mod dto;
 mod external_links;
@@ -307,6 +308,7 @@ fn main() {
             // that one does, and it opens a directory rather than the file, so it
             // adds no way for the page to reach a path of its own choosing.
             commands::downloads::local_reveal_saved_file,
+            commands::device::local_device_id,
         ])
         .plugin(tauri_plugin_shell::init())
         // The folder picker. Registered next to the shell plugin rather than

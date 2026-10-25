@@ -8,6 +8,7 @@ pub mod agent;
 pub mod agent_token;
 pub mod bit_account;
 pub mod cleanup;
+pub mod device;
 pub mod diagnostic;
 pub mod downloads;
 pub mod profile;
