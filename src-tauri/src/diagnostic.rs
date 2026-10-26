@@ -2,8 +2,8 @@
 //!
 //! Four things go in, and the list is the whole contract: this build's version
 //! and where it took its configuration from; the components' state (this app,
-//! the sidecar process, the Cloud binding, the Agent as it last answered); the
-//! log files, masked; and a summary of the Agent's failed work.
+//! the sidecar process, whether an Agent Token is held, the Agent as it last
+//! answered); the log files, masked; and a summary of the Agent's failed work.
 //!
 //! ```text
 //! wt-media-diagnostic-20260924-225501.tar.gz
@@ -32,9 +32,9 @@
 //!
 //! What this module must never do is hand a value to `write_archive` that did not
 //! come through [`mask`]. The one credential this process holds — the launch
-//! token — and the one it may hold — the binding's node credential — are both
-//! passed in as `secrets`, so they are masked *verbatim* wherever they appear,
-//! including in text this module did not build.
+//! token — and the one it may hold — the Agent Token — are both passed in as
+//! `secrets`, so they are masked *verbatim* wherever they appear, including in
+//! text this module did not build.
 //!
 //! ## The caps, and what happens at each
 //!
@@ -220,9 +220,10 @@ pub struct HostFacts {
     pub free_bytes: Option<u64>,
     /// Whether this process spawned a sidecar it has not stopped.
     pub sidecar_running: bool,
-    /// The binding's node id when this session is bound. The **credential** that
-    /// comes with it is never carried here; it goes in [`HostFacts::secrets`].
-    pub binding_node_id: Option<String>,
+    /// Whether this process holds an Agent Token and when it expires. The token
+    /// itself is never carried here; it goes in [`HostFacts::secrets`].
+    pub agent_token_configured: bool,
+    pub agent_token_expires_at: Option<i64>,
     pub agent: AgentFacts,
     /// Values that must not appear in the bundle, masked verbatim wherever they
     /// occur. See the module header.
@@ -566,7 +567,12 @@ pub fn summary(
             "free_bytes": host.free_bytes,
         },
         "sidecar": { "running": host.sidecar_running },
-        "binding": { "bound": host.binding_node_id.is_some(), "node_id": host.binding_node_id },
+        // Not `agent_token`: the whole document goes through `mask`, and a key
+        // ending in `token` makes the mask eat the object that follows it.
+        "execution_credential": {
+            "configured": host.agent_token_configured,
+            "expires_at": host.agent_token_expires_at,
+        },
         "agent": agent,
         "failed_work": {
             "source": failures.source,
@@ -616,10 +622,18 @@ pub fn manifest(host: &HostFacts, logs: &Logs, failures: &Failures, created_at: 
         }
     ));
     out.push_str(&format!(
-        "绑定: {}\n",
-        match &host.binding_node_id {
-            Some(node) => format!("已绑定（node_id {node}）"),
-            None => "未绑定".to_string(),
+        "执行凭证: {}\n",
+        match (host.agent_token_configured, host.agent_token_expires_at) {
+            (false, _) => "未持有".to_string(),
+            (true, Some(expires_at)) => format!(
+                "已持有（过期 {}）",
+                u64::try_from(expires_at)
+                    .map(|seconds| crate::diagnostic::created_at(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+                    ))
+                    .unwrap_or_else(|_| expires_at.to_string())
+            ),
+            (true, None) => "已持有（未告知过期时间）".to_string(),
         }
     ));
 
@@ -844,7 +858,8 @@ mod tests {
             cache_root: "/home/operator/.local/cache".to_string(),
             free_bytes: Some(91_757_240_320),
             sidecar_running: false,
-            binding_node_id: Some("node-7".to_string()),
+            agent_token_configured: true,
+            agent_token_expires_at: Some(1_800_000_000),
             agent: AgentFacts::Answered(BTreeMap::from([(
                 "agent_version".to_string(),
                 "0.2.2".to_string(),
@@ -943,8 +958,12 @@ mod tests {
             serde_json::from_str(&text_of(&files, SUMMARY_NAME)).expect("the summary is JSON");
         assert_eq!(summary["desktop"]["app_version"], "0.1.0");
         assert_eq!(summary["desktop"]["build_version"], "0.1.0");
-        assert_eq!(summary["binding"]["bound"], true);
-        assert_eq!(summary["binding"]["node_id"], "node-7");
+        assert_eq!(summary["execution_credential"]["configured"], true);
+        assert_eq!(summary["execution_credential"]["expires_at"], 1_800_000_000);
+        assert!(
+            text_of(&files, MANIFEST_NAME).contains("执行凭证: 已持有"),
+            "and the person reading it is told too"
+        );
         assert_eq!(summary["agent"]["state"], "answered");
         assert_eq!(summary["agent"]["agent_version"], "0.2.2");
         assert_eq!(summary["logs"]["entries"], 0);
@@ -976,11 +995,11 @@ mod tests {
     #[test]
     fn a_credential_in_the_logs_or_the_facts_never_reaches_the_archive() {
         const TOKEN: &str = "launch-token-9f2c8a41";
-        const NODE: &str = "node-credential-4b7e1d90";
+        const AGENT_TOKEN: &str = "v1.agent-token-4b7e1d90";
         let base = scratch("credential");
         let tree = base.join("logs/agent");
         let raw = format!(
-            "2026-09-24T22:55:01 [INFO] agent.auth: node_credential={NODE} sent\ntoken={TOKEN}\n"
+            "2026-09-24T22:55:01 [INFO] agent.auth: agent_token={AGENT_TOKEN} sent\ntoken={TOKEN}\n"
         );
         plant(&tree.join("agent.log"), &raw);
 
@@ -991,16 +1010,16 @@ mod tests {
         // covers the write too.
         let planted = std::fs::read_to_string(tree.join("agent.log")).expect("the planted file");
         assert!(
-            planted.contains(TOKEN) && planted.contains(NODE),
+            planted.contains(TOKEN) && planted.contains(AGENT_TOKEN),
             "the control must find both credentials in the input"
         );
 
         let logs = gather_logs(
             &[(reader::Source::Agent, tree.clone())],
-            &[TOKEN.to_string(), NODE.to_string()],
+            &[TOKEN.to_string(), AGENT_TOKEN.to_string()],
             &Caps::default(),
         );
-        let host = facts(vec![TOKEN.to_string(), NODE.to_string()]);
+        let host = facts(vec![TOKEN.to_string(), AGENT_TOKEN.to_string()]);
         let files = bundle_files(
             &host,
             &logs,
@@ -1022,7 +1041,7 @@ mod tests {
         let written =
             write_archive(&base, &archive_stem("20260924-225501"), &files).expect("the archive");
         let all = std::fs::read(&written.path).expect("the bytes");
-        for (label, needle) in [("token", TOKEN), ("node credential", NODE)] {
+        for (label, needle) in [("token", TOKEN), ("agent token", AGENT_TOKEN)] {
             assert!(
                 !all.windows(needle.len())
                     .any(|window| window == needle.as_bytes()),
@@ -1032,7 +1051,7 @@ mod tests {
         // And the mask did its job rather than the line being dropped: the key is
         // still there, which is what makes the line useful to read.
         let entry = text_of(&files, "logs/agent/agent.log");
-        assert!(entry.contains("node_credential=***"), "{entry}");
+        assert!(entry.contains("agent_token=***"), "{entry}");
         assert!(entry.contains("token=***"), "{entry}");
         std::fs::remove_dir_all(&base).ok();
     }

@@ -1,11 +1,10 @@
 //! Account-check and cookie-read args/results. Both are sensitive-task flows
-//! gated by a Cloud permit.
+//! gated by a permit the Local Agent obtains from Cloud.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountCheckArgs {
-    pub cloud_base_url: String,
     pub task_id: String,
     pub bit_profile_id: String,
     pub platform: String,
@@ -26,7 +25,6 @@ pub struct AccountCheckResult {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CookieReadArgs {
-    pub cloud_base_url: String,
     pub task_id: String,
     pub bit_profile_id: String,
 }

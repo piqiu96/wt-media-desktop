@@ -9,13 +9,12 @@
 //!
 //! ## What this command can see, and what it deliberately cannot
 //!
-//! It reads four pieces of managed state: the config (for the Agent's data
+//! It reads five pieces of managed state: the config (for the Agent's data
 //! directory), the host facts injected at launch, the Agent client (for its
-//! status), the process handle and the binding. Of those, exactly one holds a
-//! credential — [`RuntimeBinding::node_credential`] — and it is readable **only**
-//! to be masked: [`secrets`] takes it and the bundle's facts never do. The launch
-//! token is in the same position from the other side: it is in
-//! [`DiagnosticHost::secrets`], which is masked, and nowhere else in this module.
+//! status), the process handle and the Agent Token. Of those, exactly two hold
+//! credentials — the token this process exchanged, and the launch token — and
+//! both are readable **only** to be masked: [`secrets`] takes them and the
+//! bundle's facts never do.
 //!
 //! ## The Agent's status is a fact, not a precondition
 //!
@@ -40,7 +39,7 @@ use crate::diagnostic::{AgentFacts, Caps, DiagnosticError, Failures, HostFacts, 
 use crate::dto::{DiagnosticReport, LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
 use crate::logging::reader::Source;
-use crate::state::{AgentProcess, RuntimeBinding, RuntimeBindingState};
+use crate::state::{AgentProcess, AgentToken, AgentTokenState};
 use crate::storage;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,8 +60,8 @@ pub struct DiagnosticHost {
     /// Why a located configuration file was refused, if one was.
     pub config_rejected: Option<String>,
     /// Values the bundle must not contain. The launch token, and anything else
-    /// the launch knows is a secret; the binding's credential is added per call
-    /// by [`secrets`], because it arrives after startup.
+    /// the launch knows is a secret; the Agent Token is added per call by
+    /// [`secrets`], because it arrives after startup.
     pub secrets: Vec<String>,
 }
 
@@ -80,18 +79,17 @@ impl DiagnosticHost {
     }
 }
 
-/// Every value the bundle must not contain, given the binding as it is now.
+/// Every value the bundle must not contain, given the Agent Token as it is now.
 ///
-/// The credential is added here and not stored: it belongs to a session that
-/// starts and ends inside this process (D-10), so a copy of it in a `Vec` that
-/// outlives the session would be a credential held for no reason. Empty values
-/// are dropped — a mask told to hide `""` would mask every position in every
-/// string, which is the one way this list can do damage instead of preventing it.
-fn secrets(injected: &[String], binding: Option<&RuntimeBinding>) -> Vec<String> {
+/// The token is added here and not stored: it lives in memory anyway, and the
+/// bundle is the one artifact that leaves this machine. Empty values are dropped
+/// — a mask told to hide `""` would mask every position in every string, which
+/// is the one way this list can do damage instead of preventing it.
+fn secrets(injected: &[String], token: Option<&AgentToken>) -> Vec<String> {
     let mut all: Vec<String> = injected.iter().filter(|s| !s.is_empty()).cloned().collect();
-    if let Some(binding) = binding {
-        if !binding.node_credential.is_empty() {
-            all.push(binding.node_credential.clone());
+    if let Some(token) = token {
+        if !token.token.is_empty() {
+            all.push(token.token.clone());
         }
     }
     all
@@ -146,11 +144,9 @@ fn agent_fields(status: &LocalAgentStatus) -> BTreeMap<String, String> {
             fields.insert(key.to_string(), value.clone());
         }
     };
-    optional("node_id", status.node_id.as_ref());
     optional("agent_version", status.agent_version.as_ref());
     optional("python_version", status.python_version.as_ref());
     optional("bitbrowser_status", status.bitbrowser_status.as_ref());
-    optional("main_user_id", status.main_user_id.as_ref());
     optional("operating_system", status.operating_system.as_ref());
     optional("cpu_architecture", status.cpu_architecture.as_ref());
     optional("workdir_status", status.workdir_status.as_ref());
@@ -196,7 +192,7 @@ fn host_facts(
     app_version: String,
     resolved: &crate::commands::storage::Resolved,
     sidecar_running: bool,
-    binding: Option<&RuntimeBinding>,
+    token: Option<&AgentToken>,
     agent: AgentFacts,
     secrets: Vec<String>,
 ) -> HostFacts {
@@ -214,7 +210,8 @@ fn host_facts(
         // so a reader can tell a full disk from a failed `statvfs`.
         free_bytes: storage::available_bytes_for(&resolved.paths.data).ok(),
         sidecar_running,
-        binding_node_id: binding.map(|binding| binding.node_id.clone()),
+        agent_token_configured: token.is_some(),
+        agent_token_expires_at: token.and_then(|token| token.expires_at),
         agent,
         secrets,
     }
@@ -241,18 +238,18 @@ fn export(
     host: &DiagnosticHost,
     app_version: String,
     sidecar_running: bool,
-    binding: Option<&RuntimeBinding>,
+    token: Option<&AgentToken>,
     agent: AgentFacts,
     home: Option<&Path>,
     now: SystemTime,
 ) -> Result<(Written, Logs, Failures, String), DiagnosticError> {
-    let secrets = secrets(&host.secrets, binding);
+    let secrets = secrets(&host.secrets, token);
     let facts = host_facts(
         host,
         app_version,
         resolved,
         sidecar_running,
-        binding,
+        token,
         agent,
         secrets.clone(),
     );
@@ -276,15 +273,11 @@ pub async fn local_diagnostic_export(
     host: State<'_, DiagnosticHost>,
     client: State<'_, LocalAgentClient>,
     process: State<'_, AgentProcess>,
-    binding: State<'_, RuntimeBindingState>,
+    tokens: State<'_, AgentTokenState>,
 ) -> Result<DiagnosticReport, String> {
     let resolved = resolve(&config)?;
 
-    let bound = binding
-        .0
-        .lock()
-        .map_err(|_| "runtime binding lock poisoned".to_string())?
-        .clone();
+    let token = tokens.get();
     let sidecar_running = process
         .0
         .lock()
@@ -303,7 +296,7 @@ pub async fn local_diagnostic_export(
         &host,
         app_version,
         sidecar_running,
-        bound.as_ref(),
+        token.as_ref(),
         agent,
         home.as_deref(),
         SystemTime::now(),
@@ -370,11 +363,10 @@ mod tests {
 
     fn a_status(profiles: Vec<&str>) -> LocalAgentStatus {
         LocalAgentStatus {
-            node_id: Some("node-7".to_string()),
             agent_id: "agent-abc".to_string(),
             status: "running".to_string(),
             bitbrowser_status: Some("ready".to_string()),
-            main_user_id: Some("user-42".to_string()),
+            main_user_id_masked: None,
             operating_system: Some("macOS".to_string()),
             cpu_architecture: Some("arm64".to_string()),
             agent_version: Some("0.2.2".to_string()),
@@ -406,19 +398,19 @@ mod tests {
         out
     }
 
-    /// The whole export, against a real tree, with the credential pair.
+    /// The whole export, against a real tree, with both credentials.
     ///
     /// Two claims in one run, because they are the two halves of one property:
-    /// the **binding's node id is reported** (it is how somebody correlates this
-    /// bundle with a Cloud record) and the **binding's credential is not** (it is
-    /// the thing that would let whoever reads the archive act as this machine).
-    /// `node_credential` is written into the log file first and read back from
-    /// disk, so the control is on the bytes that actually went in: the mask is
-    /// being asked to hide something that is genuinely present.
+    /// the **Agent Token's facts are reported** (whether one is held and when it
+    /// expires, which is how a record is lined up with the logs) and the **token
+    /// itself is not** (it is the thing that would let whoever reads the archive
+    /// act as this machine). The token is written into the log file first and
+    /// read back from disk, so the control is on the bytes that actually went
+    /// in: the mask is being asked to hide something that is genuinely present.
     #[test]
-    fn the_export_reports_the_node_id_and_never_the_credential() {
+    fn the_export_reports_the_agent_token_facts_and_never_the_token() {
         const TOKEN: &str = "launch-token-9f2c8a41";
-        const NODE: &str = "node-credential-4b7e1d90";
+        const AGENT_TOKEN: &str = "v1.agent-token-4b7e1d90";
         let base = scratch("export");
         let resolved = resolved(&base);
         // The destination this export will pick, created here so the test knows
@@ -428,7 +420,7 @@ mod tests {
         let downloads = base.join("Downloads");
         std::fs::create_dir_all(&downloads).expect("the destination");
         let line = format!(
-            "2026-09-24T22:55:01 [INFO] agent.supervisor: node_credential={NODE} token={TOKEN}\n"
+            "2026-09-24T22:55:01 [INFO] agent.supervisor: agent_token={AGENT_TOKEN} token={TOKEN}\n"
         );
         plant(&resolved.paths.logs.join("desktop.log"), &line);
         plant(
@@ -436,16 +428,16 @@ mod tests {
             "2026-09-24T22:56:00 [ERROR] wt_media_agent.task: task 7 failed\n",
         );
 
-        let binding = RuntimeBinding {
-            node_id: "node-7".to_string(),
-            node_credential: NODE.to_string(),
+        let token = AgentToken {
+            token: AGENT_TOKEN.to_string(),
+            expires_at: Some(1_800_000_000),
         };
         let moment = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_787_000_000);
 
         let planted = std::fs::read_to_string(resolved.paths.logs.join("desktop.log"))
             .expect("the planted file");
         assert!(
-            planted.contains(NODE) && planted.contains(TOKEN),
+            planted.contains(AGENT_TOKEN) && planted.contains(TOKEN),
             "the control must find both values in the file on disk"
         );
 
@@ -454,7 +446,7 @@ mod tests {
             &host(vec![TOKEN.to_string()]),
             "0.1.0".to_string(),
             true,
-            Some(&binding),
+            Some(&token),
             AgentFacts::Answered(agent_fields(&a_status(vec!["p1", "p2", "p3"]))),
             Some(&base),
             moment,
@@ -476,8 +468,11 @@ mod tests {
         let summary = String::from_utf8(entries[0].1.clone()).expect("utf-8");
         let document: serde_json::Value =
             serde_json::from_str(&summary).expect("the summary is JSON");
-        assert_eq!(document["binding"]["node_id"], "node-7");
-        assert_eq!(document["binding"]["bound"], true);
+        assert_eq!(document["execution_credential"]["configured"], true);
+        assert_eq!(
+            document["execution_credential"]["expires_at"],
+            1_800_000_000
+        );
         assert_eq!(document["sidecar"]["running"], true);
         assert_eq!(document["desktop"]["app_version"], "0.1.0");
         assert_eq!(document["desktop"]["build_version"], "0.1.0");
@@ -489,7 +484,7 @@ mod tests {
         // The whole archive, byte-wise, not a field of it: the credential must
         // not be anywhere in the file that leaves this machine.
         let all = std::fs::read(&written.path).expect("the bytes");
-        for (label, needle) in [("launch token", TOKEN), ("node credential", NODE)] {
+        for (label, needle) in [("launch token", TOKEN), ("agent token", AGENT_TOKEN)] {
             assert!(
                 !all.windows(needle.len())
                     .any(|window| window == needle.as_bytes()),
@@ -499,7 +494,7 @@ mod tests {
         // And the mask did its work rather than the whole line being dropped:
         // the keys are still there, which is what makes the line worth reading.
         let log = String::from_utf8(entries[2].1.clone()).expect("utf-8");
-        assert!(log.contains("node_credential=***"), "{log}");
+        assert!(log.contains("agent_token=***"), "{log}");
         assert!(log.contains("token=***"), "{log}");
 
         // The export landed in the folder `output_directory` picked, and it
@@ -569,24 +564,24 @@ mod tests {
             "an empty mask is not a mask"
         );
 
-        // The binding's credential joins the list, and an empty one does not.
-        let bound = secrets(
+        // The held token joins the list, and an empty one does not.
+        let held = secrets(
             &["launch-token-x".to_string()],
-            Some(&RuntimeBinding {
-                node_id: "node-7".to_string(),
-                node_credential: "node-credential-y".to_string(),
+            Some(&AgentToken {
+                token: "v1.agent-token-y".to_string(),
+                expires_at: None,
             }),
         );
-        assert_eq!(bound.len(), 2);
-        assert!(bound.contains(&"node-credential-y".to_string()));
-        let empty_credential = secrets(
+        assert_eq!(held.len(), 2);
+        assert!(held.contains(&"v1.agent-token-y".to_string()));
+        let empty_token = secrets(
             &[],
-            Some(&RuntimeBinding {
-                node_id: "node-7".to_string(),
-                node_credential: String::new(),
+            Some(&AgentToken {
+                token: String::new(),
+                expires_at: None,
             }),
         );
-        assert!(empty_credential.is_empty(), "{empty_credential:?}");
+        assert!(empty_token.is_empty(), "{empty_token:?}");
     }
 
     /// The Agent's fields: what it said is named, what it did not say is absent,
@@ -619,8 +614,12 @@ mod tests {
         }
 
         // The other direction: a field that *is* set appears.
-        assert_eq!(fields["node_id"], "node-7");
-        assert_eq!(fields["main_user_id"], "user-42");
+        assert_eq!(fields["bitbrowser_status"], "ready");
+        assert_eq!(fields["operating_system"], "macOS");
+        // The device and BitBrowser identities are not facts this bundle carries:
+        // there is no node, and the main account is the user's.
+        assert!(!fields.contains_key("node_id"), "{fields:?}");
+        assert!(!fields.contains_key("main_user_id"), "{fields:?}");
     }
 }
 
@@ -667,16 +666,16 @@ mod probe {
             agent_logs: agent_logs.clone(),
         };
         let moment = SystemTime::now();
-        let binding = Some(RuntimeBinding {
-            node_id: "probe-node".to_string(),
-            node_credential: "probe-node-credential-value".to_string(),
+        let token = Some(AgentToken {
+            token: "probe-agent-token-value".to_string(),
+            expires_at: None,
         });
         let result = export(
             &resolved,
             &host(vec!["probe-launch-token-value".to_string()]),
             "probe".to_string(),
             false,
-            binding.as_ref(),
+            token.as_ref(),
             AgentFacts::Unreachable {
                 error: "the probe does not ask".to_string(),
             },
@@ -761,7 +760,7 @@ mod probe {
             bytes.len(),
             logs.entries.len()
         );
-        for needle in ["probe-launch-token-value", "probe-node-credential-value"] {
+        for needle in ["probe-launch-token-value", "probe-agent-token-value"] {
             let found = bytes
                 .windows(needle.len())
                 .any(|window| window == needle.as_bytes());

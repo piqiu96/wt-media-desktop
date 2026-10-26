@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "contract_revision": "device-binding-20261001.1",
+  "contract_revision": "desktop-single-login-20261023.1",
   "consumes": {
-    "cloud_agent_api": "v1@2026.10.13.1",
-    "task_schemas": "v1@2026.07.15.1",
-    "local_agent_api": "v1@2026.10.03.1",
+    "cloud_agent_api": "v1@2026.10.23.1",
+    "task_schemas": "v1@2026.10.23.1",
+    "local_agent_api": "v1@2026.10.23.1",
     "local_event_schemas": "profile-guard@2026.07.14.8",
     "local_status_enums": "status@2026.07.14.8"
   }

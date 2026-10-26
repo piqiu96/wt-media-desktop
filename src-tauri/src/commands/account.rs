@@ -1,44 +1,26 @@
-//! Sensitive-task flows: account check and cookie read. Both take a Cloud
-//! permit before touching the Local Agent, and both release it afterwards.
+//! Sensitive-task flows: account check and cookie read. Both take a permit from
+//! the Local Agent before touching it, and hand the permit back afterwards.
 
 use crate::dto::{
     AccountCheckArgs, AccountCheckResult, CookieReadArgs, CookieReadData, CookieReadResult,
 };
-use crate::http::{CloudClient, LocalAgentClient};
-use crate::preflight::{self, ACCOUNT_CHECK, COOKIE_READ, NO_BINDING_SENSITIVE};
-use crate::state::RuntimeBindingState;
+use crate::http::LocalAgentClient;
+use crate::preflight::{self, ACCOUNT_CHECK, COOKIE_READ};
 use tauri::State;
-
-use super::agent::local_agent_status;
 
 #[tauri::command]
 pub async fn local_agent_account_check(
     client: State<'_, LocalAgentClient>,
-    cloud: State<'_, CloudClient>,
-    binding_state: State<'_, RuntimeBindingState>,
     args: AccountCheckArgs,
 ) -> Result<AccountCheckResult, String> {
-    let cloud_base_url =
-        preflight::require_cloud_base_url(&args.cloud_base_url, ACCOUNT_CHECK.no_cloud_address())?;
     let task_id = args.task_id.trim().to_string();
     let bit_profile_id = args.bit_profile_id.trim().to_string();
     let platform = args.platform.trim().to_lowercase();
     if task_id.is_empty() || bit_profile_id.is_empty() || platform.is_empty() {
         return Err("账号检查参数不完整".into());
     }
-    let binding = preflight::require_binding(&binding_state, NO_BINDING_SENSITIVE)?;
-    let status = local_agent_status(client.clone(), None).await?;
-    preflight::sync_runtime_facts(
-        &cloud,
-        &cloud_base_url,
-        &binding.node_id,
-        &binding.node_credential,
-        &status,
-    )
-    .await?;
 
-    let preflight =
-        preflight::run(&cloud, &cloud_base_url, &task_id, &binding, ACCOUNT_CHECK).await?;
+    let permit = preflight::run(&client, &task_id, &bit_profile_id, ACCOUNT_CHECK).await?;
 
     let account_check_resp = client
         .post("/api/v1/account-check")
@@ -50,20 +32,14 @@ pub async fn local_agent_account_check(
         .send()
         .await;
 
+    // 没收到任何应答才叫「不确定」；Agent 明确拒绝同样说明这次操作已经收尾。
     let finish_outcome = if account_check_resp.is_ok() {
         "completed"
     } else {
         "result_uncertain"
     };
-    let finish_result = preflight::finish_permit(
-        &cloud,
-        &cloud_base_url,
-        &binding,
-        &preflight.permit_id,
-        &preflight.permit_credential,
-        finish_outcome,
-    )
-    .await;
+    let finish_result =
+        preflight::finish_permit(&client, ACCOUNT_CHECK, &permit.permit_id, finish_outcome).await;
 
     let account_check_resp =
         account_check_resp.map_err(|e| format!("Local Agent账号检查失败: {}", e))?;
@@ -86,30 +62,15 @@ pub async fn local_agent_account_check(
 #[tauri::command]
 pub async fn local_agent_cookie_read(
     client: State<'_, LocalAgentClient>,
-    cloud: State<'_, CloudClient>,
-    binding_state: State<'_, RuntimeBindingState>,
     args: CookieReadArgs,
 ) -> Result<CookieReadResult, String> {
-    let cloud_base_url =
-        preflight::require_cloud_base_url(&args.cloud_base_url, COOKIE_READ.no_cloud_address())?;
     let task_id = args.task_id.trim().to_string();
     let bit_profile_id = args.bit_profile_id.trim().to_string();
     if task_id.is_empty() || bit_profile_id.is_empty() {
         return Err("Cookie读取参数不完整".into());
     }
-    let binding = preflight::require_binding(&binding_state, NO_BINDING_SENSITIVE)?;
-    let status = local_agent_status(client.clone(), None).await?;
-    preflight::sync_runtime_facts(
-        &cloud,
-        &cloud_base_url,
-        &binding.node_id,
-        &binding.node_credential,
-        &status,
-    )
-    .await?;
 
-    let preflight =
-        preflight::run(&cloud, &cloud_base_url, &task_id, &binding, COOKIE_READ).await?;
+    let permit = preflight::run(&client, &task_id, &bit_profile_id, COOKIE_READ).await?;
 
     let cookie_read_resp = client
         .post("/api/v1/cookie-read")
@@ -122,15 +83,8 @@ pub async fn local_agent_cookie_read(
     } else {
         "result_uncertain"
     };
-    let finish_result = preflight::finish_permit(
-        &cloud,
-        &cloud_base_url,
-        &binding,
-        &preflight.permit_id,
-        &preflight.permit_credential,
-        finish_outcome,
-    )
-    .await;
+    let finish_result =
+        preflight::finish_permit(&client, COOKIE_READ, &permit.permit_id, finish_outcome).await;
 
     let cookie_read_resp =
         cookie_read_resp.map_err(|e| format!("Local Agent Cookie读取失败: {}", e))?;

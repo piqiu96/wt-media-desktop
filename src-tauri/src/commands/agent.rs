@@ -24,7 +24,7 @@ use crate::development_python_fallback_enabled;
 use crate::dto::{LocalAgentStatus, LocalAgentStatusResponse};
 use crate::http::LocalAgentClient;
 use crate::sidecar::{self, drain, readiness};
-use crate::state::{AgentProcess, OperationId, RuntimeBindingState, SidecarLog};
+use crate::state::{AgentProcess, AgentTokenState, OperationId, SidecarLog};
 use std::time::{Duration, Instant};
 use tauri::{Manager, State};
 
@@ -189,8 +189,8 @@ fn failed(message: String, log: &SidecarLog, session: Option<&str>) -> String {
 ///
 /// `reuse_scan` is the top bar's background tick asking the Agent for a verdict
 /// without paying for a fresh BitBrowser scan every time; the live scan stays
-/// the default so that everything acting on `main_user_id` — the bind flow and
-/// the runtime report — keeps reading a just-observed account id.
+/// the default so everything that shows BitBrowser state reads just-observed
+/// facts.
 fn status_path(reuse_scan: bool) -> &'static str {
     if reuse_scan {
         "/api/v1/status?scan=reuse"
@@ -201,6 +201,9 @@ fn status_path(reuse_scan: bool) -> &'static str {
 
 /// `reuse_scan` is `None` for every caller but the top bar's background tick,
 /// which passes `Some(true)`; see `status_path`.
+///
+/// The status no longer carries the BitBrowser main account: binding reads it on
+/// the Agent's side, so the page has nothing to do with it.
 #[tauri::command]
 pub async fn local_agent_status(
     client: State<'_, LocalAgentClient>,
@@ -367,18 +370,18 @@ async fn start<R: tauri::Runtime>(
     process: &AgentProcess,
     session: &OperationId,
     log: &SidecarLog,
-    binding_state: &RuntimeBindingState,
+    tokens: &AgentTokenState,
 ) -> Result<String, String> {
     match occupancy(process, client).await? {
         // Nothing is offered on this arm, and that is a decision rather than an
         // omission. An Agent that is already running is one of two things, and
         // neither needs a re-push: an Agent **this** Desktop started, which was
         // offered both facts when it started; or an Agent that outlived a
-        // Desktop restart, where the caller holds the same credential it does —
-        // restored into native memory from `runtime-binding.json` at startup —
-        // and the save directory is already in the Agent's own store, which
-        // outlives Desktop. Pushing here would either repeat what is held or
-        // announce a shape of the problem this launch cannot fix.
+        // Desktop restart, which still holds the token it was given, while this
+        // launch holds none until the user logs in — and the save directory is
+        // in the Agent's own store, which outlives Desktop. Pushing here would
+        // either repeat what is held or announce a shape of the problem this
+        // launch cannot fix.
         Occupancy::Running => {
             already_running(session.current().as_deref());
             return Ok("already_running".into());
@@ -428,16 +431,17 @@ async fn start<R: tauri::Runtime>(
             ready(&ready_agent.line, Some(&id));
             healthy(&ready_agent.health, Some(&id));
             // The Agent has just come up holding nothing from before, so this is
-            // the moment to say the two things it cannot remember (CHG-061 T-04):
-            // the Cloud node credential it reports under, and the folder this
-            // machine's downloads go in. Best-effort — the sequence and its
-            // reasoning live in `commands::downloads::offer_stored_choices`, and
-            // what stays here is the two reads and the record — and the start's
-            // own answer is unchanged, because it is about a process that is up.
-            let held = binding_state.0.lock().ok().and_then(|held| held.clone());
-            let offered =
-                downloads::offer_stored_choices(client, held.as_ref(), settings::chosen_save_dir())
-                    .await;
+            // the moment to say the two things it cannot remember: the Agent
+            // Token it reports under and the folder this machine's downloads go
+            // in. Best-effort — the sequence and its reasoning live in
+            // `commands::downloads::offer_stored_choices` — and the start's own
+            // answer is unchanged, because it is about a process that is up.
+            let offered = downloads::offer_stored_choices(
+                client,
+                tokens.get().as_ref(),
+                settings::chosen_save_dir(),
+            )
+            .await;
             for reason in offered {
                 offer_failed(&reason, Some(&id));
             }
@@ -600,18 +604,9 @@ pub async fn local_agent_start(
     process: State<'_, AgentProcess>,
     session: State<'_, OperationId>,
     log: State<'_, SidecarLog>,
-    binding_state: State<'_, RuntimeBindingState>,
+    tokens: State<'_, AgentTokenState>,
 ) -> Result<String, String> {
-    start(
-        &app,
-        &client,
-        &config,
-        &process,
-        &session,
-        &log,
-        &binding_state,
-    )
-    .await
+    start(&app, &client, &config, &process, &session, &log, &tokens).await
 }
 #[tauri::command]
 pub async fn local_agent_stop(
@@ -645,19 +640,6 @@ pub fn stop_at_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         &app.state::<OperationId>(),
         grace_ms,
     ));
-}
-/// Fetch task progress as a status snapshot.
-///
-/// No stream is opened: `task_id` is validated server-side and the overall
-/// status is returned. The Agent's `text/event-stream` endpoint is not consumed
-/// from here.
-#[tauri::command]
-pub async fn local_agent_task_status(
-    client: State<'_, LocalAgentClient>,
-    _task_id: String,
-) -> Result<LocalAgentStatus, String> {
-    // Report back the current overall status; task_id is validated server-side.
-    local_agent_status(client, None).await
 }
 
 #[cfg(test)]
@@ -1409,7 +1391,7 @@ mod tests {
                 &process,
                 &OperationId::default(),
                 &SidecarLog::default(),
-                &RuntimeBindingState::default(),
+                &AgentTokenState::default(),
             ))
         });
 
@@ -1452,7 +1434,7 @@ mod tests {
             &process,
             &session,
             &SidecarLog::default(),
-            &RuntimeBindingState::default(),
+            &AgentTokenState::default(),
         ));
 
         assert_eq!(answer, Ok("already_running".to_string()));
@@ -2052,9 +2034,9 @@ mod tests {
     /// The status request is live unless the caller explicitly says otherwise.
     ///
     /// `None` is what every existing `invoke('local_agent_status')` sends, and it
-    /// has to keep asking for a live scan: the account id in the answer is what
-    /// the bind flow and the runtime report act on. Only `Some(true)` — the top
-    /// bar's automatic tick — may ask the Agent to reuse a scan.
+    /// has to keep asking for a live scan: the BitBrowser state in the answer is
+    /// what the page shows. Only `Some(true)` — the top bar's automatic tick —
+    /// may ask the Agent to reuse a scan.
     #[test]
     fn only_an_explicit_reuse_scan_asks_for_a_cached_status() {
         assert_eq!(status_path(false), "/api/v1/status");

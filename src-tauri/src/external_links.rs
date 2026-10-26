@@ -196,9 +196,8 @@ mod tests {
     fn the_public_object_address_the_drawer_hands_over_is_handed_on() {
         // The material drawer converts the S3 path-style address to the public
         // data-bucket read URL before requesting a system-browser window.
-        let url = parse(
-            "https://data.bucket.oss.longyanyue.cn/wt_media/dev/materials/30/2afa51e6.mp4",
-        );
+        let url =
+            parse("https://data.bucket.oss.longyanyue.cn/wt_media/dev/materials/30/2afa51e6.mp4");
         assert!(hands_to_the_system_browser(&url));
         // The control arm: a platform link, http rather than https, is also a
         // web address.

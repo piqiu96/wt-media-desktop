@@ -4,8 +4,8 @@
 //! port or hold Local Agent credentials directly.
 
 use crate::dto::{
-    CreateProfileArgs, CreateProfileResult, ProfileOperationArgs, ProfileOperationResult,
-    RestoreProfileInput, RestoreProfileResult, RestoreProfileVerification,
+    CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileOperationArgs,
+    ProfileOperationResult, RestoreProfileInput, RestoreProfileResult, RestoreProfileVerification,
 };
 use crate::http::LocalAgentClient;
 use tauri::State;
@@ -17,47 +17,46 @@ use tauri::State;
 #[tauri::command]
 pub async fn local_agent_profile_scan(
     client: State<'_, LocalAgentClient>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuardRefusal> {
     let resp = client
         .post("/api/v1/bit-browser/profile-scans")
         .send()
         .await
-        .map_err(|e| format!("profile scan failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("profile scan failed: {} {}", status, text));
+        .map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+    if !status.is_success() {
+        return Err(GuardRefusal::from_agent(status, &text));
     }
-    resp.json()
-        .await
-        .map_err(|e| format!("invalid profile scan response: {}", e))
+    serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))
 }
 #[tauri::command]
 pub async fn local_agent_profile_groups(
     client: State<'_, LocalAgentClient>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuardRefusal> {
     let resp = client
         .post("/api/v1/bit-browser/profile-groups")
         .send()
         .await
-        .map_err(|e| format!("读取BitBrowser分组失败: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("读取BitBrowser分组失败: {} {}", status, text));
+        .map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+    if !status.is_success() {
+        return Err(GuardRefusal::from_agent(status, &text));
     }
-    resp.json()
-        .await
-        .map_err(|e| format!("BitBrowser分组响应格式错误: {}", e))
+    serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))
 }
 #[tauri::command]
 pub async fn local_agent_profile_open(
     client: State<'_, LocalAgentClient>,
     args: ProfileOperationArgs,
-) -> Result<ProfileOperationResult, String> {
+) -> Result<ProfileOperationResult, GuardRefusal> {
     let bit_profile_id = args.bit_profile_id.trim().to_string();
     if bit_profile_id.is_empty() {
-        return Err("打开窗口失败：缺少BitBrowser窗口ID".into());
+        return Err(profile_refusal(
+            "profile_id_required",
+            "打开窗口失败：缺少BitBrowser窗口ID",
+        ));
     }
     post_local_agent_profile_operation(&client, "profile-open", &bit_profile_id).await?;
     Ok(ProfileOperationResult {
@@ -70,10 +69,13 @@ pub async fn local_agent_profile_open(
 pub async fn local_agent_profile_close(
     client: State<'_, LocalAgentClient>,
     args: ProfileOperationArgs,
-) -> Result<ProfileOperationResult, String> {
+) -> Result<ProfileOperationResult, GuardRefusal> {
     let bit_profile_id = args.bit_profile_id.trim().to_string();
     if bit_profile_id.is_empty() {
-        return Err("关闭窗口失败：缺少BitBrowser窗口ID".into());
+        return Err(profile_refusal(
+            "profile_id_required",
+            "关闭窗口失败：缺少BitBrowser窗口ID",
+        ));
     }
     post_local_agent_profile_operation(&client, "profile-close", &bit_profile_id).await?;
     Ok(ProfileOperationResult {
@@ -86,21 +88,22 @@ pub async fn local_agent_profile_close(
 pub async fn local_agent_profile_create(
     client: State<'_, LocalAgentClient>,
     args: CreateProfileArgs,
-) -> Result<CreateProfileResult, String> {
-    let payload = create_profile_payload(&args)?;
+) -> Result<CreateProfileResult, GuardRefusal> {
+    let payload = create_profile_payload(&args)
+        .map_err(|message| profile_refusal("profile_input_invalid", message))?;
     let resp = client
         .post("/api/v1/bit-browser/profile-create")
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("创建BitBrowser窗口失败: {}", e))?;
+        .map_err(GuardRefusal::unreachable)?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
     if !status.is_success() {
-        return Err(format!("创建BitBrowser窗口失败: {} {}", status, text));
+        return Err(GuardRefusal::from_agent(status, &text));
     }
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("创建BitBrowser窗口响应格式错误: {}", e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
     let bit_profile_id = value
         .get("data")
         .and_then(|data| data.get("id"))
@@ -109,10 +112,14 @@ pub async fn local_agent_profile_create(
         .trim()
         .to_string();
     if bit_profile_id.is_empty() {
-        return Err("创建BitBrowser窗口后未返回窗口ID".into());
+        return Err(profile_refusal(
+            "profile_readback_unverified",
+            "创建BitBrowser窗口后未返回窗口ID",
+        ));
     }
     let snapshot = local_agent_profile_scan(client.clone()).await?;
-    verify_snapshot_has_profile(&snapshot, &bit_profile_id)?;
+    verify_snapshot_has_profile(&snapshot, &bit_profile_id)
+        .map_err(|message| profile_refusal("profile_readback_unverified", message))?;
     Ok(CreateProfileResult {
         bit_profile_id,
         snapshot,
@@ -124,13 +131,19 @@ pub async fn local_agent_profile_create(
 pub async fn local_agent_profile_restore(
     client: State<'_, LocalAgentClient>,
     profiles: Vec<RestoreProfileInput>,
-) -> Result<RestoreProfileResult, String> {
+) -> Result<RestoreProfileResult, GuardRefusal> {
     if profiles.is_empty() {
-        return Err("没有可恢复的Cloud窗口配置".into());
+        return Err(profile_refusal(
+            "profile_input_invalid",
+            "没有可恢复的Cloud窗口配置",
+        ));
     }
     for profile in &profiles {
         if profile.bit_profile_id.trim().is_empty() {
-            return Err("恢复失败：存在缺少BitBrowser窗口ID的Cloud窗口".into());
+            return Err(profile_refusal(
+                "profile_input_invalid",
+                "恢复失败：存在缺少BitBrowser窗口ID的Cloud窗口",
+            ));
         }
         let update_payload = restore_payload(profile);
         let update_resp = client
@@ -138,16 +151,20 @@ pub async fn local_agent_profile_restore(
             .json(&update_payload)
             .send()
             .await
-            .map_err(|e| format!("写回BitBrowser失败: {}", e))?;
+            .map_err(GuardRefusal::unreachable)?;
         if !update_resp.status().is_success() {
             let status = update_resp.status();
-            let text = update_resp.text().await.unwrap_or_default();
-            return Err(format!("写回BitBrowser失败: {} {}", status, text));
+            let text = update_resp
+                .text()
+                .await
+                .map_err(GuardRefusal::unreachable)?;
+            return Err(GuardRefusal::from_agent(status, &text));
         }
     }
 
     let snapshot = local_agent_profile_scan(client.clone()).await?;
-    verify_restored_profiles(&profiles, &snapshot)?;
+    verify_restored_profiles(&profiles, &snapshot)
+        .map_err(|message| profile_refusal("profile_readback_unverified", message))?;
     Ok(RestoreProfileResult {
         restored_count: profiles.len(),
         profiles: profiles
@@ -214,19 +231,26 @@ async fn post_local_agent_profile_operation(
     client: &LocalAgentClient,
     operation: &str,
     bit_profile_id: &str,
-) -> Result<(), String> {
+) -> Result<(), GuardRefusal> {
     let resp = client
         .post(&format!("/api/v1/bit-browser/{}", operation))
         .json(&serde_json::json!({"id": bit_profile_id}))
         .send()
         .await
-        .map_err(|e| format!("BitBrowser窗口操作失败: {}", e))?;
-    if resp.status().is_success() {
+        .map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    if status.is_success() {
         return Ok(());
     }
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    Err(format!("BitBrowser窗口操作失败: {} {}", status, text))
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+    Err(GuardRefusal::from_agent(status, &text))
+}
+fn profile_refusal(code: &str, message: impl Into<String>) -> GuardRefusal {
+    GuardRefusal {
+        code: code.into(),
+        message: message.into(),
+        ..GuardRefusal::default()
+    }
 }
 fn create_profile_payload(args: &CreateProfileArgs) -> Result<serde_json::Value, String> {
     let name = args.name.trim();
@@ -394,6 +418,39 @@ fn string_field(value: &serde_json::Value, field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::testing::{arrivals, serving};
+    use crate::config::{load_with, Environment, PRODUCTION_TOML};
+    use crate::token::RuntimeToken;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn an_offline_bitbrowser_keeps_its_code_without_exposing_the_agent_diagnostic() {
+        let (port, seen) = serving(|_| {
+            (
+                "503 Service Unavailable".into(),
+                r#"{"error":{"code":"bit_browser_offline","message":"比特浏览器未运行或无法连接","retryable":true,"recovery_action":"start_bitbrowser"}}"#.into(),
+            )
+        });
+        let config = load_with(
+            &BTreeMap::new(),
+            &PRODUCTION_TOML.replace("port = 8765", &format!("port = {port}")),
+            Environment::Production,
+        )
+        .expect("test config");
+        let client = LocalAgentClient::new(&config, RuntimeToken::generate());
+
+        let error = tauri::async_runtime::block_on(post_local_agent_profile_operation(
+            &client,
+            "profile-open",
+            "profile-1",
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, "bit_browser_offline");
+        assert_eq!(error.recovery_action, "start_bitbrowser");
+        assert!(!error.message.contains("503"));
+        assert_eq!(arrivals(&seen, "/api/v1/bit-browser/profile-open"), 1);
+    }
 
     fn restore_input() -> RestoreProfileInput {
         RestoreProfileInput {

@@ -1,6 +1,7 @@
 //! Wire types crossing the Rust boundary, grouped by the flow that consumes
-//! them: `agent` (Local Agent status and runtime facts), `bind` (Cloud node
-//! registration), `account` (account check and cookie read), `profile`
+//! them: `agent` (Local Agent status), `agent_token` (the session-bound token),
+//! `guard` (what a sensitive operation or a BitBrowser binding was allowed to
+//! do, and why not), `account` (account check and cookie read), `profile`
 //! (BitBrowser profile operations), `config` (the narrow slice of Desktop's own
 //! configuration the page may see), `storage` (the machine's free space, what
 //! this app occupies, and the log files it can read back), `cleanup` (what a
@@ -18,11 +19,12 @@
 
 mod account;
 mod agent;
-mod bind;
+mod agent_token;
 mod cleanup;
 mod config;
 mod diagnostic;
 mod downloads;
+mod guard;
 mod profile;
 mod saved_files;
 mod settings;
@@ -30,11 +32,12 @@ mod storage;
 
 pub use account::*;
 pub use agent::*;
-pub use bind::*;
+pub use agent_token::*;
 pub use cleanup::*;
 pub use config::*;
 pub use diagnostic::*;
 pub use downloads::*;
+pub use guard::*;
 pub use profile::*;
 pub use saved_files::*;
 pub use settings::*;
@@ -42,31 +45,29 @@ pub use storage::*;
 
 use serde::Deserialize;
 
-/// Cloud's uniform response envelope: `{errcode, message, data}`.
-///
-/// Lives here rather than in `bind` or `account` because both flows read it.
-/// Putting it in either one would make the other import from a sibling it does
-/// not own.
+/// Cloud's uniform response envelope: `{errcode, message, data, error}`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CloudEnvelope<T> {
     pub errcode: i32,
     #[serde(default)]
     pub message: String,
     pub data: Option<T>,
+    #[serde(default)]
+    pub error: Option<CloudErrorDetail>,
 }
 
-/// The Local Agent's refusal body: `{"error": {"code": …}}`.
+/// Cloud 的机器可读错误：页面按 `code` 分支，不用解析文案。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CloudErrorDetail {
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Agent 的拒绝体：`{"error": {"code": …, "message": …}}`。
 ///
-/// Beside `CloudEnvelope` for the same reason it is here rather than in one
-/// flow: three flows read it (`bind`, `downloads`, and every one to come). It is
-/// also the **narrower** of the two on purpose — the Agent writes a code and,
-/// sometimes, a `message` that is another service's own error text, and this
-/// struct reads one field. `code_of` is the whole of what a caller needs, and it
-/// returns a code rather than the body so that no caller can decide to pass a
-/// peer's text on: `contracts/local-error-codes/v1/transfer.yaml` puts
-/// `node_credential` in its `secret_policy.forbidden_fields`, and the refusal to
-/// a request that carried a credential is the one place a peer echoing its input
-/// would reach a log.
+/// `message` 可能原样转发 Cloud 自己写的句子，只在本机请求没有携带秘密时
+/// 才使用。请求里带过凭据的流程只读 `code`：Agent 一旦回显请求内容，
+/// 那句话会直接进日志。
 #[derive(Clone, Debug, Deserialize)]
 pub struct LocalErrorBody {
     pub error: LocalErrorDetail,
@@ -75,17 +76,24 @@ pub struct LocalErrorBody {
 #[derive(Clone, Debug, Deserialize)]
 pub struct LocalErrorDetail {
     pub code: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub recovery_action: String,
 }
 
 impl LocalErrorBody {
-    /// The code in `text`, or `None` when `text` is not a Local Agent refusal.
-    ///
-    /// `None` rather than a placeholder: the caller has to say something about a
-    /// body it did not recognise, and 「拒绝，但没说为什么」is a different sentence
-    /// from a code it can name.
     pub fn code_of(text: &str) -> Option<String> {
         serde_json::from_str::<LocalErrorBody>(text)
             .ok()
             .map(|body| body.error.code)
+    }
+
+    pub fn detail_of(text: &str) -> Option<LocalErrorDetail> {
+        serde_json::from_str::<LocalErrorBody>(text)
+            .ok()
+            .map(|body| body.error)
     }
 }
