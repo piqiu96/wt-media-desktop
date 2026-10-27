@@ -252,6 +252,7 @@ fn main() {
             commands::profile::local_agent_profile_open,
             commands::profile::local_agent_profile_close,
             commands::profile::local_agent_profile_create,
+            commands::profile::local_agent_profile_update,
             commands::profile::local_agent_profile_restore,
             commands::webview::log_js_error,
             // Appended, not inserted: `localAgentService.test.js` asserts on exact

@@ -4,8 +4,9 @@
 //! port or hold Local Agent credentials directly.
 
 use crate::dto::{
-    CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileOperationArgs,
-    ProfileOperationResult, RestoreProfileInput, RestoreProfileResult, RestoreProfileVerification,
+    CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileFieldVerification,
+    ProfileOperationArgs, ProfileOperationResult, RestoreProfileInput, RestoreProfileResult,
+    RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
 };
 use crate::http::LocalAgentClient;
 use tauri::State;
@@ -125,6 +126,91 @@ pub async fn local_agent_profile_create(
         snapshot,
     })
 }
+/// 修改窗口在比特中维护的字段，随后扫描一次，逐字段报告已核实或仍待确认。
+#[tauri::command]
+pub async fn local_agent_profile_update(
+    client: State<'_, LocalAgentClient>,
+    args: UpdateProfileArgs,
+) -> Result<UpdateProfileResult, GuardRefusal> {
+    let bit_profile_id = args.bit_profile_id.trim().to_string();
+    if bit_profile_id.is_empty() {
+        return Err(profile_refusal(
+            "profile_id_required",
+            "编辑窗口失败：缺少BitBrowser窗口ID",
+        ));
+    }
+    if args.name.trim().is_empty() {
+        return Err(profile_refusal(
+            "profile_input_invalid",
+            "编辑窗口失败：窗口名称不能为空",
+        ));
+    }
+    if args.group_id.trim().is_empty() {
+        return Err(profile_refusal(
+            "profile_input_invalid",
+            "编辑窗口失败：请选择BitBrowser真实分组",
+        ));
+    }
+    let resp = client
+        .post("/api/v1/bit-browser/profile-update")
+        .json(&update_profile_payload(&args))
+        .send()
+        .await
+        .map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+        return Err(GuardRefusal::from_agent(status, &text));
+    }
+    let snapshot = local_agent_profile_scan(client.clone()).await?;
+    Ok(UpdateProfileResult {
+        bit_profile_id: bit_profile_id.clone(),
+        fields: verify_updated_profile(&args, &snapshot),
+        snapshot,
+    })
+}
+
+fn update_profile_payload(args: &UpdateProfileArgs) -> serde_json::Value {
+    serde_json::json!({
+        "id": args.bit_profile_id.trim(),
+        "name": args.name.trim(),
+        "groupId": args.group_id.trim(),
+        "groupName": args.group_name.trim(),
+        "remark": args.remark.trim(),
+    })
+}
+
+fn verify_updated_profile(
+    args: &UpdateProfileArgs,
+    snapshot: &serde_json::Value,
+) -> Vec<ProfileFieldVerification> {
+    let expected = [
+        ("name", args.name.trim().to_string()),
+        ("group_id", args.group_id.trim().to_string()),
+        ("group_name", args.group_name.trim().to_string()),
+        ("remark", args.remark.trim().to_string()),
+    ];
+    let scanned = snapshot
+        .get("profiles")
+        .and_then(|value| value.as_array())
+        .and_then(|profiles| {
+            profiles.iter().find(|profile| {
+                string_field(profile, "bit_profile_id") == args.bit_profile_id.trim()
+            })
+        });
+    expected
+        .iter()
+        .map(|(field, value)| ProfileFieldVerification {
+            field: (*field).to_string(),
+            status: match scanned {
+                Some(profile) if string_field(profile, field) == *value => "verified",
+                _ => "unconfirmed",
+            }
+            .to_string(),
+        })
+        .collect()
+}
+
 /// Restore selected Cloud profile facts to BitBrowser through Local Agent and
 /// read back the full profile snapshot before reporting success.
 #[tauri::command]
