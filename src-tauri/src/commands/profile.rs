@@ -5,7 +5,8 @@
 
 use crate::dto::{
     CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileFieldVerification,
-    ProfileOperationArgs, ProfileOperationResult, RestoreProfileInput, RestoreProfileResult,
+    ProfileOperationArgs, ProfileOperationResult, ProfileProxyOperationArgs,
+    ProfileProxyOperationResult, RestoreProfileInput, RestoreProfileResult,
     RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
 };
 use crate::http::LocalAgentClient;
@@ -211,6 +212,79 @@ fn verify_updated_profile(
         .collect()
 }
 
+#[tauri::command]
+pub async fn local_agent_profile_proxy_operation(
+    client: State<'_, LocalAgentClient>,
+    args: ProfileProxyOperationArgs,
+) -> Result<ProfileProxyOperationResult, GuardRefusal> {
+    let bit_profile_id = args.bit_profile_id.trim().to_string();
+    if bit_profile_id.is_empty() {
+        return Err(profile_refusal(
+            "profile_id_required",
+            "代理操作失败：缺少BitBrowser窗口ID",
+        ));
+    }
+    let action = args.action.trim().to_ascii_lowercase();
+    let payload = match action.as_str() {
+        "apply" => {
+            if args.host.trim().is_empty() || args.port.unwrap_or(0) <= 0 {
+                return Err(profile_refusal(
+                    "proxy_input_invalid",
+                    "代理操作失败：缺少代理地址或端口",
+                ));
+            }
+            serde_json::json!({
+                "operation": "assign",
+                "profile_id": bit_profile_id,
+                "proxy_protocol": args.proxy_protocol,
+                "host": args.host,
+                "port": args.port,
+                "username": args.username,
+                "password": args.password,
+            })
+        }
+        "unbind" => serde_json::json!({
+            "operation": "unbind",
+            "profile_id": bit_profile_id,
+        }),
+        _ => {
+            return Err(profile_refusal(
+                "proxy_action_invalid",
+                "代理操作只支持 apply 或 unbind",
+            ))
+        }
+    };
+    let resp = client
+        .post("/api/v1/proxy-mutation")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+    if !status.is_success() {
+        return Err(GuardRefusal::from_agent(status, &text));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
+    let readback = value
+        .get("data")
+        .and_then(|data| data.get("readback"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !readback {
+        return Err(profile_refusal(
+            "proxy_readback_unverified",
+            "BitBrowser未返回代理写入后的核实结果",
+        ));
+    }
+    Ok(ProfileProxyOperationResult {
+        action,
+        bit_profile_id,
+        readback,
+    })
+}
+
 /// Restore selected Cloud profile facts to BitBrowser through Local Agent and
 /// read back the full profile snapshot before reporting success.
 #[tauri::command]
@@ -289,21 +363,6 @@ fn restore_payload(profile: &RestoreProfileInput) -> serde_json::Value {
             "groupName".into(),
             serde_json::Value::String(profile.group_name.clone()),
         );
-    }
-    if !profile.proxy_type.trim().is_empty() {
-        payload.insert(
-            "proxyType".into(),
-            serde_json::Value::String(profile.proxy_type.clone()),
-        );
-    }
-    if !profile.proxy_host.trim().is_empty() {
-        payload.insert(
-            "proxyHost".into(),
-            serde_json::Value::String(profile.proxy_host.clone()),
-        );
-    }
-    if let Some(port) = profile.proxy_port {
-        payload.insert("proxyPort".into(), serde_json::Value::Number(port.into()));
     }
     if !profile.remark.trim().is_empty() {
         payload.insert(
@@ -428,27 +487,6 @@ fn verify_restored_profiles(
             "分组名称",
             &profile.bit_profile_id,
         )?;
-        verify_string_field(
-            actual,
-            "proxy_type",
-            &profile.proxy_type,
-            "代理类型",
-            &profile.bit_profile_id,
-        )?;
-        verify_string_field(
-            actual,
-            "proxy_host",
-            &profile.proxy_host,
-            "代理地址",
-            &profile.bit_profile_id,
-        )?;
-        verify_i64_field(
-            actual,
-            "proxy_port",
-            profile.proxy_port,
-            "代理端口",
-            &profile.bit_profile_id,
-        )?;
     }
     Ok(())
 }
@@ -464,28 +502,6 @@ fn verify_string_field(
     }
     let actual_value = string_field(actual, field);
     if actual_value != expected {
-        return Err(format!(
-            "恢复结果待确认：窗口 {} 的{}读回不一致",
-            bit_profile_id, label
-        ));
-    }
-    Ok(())
-}
-fn verify_i64_field(
-    actual: &serde_json::Value,
-    field: &str,
-    expected: Option<i64>,
-    label: &str,
-    bit_profile_id: &str,
-) -> Result<(), String> {
-    let Some(expected_value) = expected else {
-        return Ok(());
-    };
-    let actual_value = actual
-        .get(field)
-        .and_then(|value| value.as_i64())
-        .unwrap_or_default();
-    if actual_value != expected_value {
         return Err(format!(
             "恢复结果待确认：窗口 {} 的{}读回不一致",
             bit_profile_id, label
@@ -545,9 +561,6 @@ mod tests {
             seq: Some(1),
             group_id: "group-1".into(),
             group_name: "分组一".into(),
-            proxy_type: "socks5".into(),
-            proxy_host: "127.0.0.1".into(),
-            proxy_port: Some(1080),
             remark: "Cloud备注".into(),
         }
     }
@@ -559,9 +572,9 @@ mod tests {
         assert_eq!(payload["name"], "窗口一");
         assert_eq!(payload["groupId"], "group-1");
         assert_eq!(payload["groupName"], "分组一");
-        assert_eq!(payload["proxyType"], "socks5");
-        assert_eq!(payload["proxyHost"], "127.0.0.1");
-        assert_eq!(payload["proxyPort"], 1080);
+        assert!(payload.get("proxyType").is_none());
+        assert!(payload.get("proxyHost").is_none());
+        assert!(payload.get("proxyPort").is_none());
         assert!(payload.get("cookie").is_none());
         assert!(payload.get("user_id").is_none());
     }
@@ -617,9 +630,6 @@ mod tests {
                 "name": "窗口一",
                 "group_id": "group-1",
                 "group_name": "分组一",
-                "proxy_type": "socks5",
-                "proxy_host": "127.0.0.1",
-                "proxy_port": 1080
             }]
         });
 
@@ -634,9 +644,6 @@ mod tests {
                 "name": "另一个名称",
                 "group_id": "group-1",
                 "group_name": "分组一",
-                "proxy_type": "socks5",
-                "proxy_host": "127.0.0.1",
-                "proxy_port": 1080
             }]
         });
 

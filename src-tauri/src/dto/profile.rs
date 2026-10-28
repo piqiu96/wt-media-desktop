@@ -74,15 +74,31 @@ pub struct RestoreProfileInput {
     #[serde(default)]
     pub group_name: String,
     #[serde(default)]
-    pub proxy_type: String,
-    #[serde(default)]
-    pub proxy_host: String,
-    #[serde(default)]
-    pub proxy_port: Option<i64>,
-    #[serde(default)]
     pub remark: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProfileProxyOperationArgs {
+    pub action: String,
+    pub bit_profile_id: String,
+    #[serde(default)]
+    pub proxy_protocol: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<i64>,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileProxyOperationResult {
+    pub action: String,
+    pub bit_profile_id: String,
+    pub readback: bool,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct RestoreProfileResult {
     pub restored_count: usize,

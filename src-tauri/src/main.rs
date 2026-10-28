@@ -254,6 +254,7 @@ fn main() {
             commands::profile::local_agent_profile_create,
             commands::profile::local_agent_profile_update,
             commands::profile::local_agent_profile_restore,
+            commands::profile::local_agent_profile_proxy_operation,
             commands::webview::log_js_error,
             // Appended, not inserted: `localAgentService.test.js` asserts on exact
             // argument objects, and the existing seventeen keep their positions.
