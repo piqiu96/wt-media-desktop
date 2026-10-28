@@ -99,28 +99,6 @@ pub struct ProfileProxyOperationResult {
     pub bit_profile_id: String,
     pub readback: bool,
 }
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProxyExtractArgs {
-    pub extract_url: String,
-    #[serde(default = "default_proxy_protocol")]
-    pub proxy_protocol: String,
-}
-
-fn default_proxy_protocol() -> String {
-    "http".into()
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProxyExtractResult {
-    pub proxy_protocol: String,
-    pub host: String,
-    pub port: i64,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-}
 #[derive(Clone, Debug, Serialize)]
 pub struct RestoreProfileResult {
     pub restored_count: usize,
@@ -146,16 +124,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.bit_profile_id, "profile-1");
-    }
-
-    #[test]
-    fn proxy_extract_args_defaults_the_protocol() {
-        let args: ProxyExtractArgs = serde_json::from_value(serde_json::json!({
-            "extract_url": "https://provider.example/extract"
-        }))
-        .unwrap();
-
-        assert_eq!(args.proxy_protocol, "http");
     }
 
     #[test]

@@ -6,8 +6,8 @@
 use crate::dto::{
     CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileFieldVerification,
     ProfileOperationArgs, ProfileOperationResult, ProfileProxyOperationArgs,
-    ProfileProxyOperationResult, ProxyExtractArgs, ProxyExtractResult, RestoreProfileInput,
-    RestoreProfileResult, RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
+    ProfileProxyOperationResult, RestoreProfileInput, RestoreProfileResult,
+    RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
 };
 use crate::http::LocalAgentClient;
 use tauri::State;
@@ -210,42 +210,6 @@ fn verify_updated_profile(
             .to_string(),
         })
         .collect()
-}
-
-#[tauri::command]
-pub async fn local_agent_proxy_extract(
-    client: State<'_, LocalAgentClient>,
-    args: ProxyExtractArgs,
-) -> Result<ProxyExtractResult, GuardRefusal> {
-    let extract_url = args.extract_url.trim();
-    let proxy_protocol = args.proxy_protocol.trim().to_ascii_lowercase();
-    if extract_url.is_empty() || !matches!(proxy_protocol.as_str(), "http" | "https" | "socks5") {
-        return Err(profile_refusal(
-            "proxy_extract_input_invalid",
-            "动态代理提取参数不完整",
-        ));
-    }
-    let resp = client
-        .post("/api/v1/proxy-extract")
-        .json(&serde_json::json!({
-            "extract_url": extract_url,
-            "proxy_protocol": proxy_protocol,
-        }))
-        .send()
-        .await
-        .map_err(GuardRefusal::unreachable)?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
-    if !status.is_success() {
-        return Err(GuardRefusal::from_agent(status, &text));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
-    let data = value
-        .get("data")
-        .cloned()
-        .ok_or_else(GuardRefusal::missing_result)?;
-    serde_json::from_value(data).map_err(|_| GuardRefusal::unreadable(status))
 }
 
 #[tauri::command]
