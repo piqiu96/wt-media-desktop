@@ -24,7 +24,6 @@ mod http;
 mod logging;
 mod migration;
 mod paths;
-mod preflight;
 mod saved_files;
 mod secure_store;
 mod settings;
