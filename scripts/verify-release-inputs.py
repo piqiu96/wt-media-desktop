@@ -16,6 +16,11 @@ def sha256(path: Path) -> str:
 
 def verify(manifest_path: Path, binary_dir: Path, frontend: Path, agent_config: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    required_agent_routes = {"/api/v1/proxy-write", "/api/v1/proxy-verification"}
+    available_agent_routes = set(manifest.get("local_api_routes") or [])
+    if not required_agent_routes.issubset(available_agent_routes):
+        missing = ", ".join(sorted(required_agent_routes - available_agent_routes))
+        raise ValueError(f"staged Sidecar lacks Desktop proxy-operation routes: {missing}")
     binary = binary_dir / manifest["filename"]
     if not binary.is_file() or sha256(binary) != manifest["sha256"]:
         raise ValueError("staged Sidecar missing or SHA-256 differs from Agent manifest")

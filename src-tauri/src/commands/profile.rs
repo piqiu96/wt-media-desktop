@@ -6,8 +6,8 @@
 use crate::dto::{
     CreateProfileArgs, CreateProfileResult, GuardRefusal, ProfileFieldVerification,
     ProfileOperationArgs, ProfileOperationResult, ProfileProxyOperationArgs,
-    ProfileProxyOperationResult, RestoreProfileInput, RestoreProfileResult,
-    RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
+    ProfileProxyOperationResult, ProxyExtractArgs, ProxyExtractResult, RestoreProfileInput,
+    RestoreProfileResult, RestoreProfileVerification, UpdateProfileArgs, UpdateProfileResult,
 };
 use crate::http::LocalAgentClient;
 use tauri::State;
@@ -146,12 +146,6 @@ pub async fn local_agent_profile_update(
             "编辑窗口失败：窗口名称不能为空",
         ));
     }
-    if args.group_id.trim().is_empty() {
-        return Err(profile_refusal(
-            "profile_input_invalid",
-            "编辑窗口失败：请选择BitBrowser真实分组",
-        ));
-    }
     let resp = client
         .post("/api/v1/bit-browser/profile-update")
         .json(&update_profile_payload(&args))
@@ -172,13 +166,17 @@ pub async fn local_agent_profile_update(
 }
 
 fn update_profile_payload(args: &UpdateProfileArgs) -> serde_json::Value {
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "id": args.bit_profile_id.trim(),
         "name": args.name.trim(),
-        "groupId": args.group_id.trim(),
-        "groupName": args.group_name.trim(),
         "remark": args.remark.trim(),
-    })
+    });
+    // 既有窗口可能尚未分组。未选择分组时保留比特原值，备注等字段仍可编辑。
+    if !args.group_id.trim().is_empty() {
+        payload["groupId"] = serde_json::Value::String(args.group_id.trim().to_string());
+        payload["groupName"] = serde_json::Value::String(args.group_name.trim().to_string());
+    }
+    payload
 }
 
 fn verify_updated_profile(
@@ -255,7 +253,11 @@ pub async fn local_agent_profile_proxy_operation(
         }
     };
     let resp = client
-        .post("/api/v1/proxy-mutation")
+        .post(if args.verify {
+            "/api/v1/proxy-verification"
+        } else {
+            "/api/v1/proxy-write"
+        })
         .json(&payload)
         .send()
         .await
@@ -267,22 +269,81 @@ pub async fn local_agent_profile_proxy_operation(
     }
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
-    let readback = value
+    let data = value
         .get("data")
-        .and_then(|data| data.get("readback"))
-        .and_then(|value| value.as_bool())
+        .ok_or_else(|| GuardRefusal::unreadable(status))?;
+    let accepted = data
+        .get("accepted")
+        .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !readback {
+    let comparison = data
+        .get("comparison")
+        .and_then(|v| v.as_str())
+        .filter(|v| ["matches", "different", "unverifiable"].contains(v))
+        .map(String::from);
+    if (args.verify && comparison.is_none()) || (!args.verify && !accepted) {
         return Err(profile_refusal(
-            "proxy_readback_unverified",
-            "BitBrowser未返回代理写入后的核实结果",
+            "proxy_result_unconfirmed",
+            "无法确认比特代理操作结果，请先核实实际配置",
         ));
     }
     Ok(ProfileProxyOperationResult {
         action,
         bit_profile_id,
-        readback,
+        readback: comparison.as_deref() == Some("matches"),
+        accepted,
+        comparison,
     })
+}
+
+/// Fetch a supplier's dynamic address from the operator's own network.
+/// The supplier URL is supplied by the current Desktop flow. This command
+/// returns the parsed connection without changing Cloud or BitBrowser state.
+#[tauri::command]
+pub async fn local_agent_proxy_extract(
+    client: State<'_, LocalAgentClient>,
+    args: ProxyExtractArgs,
+) -> Result<ProxyExtractResult, GuardRefusal> {
+    extract_proxy(&client, args).await
+}
+
+async fn extract_proxy(
+    client: &LocalAgentClient,
+    args: ProxyExtractArgs,
+) -> Result<ProxyExtractResult, GuardRefusal> {
+    if args.extract_url.trim().is_empty()
+        || !["http", "https", "socks5"].contains(&args.proxy_protocol.as_str())
+    {
+        return Err(profile_refusal(
+            "proxy_extract_input_invalid",
+            "请填写有效的提取链接和代理协议",
+        ));
+    }
+    let resp = client.post("/api/v1/proxy-extract")
+        .json(&serde_json::json!({"extract_url": args.extract_url.trim(), "proxy_protocol": args.proxy_protocol}))
+        .send().await.map_err(GuardRefusal::unreachable)?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(GuardRefusal::unreachable)?;
+    if !status.is_success() {
+        return Err(GuardRefusal::from_agent(status, &text));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
+    let data = value
+        .get("data")
+        .ok_or_else(|| GuardRefusal::unreadable(status))?;
+    let result: ProxyExtractResult =
+        serde_json::from_value(data.clone()).map_err(|_| GuardRefusal::unreadable(status))?;
+    if result.host.trim().is_empty()
+        || !(1..=65535).contains(&result.port)
+        || !["http", "https", "socks5"].contains(&result.proxy_protocol.as_str())
+    {
+        return Err(profile_refusal(
+            "proxy_extract_response_invalid",
+            "提取结果缺少有效的代理地址",
+        ));
+    }
+    Ok(result)
 }
 
 /// Restore selected Cloud profile facts to BitBrowser through Local Agent and
@@ -526,6 +587,34 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn dynamic_proxy_extraction_uses_local_agent_and_checks_response() {
+        let (port, seen) = serving(|_| {
+            (
+                "200 OK".into(),
+                r#"{"data":{"proxy_protocol":"socks5","host":"203.0.113.9","port":1080}}"#.into(),
+            )
+        });
+        let config = load_with(
+            &BTreeMap::new(),
+            &PRODUCTION_TOML.replace("port = 8765", &format!("port = {port}")),
+            Environment::Production,
+        )
+        .expect("test config");
+        let client = LocalAgentClient::new(&config, RuntimeToken::generate());
+        let result = tauri::async_runtime::block_on(extract_proxy(
+            &client,
+            ProxyExtractArgs {
+                extract_url: "https://supplier.example/extract".into(),
+                proxy_protocol: "socks5".into(),
+            },
+        ))
+        .expect("local extraction");
+        assert_eq!(result.host, "203.0.113.9");
+        assert_eq!(result.port, 1080);
+        assert_eq!(arrivals(&seen, "/api/v1/proxy-extract"), 1);
+    }
+
+    #[test]
     fn an_offline_bitbrowser_keeps_its_code_without_exposing_the_agent_diagnostic() {
         let (port, seen) = serving(|_| {
             (
@@ -609,6 +698,20 @@ mod tests {
         assert_eq!(payload["remark"], "备注");
         assert!(payload.get("cookie").is_none());
         assert!(payload.get("user_id").is_none());
+    }
+    #[test]
+    fn update_profile_payload_preserves_an_ungrouped_window() {
+        let payload = update_profile_payload(&UpdateProfileArgs {
+            bit_profile_id: "profile-1".into(),
+            name: "窗口一".into(),
+            group_id: "".into(),
+            group_name: "".into(),
+            remark: "新备注".into(),
+        });
+
+        assert_eq!(payload["remark"], "新备注");
+        assert!(payload.get("groupId").is_none());
+        assert!(payload.get("groupName").is_none());
     }
     #[test]
     fn verify_snapshot_has_profile_rejects_missing_created_profile() {

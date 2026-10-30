@@ -3,13 +3,14 @@ set -euo pipefail
 
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
+AGENT_DIR="${WT_MEDIA_AGENT_SOURCE_DIR:-$ROOT_DIR/wt-media-agent}"
 
 if [[ "${WT_MEDIA_RELEASE_PREBUILT:-0}" != "1" ]]; then
   bash "$DESKTOP_DIR/scripts/prepare-release-sidecar.sh"
   bash "$ROOT_DIR/wt-media-workspace/scripts/build-desktop-frontend.sh"
   mkdir -p "$DESKTOP_DIR/.generated"
   rm -rf "$DESKTOP_DIR/.generated/agent-config"
-  cp -R "$ROOT_DIR/wt-media-agent/config_online" "$DESKTOP_DIR/.generated/agent-config"
+  cp -R "$AGENT_DIR/config_online" "$DESKTOP_DIR/.generated/agent-config"
 fi
 
 MANIFEST="$DESKTOP_DIR/target/sidecar-manifest.json"

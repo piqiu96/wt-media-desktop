@@ -3,7 +3,7 @@
   "contract_revision": "desktop-single-login-20261023.1",
   "consumes": {
     "cloud_agent_api": "v1@2026.10.23.1",
-    "local_agent_api": "v1@2026.10.29.2",
+    "local_agent_api": "v1@2026.10.29.3",
     "local_event_schemas": "runtime-environment@2026.07.14.9",
     "local_status_enums": "status@2026.07.14.8"
   }
