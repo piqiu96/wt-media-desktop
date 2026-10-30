@@ -3,6 +3,7 @@
 
 use crate::dto::{
     AccountCheckArgs, AccountCheckResult, CookieReadArgs, CookieReadData, CookieReadResult,
+    GuardRefusal,
 };
 use crate::http::LocalAgentClient;
 use tauri::State;
@@ -11,12 +12,16 @@ use tauri::State;
 pub async fn local_agent_account_check(
     client: State<'_, LocalAgentClient>,
     args: AccountCheckArgs,
-) -> Result<AccountCheckResult, String> {
+) -> Result<AccountCheckResult, GuardRefusal> {
     let operation_id = args.operation_id.trim();
     let bit_profile_id = args.bit_profile_id.trim();
     let platform = args.platform.trim().to_lowercase();
     if operation_id.is_empty() || bit_profile_id.is_empty() || platform.is_empty() {
-        return Err("账号检查参数不完整".into());
+        return Err(GuardRefusal {
+            code: "account_check_input_invalid".into(),
+            message: "账号检查参数不完整".into(),
+            ..Default::default()
+        });
     }
 
     let response = client
@@ -28,19 +33,19 @@ pub async fn local_agent_account_check(
         }))
         .send()
         .await
-        .map_err(|e| format!("Local Agent账号检查失败: {}", e))?;
+        .map_err(GuardRefusal::unreachable)?;
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = response.text().await.map_err(GuardRefusal::unreachable)?;
     if !status.is_success() {
-        return Err(format!("Local Agent账号检查失败: {} {}", status, text));
+        return Err(GuardRefusal::from_agent(status, &text));
     }
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("Local Agent账号检查响应格式错误: {}", e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
     let data = value
         .get("data")
         .cloned()
-        .ok_or_else(|| "Local Agent账号检查响应缺少数据".to_string())?;
-    serde_json::from_value(data).map_err(|e| format!("Local Agent账号检查结果格式错误: {}", e))
+        .ok_or_else(|| GuardRefusal::unreadable(status))?;
+    serde_json::from_value(data).map_err(|_| GuardRefusal::unreadable(status))
 }
 
 #[tauri::command]
