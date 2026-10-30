@@ -19,6 +19,10 @@ pub struct ProfileOperationResult {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateProfileArgs {
+    #[serde(default)]
+    pub creation_marker: String,
+    #[serde(default)]
+    pub inspect_only: bool,
     pub name: String,
     pub group_id: String,
     #[serde(default)]
@@ -31,6 +35,7 @@ pub struct CreateProfileArgs {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CreateProfileResult {
+    pub status: String,
     pub bit_profile_id: String,
     pub snapshot: serde_json::Value,
 }
