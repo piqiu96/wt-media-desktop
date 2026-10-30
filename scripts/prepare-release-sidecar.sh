@@ -4,7 +4,9 @@ set -euo pipefail
 # Tauri runs beforeBuildCommand from the Desktop repository root.
 DESKTOP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
-AGENT_DIR="$ROOT_DIR/wt-media-agent"
+# An active CHG may use an isolated Agent worktree. Keep the default release
+# source unchanged while allowing a verified local build to select that worktree.
+AGENT_DIR="${WT_MEDIA_AGENT_SOURCE_DIR:-$ROOT_DIR/wt-media-agent}"
 PYTHON_BIN="${WT_MEDIA_AGENT_PYTHON:-$AGENT_DIR/.venv/bin/python}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then

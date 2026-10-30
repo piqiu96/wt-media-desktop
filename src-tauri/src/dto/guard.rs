@@ -1,29 +1,11 @@
-//! 本机敏感操作与 BitBrowser 绑定共用的守卫结果。
+//! 本机操作与 BitBrowser 绑定共用的拒绝结果。
 //!
 //! 页面按 `code` 分支：「主账号不一致」要提示换绑，「BitBrowser 没开」要提示启动，
-//! 两者不能靠解析文案区分。`permit_id` 只是同一 Profile 的互斥锁编号，不是凭证。
+//! 两者不能靠解析文案区分。
 
 use super::LocalErrorBody;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-
-/// 敏感任务预检的裁决。`permit_id` 只在 `outcome == "granted"` 时有意义。
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct GuardPreflightOutcome {
-    pub outcome: String,
-    #[serde(default)]
-    pub permit_id: String,
-    #[serde(default)]
-    pub profile_id: String,
-    #[serde(default)]
-    pub expires_at: Option<String>,
-}
-
-/// Agent 本地预检路由的统一应答：`{"data": …}`。
-#[derive(Clone, Debug, Deserialize)]
-pub struct GuardPreflightAck {
-    pub data: GuardPreflightOutcome,
-}
 
 /// Agent 本地绑定路由的统一应答。主账号全文留在 Rust 与 Agent 之间。
 #[derive(Clone, Debug, Deserialize)]

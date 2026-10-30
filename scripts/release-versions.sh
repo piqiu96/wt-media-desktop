@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
 done
 DESKTOP_DIR="$(cd "$DESKTOP_DIR" && pwd)"
 ROOT_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
-AGENT_DIR="${AGENT_DIR:-$ROOT_DIR/wt-media-agent}"
+AGENT_DIR="${AGENT_DIR:-${WT_MEDIA_AGENT_SOURCE_DIR:-$ROOT_DIR/wt-media-agent}}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-$ROOT_DIR/wt-media-workspace}"
 WEB_DIR="${WEB_DIR:-$ROOT_DIR/wt-media-cloud/web}"
 MANIFEST_PATH="$DESKTOP_DIR/target/sidecar-manifest.json"

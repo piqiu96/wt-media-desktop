@@ -40,7 +40,7 @@ pub const TAIL_ON_EXIT: usize = 20;
 ///
 /// This lock guards diagnostics, and losing them is strictly better than taking
 /// the app down over them — so a panic elsewhere must not make the sidecar's
-/// last words unreadable. The binding lock in `preflight` guards a credential
+/// last words unreadable. The sidecar drain lock guards a credential
 /// and fails loudly instead; the difference is deliberate, not an oversight.
 fn buf(log: &SidecarLog) -> MutexGuard<'_, VecDeque<String>> {
     log.0

@@ -35,6 +35,33 @@ pub struct CreateProfileResult {
     pub snapshot: serde_json::Value,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateProfileArgs {
+    #[serde(alias = "bitProfileId")]
+    pub bit_profile_id: String,
+    pub name: String,
+    pub group_id: String,
+    #[serde(default)]
+    pub group_name: String,
+    #[serde(default)]
+    pub remark: String,
+}
+
+/// 一个被修改的比特字段及写后扫描是否证实。比特可能只应用了部分内容，
+/// 未能证实的字段标为 `unconfirmed`，而不是让整次编辑直接失败。
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileFieldVerification {
+    pub field: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateProfileResult {
+    pub bit_profile_id: String,
+    pub fields: Vec<ProfileFieldVerification>,
+    pub snapshot: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RestoreProfileInput {
     pub bit_profile_id: String,
@@ -47,15 +74,52 @@ pub struct RestoreProfileInput {
     #[serde(default)]
     pub group_name: String,
     #[serde(default)]
-    pub proxy_type: String,
-    #[serde(default)]
-    pub proxy_host: String,
-    #[serde(default)]
-    pub proxy_port: Option<i64>,
-    #[serde(default)]
     pub remark: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProfileProxyOperationArgs {
+    #[serde(default)]
+    pub verify: bool,
+    pub action: String,
+    pub bit_profile_id: String,
+    #[serde(default)]
+    pub proxy_protocol: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<i64>,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileProxyOperationResult {
+    pub action: String,
+    pub bit_profile_id: String,
+    pub readback: bool,
+    pub accepted: bool,
+    pub comparison: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProxyExtractArgs {
+    pub extract_url: String,
+    pub proxy_protocol: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProxyExtractResult {
+    pub proxy_protocol: String,
+    pub host: String,
+    pub port: i64,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct RestoreProfileResult {
     pub restored_count: usize,
