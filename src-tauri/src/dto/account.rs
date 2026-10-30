@@ -33,6 +33,8 @@ pub enum AccountCookieStage {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountCookieArgs {
+    #[serde(default)]
+    pub manual_login: bool,
     pub operation_id: String,
     pub bit_profile_id: String,
     pub platform: String,

@@ -113,6 +113,21 @@ pub async fn local_agent_profile_create(
         .unwrap_or_default()
         .trim()
         .to_string();
+    let creation_status = value
+        .get("data")
+        .and_then(|d| d.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("created")
+        .to_string();
+    if !args.creation_marker.is_empty()
+        && (creation_status == "uncertain" || creation_status == "unavailable")
+    {
+        return Ok(CreateProfileResult {
+            status: creation_status,
+            bit_profile_id,
+            snapshot: serde_json::Value::Null,
+        });
+    }
     if bit_profile_id.is_empty() {
         return Err(profile_refusal(
             "profile_readback_unverified",
@@ -123,6 +138,7 @@ pub async fn local_agent_profile_create(
     verify_snapshot_has_profile(&snapshot, &bit_profile_id)
         .map_err(|message| profile_refusal("profile_readback_unverified", message))?;
     Ok(CreateProfileResult {
+        status: creation_status,
         bit_profile_id,
         snapshot,
     })
@@ -468,6 +484,13 @@ fn create_profile_payload(args: &CreateProfileArgs) -> Result<serde_json::Value,
         return Err("创建窗口失败：请选择BitBrowser真实分组".into());
     }
     let mut payload = serde_json::Map::new();
+    if !args.creation_marker.is_empty() {
+        payload.insert(
+            "creation_marker".into(),
+            serde_json::json!(args.creation_marker),
+        );
+        payload.insert("inspect_only".into(), serde_json::json!(args.inspect_only));
+    }
     payload.insert("name".into(), serde_json::Value::String(name.to_string()));
     payload.insert(
         "groupId".into(),
@@ -668,8 +691,18 @@ mod tests {
         assert!(payload.get("user_id").is_none());
     }
     #[test]
+    fn marked_create_recovery_serializes_inspect_only() {
+        let args: CreateProfileArgs=serde_json::from_value(serde_json::json!({"name":"测试","group_id":"g","creation_marker":"WT_IMPORT:12:3:1","inspect_only":true})).unwrap();
+        let payload = create_profile_payload(&args).unwrap();
+        assert_eq!(payload["creation_marker"], "WT_IMPORT:12:3:1");
+        assert_eq!(payload["inspect_only"], true);
+        assert!(payload.get("input_cookie").is_none());
+    }
+    #[test]
     fn create_profile_payload_requires_real_group() {
         let err = create_profile_payload(&CreateProfileArgs {
+            creation_marker: String::new(),
+            inspect_only: false,
             name: "窗口一".into(),
             group_id: "".into(),
             group_name: "".into(),
@@ -683,6 +716,8 @@ mod tests {
     #[test]
     fn create_profile_payload_maps_safe_bitbrowser_fields() {
         let payload = create_profile_payload(&CreateProfileArgs {
+            creation_marker: String::new(),
+            inspect_only: false,
             name: "窗口一".into(),
             group_id: "group-1".into(),
             group_name: "默认分组".into(),

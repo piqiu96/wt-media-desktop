@@ -69,7 +69,7 @@ pub async fn local_agent_account_cookie(
         AccountCookieStage::Inspect => "/api/v1/account-cookie/inspect",
     };
     let response=client.post(path).json(&serde_json::json!({
-  "operation_id":args.operation_id,"profile_id":args.bit_profile_id,"platform":args.platform,
+  "manual_login":args.manual_login,"operation_id":args.operation_id,"profile_id":args.bit_profile_id,"platform":args.platform,
   "expected_platform_account_id":args.expected_platform_account_id,"input_cookie":args.input_cookie,"fingerprint":args.fingerprint,
  })).send().await.map_err(GuardRefusal::unreachable)?;
     let status = response.status();
