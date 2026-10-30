@@ -245,7 +245,7 @@ fn main() {
             commands::agent_token::local_agent_token_facts,
             commands::bit_account::local_agent_bit_account_bind,
             commands::account::local_agent_account_check,
-            commands::account::local_agent_cookie_read,
+            commands::account::local_agent_account_cookie,
             commands::profile::local_agent_profile_scan,
             commands::profile::local_agent_profile_groups,
             commands::profile::local_agent_profile_open,

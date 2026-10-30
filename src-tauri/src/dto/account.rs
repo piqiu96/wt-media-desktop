@@ -1,4 +1,4 @@
-//! Account-check and cookie-read args/results. Cloud authorizes the operation;
+//! Account-check and scoped Cookie operation args/results. Cloud authorizes the operation;
 //! the operation id groups the start and result writes.
 
 use serde::{Deserialize, Serialize};
@@ -24,18 +24,49 @@ pub struct AccountCheckResult {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct CookieReadArgs {
+#[serde(rename_all = "lowercase")]
+pub enum AccountCookieStage {
+    Prepare,
+    Apply,
+    Inspect,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AccountCookieArgs {
     pub operation_id: String,
     pub bit_profile_id: String,
+    pub platform: String,
+    pub stage: AccountCookieStage,
+    #[serde(default)]
+    pub expected_platform_account_id: String,
+    #[serde(default)]
+    pub input_cookie: String,
+    #[serde(default)]
+    pub fingerprint: String,
 }
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CookieReadData {
-    pub cookies: Vec<serde_json::Value>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CookieReadResult {
-    pub cookies: Vec<serde_json::Value>,
-    pub cookie_count: usize,
+pub struct AccountCookieResult {
+    #[serde(default)]
+    pub verified: bool,
+    pub status: String,
+    #[serde(default)]
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_cookie: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookies: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub fingerprint: String,
+    #[serde(default)]
+    pub platform_account_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: String,
+    #[serde(default)]
+    pub login_status: String,
+    #[serde(default)]
+    pub input_matches: bool,
+    #[serde(default)]
+    pub message: String,
 }
