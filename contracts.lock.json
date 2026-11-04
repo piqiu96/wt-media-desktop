@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "contract_revision": "social-account-batch-20261030.3",
+  "contract_revision": "content-production-20261105.1",
   "consumes": {
-    "cloud_agent_api": "v1@2026.10.23.1",
+    "cloud_agent_api": "v1@2026.11.05.1",
     "local_agent_api": "v1@2026.10.30.3",
     "local_event_schemas": "runtime-environment@2026.07.14.9",
     "local_status_enums": "status@2026.07.14.8"
