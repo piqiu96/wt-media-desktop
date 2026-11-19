@@ -135,7 +135,7 @@ pub fn directory(
     environment: Environment,
     manifest_dir: &Path,
 ) -> PathBuf {
-    if environment == Environment::Development {
+    if environment != Environment::Production {
         return match root {
             Root::Logs => crate::logging::paths::directory(system, environment, manifest_dir),
             Root::Versions => {
@@ -393,33 +393,35 @@ mod tests {
     /// last component, so the four are recognisable in a directory listing.
     #[test]
     fn the_development_layout_is_under_the_crates_local_directory() {
-        let local = manifest().join(DEVELOPMENT_DIR);
-        assert_eq!(
-            directory(Root::Data, &system(), Environment::Development, &manifest()),
-            local.join("data")
-        );
-        assert_eq!(
-            directory(
-                Root::Versions,
-                &system(),
-                Environment::Development,
-                &manifest()
-            ),
-            local.join("data").join("versions")
-        );
-        assert_eq!(
-            directory(Root::Logs, &system(), Environment::Development, &manifest()),
-            local.join("logs")
-        );
-        assert_eq!(
-            directory(
-                Root::Cache,
-                &system(),
-                Environment::Development,
-                &manifest()
-            ),
-            local.join("cache")
-        );
+        for environment in [Environment::Development, Environment::Test, Environment::Pre] {
+            let local = manifest().join(DEVELOPMENT_DIR);
+            assert_eq!(
+                directory(Root::Data, &system(), environment, &manifest()),
+                local.join("data")
+            );
+            assert_eq!(
+                directory(
+                    Root::Versions,
+                    &system(),
+                    environment,
+                    &manifest()
+                ),
+                local.join("data").join("versions")
+            );
+            assert_eq!(
+                directory(Root::Logs, &system(), environment, &manifest()),
+                local.join("logs")
+            );
+            assert_eq!(
+                directory(
+                    Root::Cache,
+                    &system(),
+                    environment,
+                    &manifest()
+                ),
+                local.join("cache")
+            );
+        }
     }
 
     /// The log root has exactly one owner.

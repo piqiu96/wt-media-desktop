@@ -69,7 +69,7 @@ impl Levels {
         Levels {
             default: match environment {
                 Environment::Production => LevelFilter::INFO,
-                Environment::Development => LevelFilter::DEBUG,
+                Environment::Development | Environment::Test | Environment::Pre => LevelFilter::DEBUG,
             },
             per_target: BTreeMap::new(),
         }

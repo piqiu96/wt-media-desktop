@@ -75,3 +75,8 @@ bin/control.sh status
 `tests/`, which is the whole test surface of this repository. `bin/control.sh
 status` answers the other question — whether the shell is up and the dev server
 is answering — and reports liveness and health as two separate readings.
+
+Cloud 目标环境由 `[cloud].cloud_env = "dev/test/pre/prod"` 显式配置，与应用构建模式分开。
+Desktop 启动 Agent 时一起传递 Cloud 地址和 `WT_MEDIA_CLOUD_ENV`；开发应用连接正式 Cloud 时使用 `prod`。
+
+运行环境 `environment` 使用 `dev/test/pre/prod`，与 Cloud 目标 `cloud_env` 分别配置；旧 development/production/staging 值改用 dev/prod/pre。发布配置为 prod，原 release 构建强制 prod 的校验与目录规则保持；test/pre 按非 prod 处理。Sidecar 同时收到 `WT_MEDIA_ENV` 和 `WT_MEDIA_CLOUD_ENV`，允许 dev 应用连接 prod Cloud。

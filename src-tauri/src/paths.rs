@@ -94,7 +94,7 @@ pub fn candidates(
 ) -> Vec<(PathBuf, Source)> {
     let mut out = Vec::new();
 
-    if environment == Environment::Development {
+    if environment != Environment::Production {
         if let Some(raw) = env.get(CONFIG_ENV) {
             let raw = raw.trim();
             if !raw.is_empty() {

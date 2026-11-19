@@ -130,17 +130,31 @@ impl Location {
     /// kept in hand.
     pub fn of<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
         let exe = std::env::current_exe().map_err(|e| format!("无法确定本程序的路径：{e}"))?;
-        let resources = app
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("无法确定安装包的资源目录：{e}"))?;
+        let resources = app.path().resource_dir().map_err(|e| e.to_string());
+        Self::from_executable(&exe, resources)
+    }
+
+    fn from_executable(
+        exe: &std::path::Path,
+        resources: Result<std::path::PathBuf, String>,
+    ) -> Result<Self, String> {
+        let sidecar = resolve_sidecar(exe);
+        let bundled = inside_a_bundle(exe) || cfg!(all(windows, not(debug_assertions)));
+        let resources = match resources {
+            Ok(path) => path,
+            // Tauri cannot resolve resources for a clean macOS cargo-test
+            // executable under deps (there is no adjacent .cargo-lock). Only
+            // an unbundled debug launch may use its actual sidecar directory.
+            Err(_) if cfg!(debug_assertions) && !bundled => sidecar
+                .parent()
+                .ok_or_else(|| "无法确定开发环境的 Local Agent 目录".to_string())?
+                .to_path_buf(),
+            Err(error) => return Err(format!("无法确定安装包的资源目录：{error}")),
+        };
         Ok(Self {
-            sidecar: resolve_sidecar(&exe),
+            sidecar,
             manifest: resources.join(MANIFEST_NAME),
-            // Windows installers place the app beside its resources, with no
-            // `.app/Contents` directory to identify a bundle. A release-mode
-            // Windows executable must therefore require the packaged record.
-            bundled: inside_a_bundle(&exe) || cfg!(all(windows, not(debug_assertions))),
+            bundled,
         })
     }
 
@@ -358,6 +372,34 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn missing_tauri_resources_in_cargo_deps_still_resolve_the_development_sidecar() {
+        let exe = Path::new("/build/target/debug/deps/wt_media_desktop_shell-123");
+        let location = Location::from_executable(exe, Err("unknown path".into()))
+            .expect("a build-tree executable needs no packaged resource directory");
+        assert!(!location.bundled());
+        assert_eq!(
+            location.sidecar(),
+            Path::new("/build/target/debug/wt-media-agent")
+        );
+        assert_eq!(
+            location.manifest(),
+            Path::new("/build/target/debug/sidecar-manifest.json")
+        );
+    }
+
+    #[test]
+    fn missing_tauri_resources_in_a_real_bundle_are_never_ignored() {
+        let exe = Path::new("/Applications/起飞.app/Contents/MacOS/wt-media-desktop");
+        let error = Location::from_executable(exe, Err("unknown path".into()))
+            .expect_err("a real bundle must provide its resource directory");
+        assert!(error.contains("unknown path"));
+        let resources = PathBuf::from("/Applications/起飞.app/Contents/Resources");
+        let location = Location::from_executable(exe, Ok(resources.clone())).unwrap();
+        assert!(location.bundled());
+        assert_eq!(location.manifest(), resources.join(MANIFEST_NAME));
+    }
 
     /// A scratch directory of this test's own, removed when it is dropped.
     ///
