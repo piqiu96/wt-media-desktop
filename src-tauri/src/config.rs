@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 /// The production resource, compiled in. A bundle whose resource file is
 /// missing or corrupt falls back to this rather than starting with no CSP and
 /// no Cloud address.
+pub const CLOUD_ENVS: &[&str] = &["dev", "test", "pre", "prod"];
+
 pub const PRODUCTION_TOML: &str = include_str!("../resources/desktop.production.toml");
 
 /// The only override a non-production environment honours. Named after the
@@ -84,6 +86,7 @@ pub struct Agent {
 #[serde(deny_unknown_fields)]
 pub struct Cloud {
     pub base_url: String,
+    pub cloud_env: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -210,6 +213,9 @@ impl DesktopConfig {
     /// applied uniformly rather than per-field, where it would have to be
     /// re-justified on every edit. Same rule as D-07's TOML credential keys.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !CLOUD_ENVS.contains(&self.cloud.cloud_env.as_str()) {
+            return Err(ConfigError::Invalid("cloud.cloud_env must be dev, test, pre or prod".to_string()));
+        }
         if !is_loopback_host(&self.agent.host) {
             return Err(ConfigError::Invalid(
                 "agent.host must be loopback (127.0.0.1, localhost or ::1)".to_string(),
@@ -370,6 +376,15 @@ mod tests {
             "environment = \"production\"",
             "environment = \"development\"",
         )
+    }
+
+    #[test]
+    fn cloud_env_can_be_prod_in_a_development_app() {
+        let text = development_toml();
+        let config = load_with(&BTreeMap::new(), &text, Environment::Development).expect("independent Cloud environment");
+        assert_eq!(config.cloud.cloud_env, "prod");
+        let invalid = text.replace("cloud_env = \"prod\"", "cloud_env = \"staging\"");
+        assert!(load_with(&BTreeMap::new(), &invalid, Environment::Development).is_err());
     }
 
     fn development_config() -> DesktopConfig {
