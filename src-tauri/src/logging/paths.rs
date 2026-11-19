@@ -97,7 +97,7 @@ const PROBE_PREFIX: &str = ".wt-media-write-probe-";
 /// `std::env::home_dir` would write into whoever ran it, and a function that
 /// reads the environment cannot be asked "what would you do with *this* home".
 pub fn directory(system: &SystemPaths, environment: Environment, manifest_dir: &Path) -> PathBuf {
-    if environment == Environment::Development {
+    if environment != Environment::Production {
         return manifest_dir
             .join(DEVELOPMENT_DIR[0])
             .join(DEVELOPMENT_DIR[1]);

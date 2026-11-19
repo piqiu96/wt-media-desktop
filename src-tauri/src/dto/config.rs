@@ -61,10 +61,10 @@ mod tests {
             // production, so flipping it is what makes a development config that
             // validates — which also makes `development` a section whose value
             // differs between the two cases.
-            Environment::Development => PRODUCTION_TOML
+            Environment::Development | Environment::Test | Environment::Pre => PRODUCTION_TOML
                 .replace(
-                    "environment = \"production\"",
-                    "environment = \"development\"",
+                    "environment = \"prod\"",
+                    "environment = \"dev\"",
                 )
                 .replace("python_fallback = false", "python_fallback = true"),
         };
@@ -120,7 +120,7 @@ mod tests {
         let development = json_of(&distinctive());
         assert_eq!(development["cloud_base_url"], "https://cloud.example.test");
         assert_eq!(development["local_agent_port"], 18765);
-        assert_eq!(development["environment"], "development");
+        assert_eq!(development["environment"], "dev");
 
         let mut production = config_with_environment(Environment::Production);
         production.cloud.base_url = "https://other.example.test".to_string();
@@ -128,7 +128,7 @@ mod tests {
         let production = json_of(&production);
         assert_eq!(production["cloud_base_url"], "https://other.example.test");
         assert_eq!(production["local_agent_port"], 8765);
-        assert_eq!(production["environment"], "production");
+        assert_eq!(production["environment"], "prod");
     }
 
     /// No private **value** appears anywhere in the answer, checked over the

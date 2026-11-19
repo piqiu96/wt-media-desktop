@@ -48,6 +48,7 @@ pub fn environment(
     system: &SystemPaths,
 ) -> Result<Vec<(String, String)>, String> {
     let mut vars = vec![
+        ("WT_MEDIA_ENV".to_string(), config.environment.code().to_string()),
         ("WT_MEDIA_CLOUD_BASE_URL".to_string(), config.cloud.base_url.clone()),
         ("WT_MEDIA_CLOUD_ENV".to_string(), config.cloud.cloud_env.clone()),
         (
@@ -379,6 +380,17 @@ mod tests {
     }
 
     #[test]
+    fn runtime_environment_names_reach_agent_without_changing_cloud_target() {
+        for name in ["dev", "test", "pre", "prod"] {
+            let mut config = config_with("127.0.0.1", 18765, None);
+            config.environment = serde_json::from_value(serde_json::json!(name)).expect(name);
+            let vars = as_map(&environment(&config, &RuntimeToken::generate(), &SystemPaths::current()).unwrap());
+            assert_eq!(vars.get("WT_MEDIA_ENV").map(String::as_str), Some(name));
+            assert_eq!(vars.get("WT_MEDIA_CLOUD_ENV").map(String::as_str), Some("prod"));
+        }
+    }
+
+    #[test]
     fn sidecar_receives_cloud_address_and_explicit_environment_together() {
         let mut config = config_with("127.0.0.1", 18765, None);
         config.cloud.base_url = "https://cloud.example".to_string();
@@ -435,7 +447,8 @@ mod tests {
             vars.get("WT_MEDIA_AGENT_RUNTIME_TOKEN").map(String::as_str),
             Some(token.expose())
         );
-        assert_eq!(vars.len(), 6, "nothing else is sent: {vars:?}");
+        assert_eq!(vars.get("WT_MEDIA_ENV").map(String::as_str), Some("prod"));
+        assert_eq!(vars.len(), 7, "nothing else is sent: {vars:?}");
     }
 
     /// An unset data directory is **omitted**, not sent empty.
