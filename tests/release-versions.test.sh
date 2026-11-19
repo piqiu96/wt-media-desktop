@@ -149,7 +149,7 @@ build_tree() {
   fi
 
   if [[ "$resources" == true ]]; then
-    echo 'environment = "production"' >"$root/app/Contents/Resources/resources/desktop.toml"
+    echo 'environment = "prod"' >"$root/app/Contents/Resources/resources/desktop.toml"
     echo 'port = 8765' >"$root/app/Contents/Resources/stand-in.toml"
   fi
 

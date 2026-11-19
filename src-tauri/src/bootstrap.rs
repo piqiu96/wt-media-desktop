@@ -327,8 +327,8 @@ mod tests {
     fn a_development_build_reads_the_tree_and_reports_it() {
         let text = config::PRODUCTION_TOML
             .replace(
-                "environment = \"production\"",
-                "environment = \"development\"",
+                "environment = \"prod\"",
+                "environment = \"dev\"",
             )
             .replace("port = 8765", "port = 8766");
         let dir = tree_with(&text, "dev");
@@ -353,8 +353,8 @@ mod tests {
     fn a_rejected_file_falls_back_and_says_why_without_echoing_a_value() {
         let text = config::PRODUCTION_TOML
             .replace(
-                "environment = \"production\"",
-                "environment = \"development\"",
+                "environment = \"prod\"",
+                "environment = \"dev\"",
             )
             .replace("host = \"127.0.0.1\"", "host = \"0.0.0.0\"");
         let dir = tree_with(&text, "bad");
@@ -389,8 +389,8 @@ mod tests {
     fn production_ignores_the_environment_end_to_end() {
         let text = config::PRODUCTION_TOML
             .replace(
-                "environment = \"production\"",
-                "environment = \"development\"",
+                "environment = \"prod\"",
+                "environment = \"dev\"",
             )
             .replace("port = 8765", "port = 9999");
         let dir = tree_with(&text, "prod");

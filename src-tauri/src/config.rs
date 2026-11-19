@@ -22,7 +22,11 @@ use std::collections::BTreeMap;
 /// The production resource, compiled in. A bundle whose resource file is
 /// missing or corrupt falls back to this rather than starting with no CSP and
 /// no Cloud address.
-pub const CLOUD_ENVS: &[&str] = &["dev", "test", "pre", "prod"];
+pub const ENVIRONMENTS: &[&str] = &[
+    Environment::Development.code(), Environment::Test.code(),
+    Environment::Pre.code(), Environment::Production.code(),
+];
+pub const CLOUD_ENVS: &[&str] = ENVIRONMENTS;
 
 pub const PRODUCTION_TOML: &str = include_str!("../resources/desktop.production.toml");
 
@@ -32,12 +36,16 @@ pub const ENV_PYTHON_FALLBACK: &str = "WT_MEDIA_DESKTOP_ALLOW_PYTHON_FALLBACK";
 
 /// `Serialize` exists for exactly one reader: `dto::PublicConfig` hands the page
 /// the effective environment, and the wire value has to be the same lowercase
-/// word the file uses (`"development"` / `"production"`) — `rename_all` covers
+/// word the file uses (`dev/test/pre/prod`) — `rename_all` covers
 /// both directions so the two can never spell it differently.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
+    #[serde(rename = "dev")]
     Development,
+    Test,
+    Pre,
+    #[serde(rename = "prod")]
     Production,
 }
 
@@ -51,8 +59,10 @@ impl Environment {
     /// there rather than in an archive somebody has already sent.
     pub const fn code(self) -> &'static str {
         match self {
-            Environment::Development => "development",
-            Environment::Production => "production",
+            Environment::Development => "dev",
+            Environment::Test => "test",
+            Environment::Pre => "pre",
+            Environment::Production => "prod",
         }
     }
 }
@@ -187,7 +197,7 @@ pub fn load_with(
     // Rule 1. Production consults no environment variable at all — including
     // ones added later, and including the file locator, which the caller
     // resolves before ever getting here.
-    if config.environment == Environment::Development {
+    if config.environment != Environment::Production {
         // Rule for the one key that is allowed to differ: presence overrides
         // the file, absence leaves it alone. The accepted value is `1`, matching
         // the variable this key replaces.
@@ -352,13 +362,40 @@ mod tests {
     /// both written in.
     #[test]
     fn code_agrees_with_serde() {
-        for environment in [Environment::Development, Environment::Production] {
+        for environment in [Environment::Development, Environment::Test, Environment::Pre, Environment::Production] {
             let serialized = serde_json::to_value(environment).expect("a serializable enum");
             assert_eq!(
                 serialized,
                 serde_json::Value::String(environment.code().to_string()),
                 "{environment:?} spells itself two ways"
             );
+        }
+    }
+
+    #[test]
+    fn runtime_environment_names_use_four_codes_independently_of_cloud() {
+        for name in ["dev", "test", "pre", "prod"] {
+            let text = PRODUCTION_TOML.lines().map(|line| {
+                if line.starts_with("environment =") { format!("environment = \"{}\"", name) }
+                else { line.to_string() }
+            }).collect::<Vec<_>>().join("\n");
+            let config = load_with(&BTreeMap::new(), &text, Environment::Development).expect(name);
+            assert_eq!(config.environment.code(), name);
+            assert_eq!(serde_json::to_value(config.environment).unwrap(), name);
+            assert_eq!(config.cloud.cloud_env, "prod");
+            let released = load_with(&BTreeMap::new(), &text, Environment::Production).expect(name);
+            assert_eq!(released.environment, Environment::Production);
+        }
+    }
+
+    #[test]
+    fn runtime_environment_names_reject_old_or_unknown_codes() {
+        for name in ["development", "production", "staging", "unknown", ""] {
+            let text = PRODUCTION_TOML.lines().map(|line| {
+                if line.starts_with("environment =") { format!("environment = \"{}\"", name) }
+                else { line.to_string() }
+            }).collect::<Vec<_>>().join("\n");
+            assert!(load_with(&BTreeMap::new(), &text, Environment::Development).is_err(), "{name}");
         }
     }
 
@@ -373,8 +410,8 @@ mod tests {
     /// failure names the rule it broke.
     fn development_toml() -> String {
         PRODUCTION_TOML.replace(
-            "environment = \"production\"",
-            "environment = \"development\"",
+            "environment = \"prod\"",
+            "environment = \"dev\"",
         )
     }
 
