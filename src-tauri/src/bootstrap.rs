@@ -162,13 +162,20 @@ pub fn resolve(package_info: &tauri::PackageInfo) -> Startup {
 
 /// The CSP the window is served under, built from the config.
 ///
-/// The existing directives keep their established values. The public data-bucket
-/// origin is allowed only for video playback; Cloud's connect origin still comes
-/// from the desktop config.
+/// File capability URLs first reach Cloud and then redirect to object storage.
+/// Allow that configured origin for images, including local HTTP deployments;
+/// never interpolate a whole URL or the IPC/connect allowlist into img-src.
 pub fn csp_policy(config: &DesktopConfig) -> String {
+    let mut images = "'self' https:".to_string();
+    if let Ok(url) = reqwest::Url::parse(&config.cloud.base_url) {
+        if matches!(url.scheme(), "http" | "https") && url.has_host() {
+            images.push(' ');
+            images.push_str(&url.origin().ascii_serialization());
+        }
+    }
     format!(
-        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' https:; media-src 'self' https://data.bucket.oss.longyanyue.cn",
-        config.browser.csp_connect_src
+        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src {}; media-src 'self' https://data.bucket.oss.longyanyue.cn",
+        config.browser.csp_connect_src, images
     )
 }
 
@@ -258,29 +265,14 @@ mod tests {
         }
     }
 
-    /// The policy's whole shape is pinned, not only its variable part.
-    ///
-    /// The string below is the literal that used to sit in `tauri.conf.json` —
-    /// same directives, same order, same separators — with **one deliberate
-    /// exception**: the `connect-src` value now carries the IPC entries
-    /// CHG-20260924-060 added, so it is no longer a byte-for-byte copy of that
-    /// retired literal. This docstring says that outright rather than leaving
-    /// "same directives" to be read as "unchanged".
-    ///
-    /// Until that literal was deleted, `the_shipped_config_produces_the_policy_
-    /// tauri_conf_carries` asserted the equality against the file; when the file
-    /// lost its copy, the assertion moved here rather than being dropped. Its job
-    /// is to make "a directive edited, added or reordered has to edit this string
-    /// too, on purpose" a permanent claim — and it fired exactly as designed when
-    /// the `connect-src` value changed: this test and
-    /// `config::tests::out_of_range_values_are_rejected` were the only two that
-    /// went red, which is why the change could not land silently.
+    /// Keep every directive deliberate. Images additionally permit the configured
+    /// Cloud origin so local HTTP capability URLs can redirect to the bucket.
     #[test]
     fn the_policy_is_shape_for_shape_the_literal_it_replaced() {
         assert_eq!(
             csp_policy(&shipped()),
             "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost \
-             http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https:; \
+             http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https: http://127.0.0.1:8188; \
              media-src 'self' https://data.bucket.oss.longyanyue.cn"
         );
     }
@@ -301,9 +293,7 @@ mod tests {
         assert_eq!(target.app.security.dev_csp, None);
     }
 
-    /// And the one directive that is allowed to move is the one that reads the
-    /// config — otherwise the test above would also pass for a function that
-    /// ignores its argument.
+    /// connect-src follows its own config rather than the image origin.
     #[test]
     fn the_policy_takes_its_connect_src_from_the_config() {
         let mut config = shipped();
@@ -316,9 +306,45 @@ mod tests {
             "{policy}"
         );
         assert!(
-            !policy.contains("127.0.0.1:8188"),
-            "the literal must not survive: {policy}"
+            !policy
+                .split(';')
+                .find(|d| d.contains("connect-src"))
+                .unwrap()
+                .contains("127.0.0.1:8188"),
+            "connect-src must not retain the previous origin: {policy}"
         );
+    }
+
+    #[test]
+    fn images_allow_the_configured_cloud_origin_without_exposing_url_details() {
+        let mut config = shipped();
+        config.cloud.base_url =
+            "http://operator:secret@localhost:19088/cloud/api?key=private#ignored".into();
+        let policy = csp_policy(&config);
+        let images = policy
+            .split(';')
+            .find(|d| d.trim().starts_with("img-src "))
+            .unwrap();
+        assert_eq!(
+            images.trim(),
+            "img-src 'self' https: http://localhost:19088"
+        );
+        assert!(!images.contains("secret"));
+        assert!(!images.contains("ipc.localhost"));
+        assert!(!images
+            .split_whitespace()
+            .any(|source| source == "http:" || source == "*"));
+    }
+
+    #[test]
+    fn images_reject_non_http_cloud_origins_and_policy_injection() {
+        let mut config = shipped();
+        config.cloud.base_url = "javascript:alert(1)".into();
+        assert!(csp_policy(&config).contains("img-src 'self' https:;"));
+        config.cloud.base_url = "http://cloud.example/api/;script-src *".into();
+        let policy = csp_policy(&config);
+        assert!(policy.contains("img-src 'self' https: http://cloud.example;"));
+        assert!(!policy.contains("script-src *"));
     }
 
     /// A development build with a development file in the tree runs on that
