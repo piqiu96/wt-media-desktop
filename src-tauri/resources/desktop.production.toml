@@ -8,7 +8,7 @@
 # per-launch runtime token is generated at startup, and the Cloud node
 # credential lives only in native memory.
 
-environment = "production"
+environment = "prod"
 
 [agent]
 # The Local Agent sidecar listens on loopback only. `localhost` and `::1` are
@@ -21,6 +21,8 @@ port = 8765
 # `WT_MEDIA_AGENT_DATA_DIR`; when unset, the variable is not passed at all.
 
 [cloud]
+# Connection target, independent of debug/release build mode.
+cloud_env = "prod"
 # Tagged release builds replace this local source default with the HTTPS Cloud
 # origin from the product Manifest before compiling the binary and bundling it.
 base_url = "http://127.0.0.1:8188"

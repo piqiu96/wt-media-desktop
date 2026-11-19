@@ -259,7 +259,7 @@ fn resolve_directory(
     system: &crate::system_paths::SystemPaths,
     manifest_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let prepared = if build_environment == Environment::Development {
+    let prepared = if build_environment != Environment::Production {
         paths::prepare(system, build_environment, manifest_dir)
     } else if system.production_base().is_ok() {
         paths::prepare(system, build_environment, manifest_dir)
@@ -271,10 +271,7 @@ fn resolve_directory(
 
 /// The environment's name as the summary spells it.
 fn name_of(environment: Environment) -> &'static str {
-    match environment {
-        Environment::Development => "development",
-        Environment::Production => "production",
-    }
+    environment.code()
 }
 
 /// The level's name as a record spells it.
@@ -601,7 +598,7 @@ mod tests {
         assert!(summary.contains("/tmp/logs"), "{summary}");
         assert!(summary.contains("INFO"), "{summary}");
         assert!(summary.contains("auto"), "{summary}");
-        assert!(summary.contains("环境 production"), "{summary}");
+        assert!(summary.contains("环境 prod"), "{summary}");
         assert!(
             !summary.contains("构建"),
             "one environment needs no gloss: {summary}"
@@ -613,7 +610,7 @@ mod tests {
         }
         .summary();
         assert!(
-            disagreeing.contains("环境 production（构建 development）"),
+            disagreeing.contains("环境 prod（构建 dev）"),
             "{disagreeing}"
         );
 

@@ -850,7 +850,7 @@ mod tests {
         HostFacts {
             app_version: "0.1.0".to_string(),
             build_version: "0.1.0".to_string(),
-            environment: "development".to_string(),
+            environment: "dev".to_string(),
             config_source: "development_tree".to_string(),
             config_rejected: None,
             data_root: "/home/operator/.local/data".to_string(),
