@@ -103,6 +103,7 @@ pub struct Cloud {
 #[serde(deny_unknown_fields)]
 pub struct Browser {
     pub csp_connect_src: String,
+    pub media_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -289,6 +290,14 @@ impl DesktopConfig {
                 "logging.retention_days must be > 0".to_string(),
             ));
         }
+        if self.browser.media_origins.is_empty() || self.browser.media_origins.iter().any(|origin| {
+            reqwest::Url::parse(origin).map_or(true, |url| {
+                !matches!(url.scheme(), "http" | "https") || !url.has_host() || url.host_str().is_some_and(|host| host.contains('*'))
+                    || url.origin().ascii_serialization() != *origin
+            })
+        }) {
+            return Err(ConfigError::Invalid("browser.media_origins must contain exact http(s) origins".to_string()));
+        }
         if self.environment == Environment::Production {
             if parse_http_url(&self.cloud.base_url).is_none() {
                 return Err(ConfigError::Invalid(
@@ -352,6 +361,19 @@ fn parse_http_url(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_origins_require_exact_hosts_without_wildcards_or_url_details() {
+        let mut config = load_with(&BTreeMap::new(), PRODUCTION_TOML, Environment::Production).unwrap();
+        for invalid in ["https:", "*", "https://*.example.test", "https://user:secret@media.example.test", "https://media.example.test/video", "https://media.example.test?token=secret", "https://media.example.test;script-src *"] {
+            config.browser.media_origins = vec![invalid.to_string()];
+            assert!(config.validate().is_err(), "{invalid}");
+        }
+        config.browser.media_origins.clear();
+        assert!(config.validate().is_err());
+        config.browser.media_origins = vec!["https://media.example.test:9443".into()];
+        assert!(config.validate().is_ok());
+    }
 
     /// The hand-written word and the serialized one are the same word.
     ///
