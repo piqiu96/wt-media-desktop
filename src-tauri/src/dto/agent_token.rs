@@ -16,6 +16,7 @@ pub struct ConfigureTokenArgs {
 #[derive(Clone, Debug, Deserialize)]
 pub struct IssuedAgentToken {
     pub token: String,
+    pub user_id: String,
     #[serde(default)]
     pub expires_at: Option<i64>,
 }
