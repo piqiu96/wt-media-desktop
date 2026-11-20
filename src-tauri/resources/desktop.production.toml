@@ -38,6 +38,9 @@ base_url = "http://127.0.0.1:8188"
 # a dead window. Measured: adding both dropped `ipc://` refusals from 3 to 0.
 csp_connect_src = "ipc: http://ipc.localhost http://127.0.0.1:8188"
 
+# Exact primary and legacy object storage origins used by signed video previews.
+media_origins = ["https://s3.oss.longyanyue.cn", "https://data.bucket.oss.longyanyue.cn"]
+
 [http]
 # Both must be > 0. `reqwest::Client` has no timeout by default, which means a
 # hung Agent or Cloud endpoint would otherwise hold a command forever.

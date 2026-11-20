@@ -174,8 +174,8 @@ pub fn csp_policy(config: &DesktopConfig) -> String {
         }
     }
     format!(
-        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src {}; media-src 'self' https://data.bucket.oss.longyanyue.cn",
-        config.browser.csp_connect_src, images
+        "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src {}; media-src 'self' {}",
+        config.browser.csp_connect_src, images, config.browser.media_origins.join(" ")
     )
 }
 
@@ -273,8 +273,19 @@ mod tests {
             csp_policy(&shipped()),
             "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost \
              http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; img-src 'self' https: http://127.0.0.1:8188; \
-             media-src 'self' https://data.bucket.oss.longyanyue.cn"
+             media-src 'self' https://s3.oss.longyanyue.cn https://data.bucket.oss.longyanyue.cn"
         );
+    }
+
+    #[test]
+    fn media_sources_follow_configuration_without_allowing_other_hosts() {
+        let mut config = shipped();
+        config.browser.media_origins = vec!["https://media.example.test".into()];
+        let policy = csp_policy(&config);
+        let media = policy.split(';').find(|d| d.trim().starts_with("media-src ")).unwrap();
+        assert_eq!(media.trim(), "media-src 'self' https://media.example.test");
+        assert!(!media.contains("longyanyue.cn"));
+        assert!(!media.split_whitespace().any(|source| source == "https:" || source == "*"));
     }
 
     /// The mutation lands in `app.security.csp` — the field `Manager::csp()`
