@@ -41,7 +41,7 @@ async fn request(
     body: Option<Value>,
 ) -> Result<Value, GuardRefusal> {
     let user_id = tokens
-        .draft_user(expected_user)
+        .publication_user(expected_user)
         .map_err(|message| refused("draft_identity_required", message))?;
     let request = match method {
         "PUT" => client.put(TASK_DRAFT_PATH),
@@ -63,7 +63,7 @@ async fn request(
     let value: Value = serde_json::from_str(&text).map_err(|_| GuardRefusal::unreadable(status))?;
     // A previous user's reply is never returned to the current page.
     tokens
-        .draft_user(expected_user)
+        .publication_user(expected_user)
         .map_err(|message| refused("draft_identity_required", message))?;
     value
         .get("data")
@@ -120,7 +120,7 @@ pub async fn local_publication_draft_clear(
 
 #[tauri::command]
 pub fn local_publication_draft_deactivate(tokens: State<'_, AgentTokenState>) {
-    tokens.clear_draft_user();
+    tokens.clear_publication_user();
 }
 
 #[cfg(test)]

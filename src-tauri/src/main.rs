@@ -243,6 +243,8 @@ fn main() {
             commands::agent::local_agent_stop,
             commands::agent_token::local_agent_configure_token,
             commands::agent_token::local_agent_token_facts,
+            commands::publication_run::local_publication_scene,
+            commands::publication_run::local_publication_resume,
             commands::publication_draft::local_publication_draft_get,
             commands::publication_draft::local_publication_draft_save,
             commands::publication_draft::local_publication_draft_clear,

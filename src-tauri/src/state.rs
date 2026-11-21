@@ -135,20 +135,20 @@ impl AgentTokenState {
         true
     }
 
-    pub fn clear_draft_user(&self) {
+    pub fn clear_publication_user(&self) {
         if let Ok(mut slot) = self.context.lock() {
             slot.draft_user_id = None;
             slot.generation += 1;
         }
     }
 
-    pub fn draft_user(&self, expected: &str) -> Result<String, String> {
+    pub fn publication_user(&self, expected: &str) -> Result<String, String> {
         let slot = self.context.lock().map_err(|_| "本机身份暂不可用")?;
         let user = slot
             .draft_user_id
             .as_deref()
             .filter(|user| *user == expected && !user.is_empty())
-            .ok_or("登录身份已变化，请重新登录后恢复续编")?;
+            .ok_or("登录身份已变化，请重新登录后处理发布内容")?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "本机时间无效")?
@@ -159,7 +159,7 @@ impl AgentTokenState {
             .and_then(|token| token.expires_at)
             .is_none_or(|expiry| expiry <= now)
         {
-            return Err("登录已过期，请重新登录后恢复续编".into());
+            return Err("登录已过期，请重新登录后处理发布内容".into());
         }
         Ok(user.to_owned())
     }
@@ -199,7 +199,7 @@ mod tests {
             expires_at: Some(4_000_000_000),
         });
         assert!(
-            state.draft_user("9").is_err(),
+            state.publication_user("9").is_err(),
             "opaque token has no trusted draft identity"
         );
         let generation = state.begin_configuration().unwrap();
@@ -211,13 +211,13 @@ mod tests {
             "9".into(),
             generation
         ));
-        assert_eq!(state.draft_user("9").unwrap(), "9");
+        assert_eq!(state.publication_user("9").unwrap(), "9");
         assert!(
-            state.draft_user("10").is_err(),
+            state.publication_user("10").is_err(),
             "page cannot select another owner"
         );
-        state.clear_draft_user();
-        assert!(state.draft_user("9").is_err());
+        state.clear_publication_user();
+        assert!(state.publication_user("9").is_err());
         assert_eq!(
             state.get().unwrap().token,
             "issued",
@@ -243,7 +243,7 @@ mod tests {
             "9".into(),
             generation,
         );
-        assert!(state.draft_user("9").is_err());
+        assert!(state.publication_user("9").is_err());
     }
 
     /// Nothing is supervised until a start says so.
