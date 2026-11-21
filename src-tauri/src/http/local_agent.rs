@@ -58,6 +58,14 @@ impl LocalAgentClient {
         self.bearer(self.inner.post(self.url(path)))
     }
 
+    pub fn put(&self, path: &str) -> RequestBuilder {
+        self.bearer(self.inner.put(self.url(path)))
+    }
+
+    pub fn delete(&self, path: &str) -> RequestBuilder {
+        self.bearer(self.inner.delete(self.url(path)))
+    }
+
     /// Absolute, because the sidecar's port comes from configuration and a
     /// relative URL would silently pick up whatever base the caller had.
     fn url(&self, path: &str) -> String {

@@ -115,14 +115,24 @@ async fn configure(
     if session_token.is_empty() {
         return Err(NO_SESSION_TOKEN.to_string());
     }
+    let generation = tokens.begin_configuration()?;
+    let _configuration = tokens.configuration.lock().await;
     let issued = exchange(cloud, &cloud_base_url, session_token).await?;
+    if issued.user_id.starts_with('0')
+        || issued.user_id.is_empty()
+        || !issued.user_id.bytes().all(|c| c.is_ascii_digit())
+    {
+        return Err("执行凭证缺少可信用户身份".into());
+    }
     // 先持有再推送：推送失败时下一次启动还能从这里重推，而已经换到手的
     // Token 在过期前仍可用于上报在途任务。
     let token = AgentToken {
         token: issued.token,
         expires_at: issued.expires_at,
     };
-    tokens.set(token.clone());
+    if !tokens.set_for_user(token.clone(), issued.user_id, generation) {
+        return Err("登录身份已变化，请重新获取执行凭证".into());
+    }
     push(client, &token).await?;
     Ok(facts(tokens))
 }
@@ -132,8 +142,12 @@ pub async fn local_agent_configure_token(
     client: State<'_, LocalAgentClient>,
     cloud: State<'_, CloudClient>,
     tokens: State<'_, AgentTokenState>,
+    config: State<'_, crate::config::DesktopConfig>,
     args: ConfigureTokenArgs,
 ) -> Result<AgentTokenFacts, String> {
+    if cloud_base_url(&args.cloud_base_url)? != cloud_base_url(&config.cloud.base_url)? {
+        return Err("Cloud地址与当前环境不一致，请重新打开应用".into());
+    }
     configure(&client, &cloud, &tokens, &args).await
 }
 
@@ -168,7 +182,7 @@ mod tests {
 
     fn issued(token: &str) -> String {
         format!(
-            r#"{{"errcode":0,"message":"","data":{{"token":"{token}","expires_at":1800000000}}}}"#
+            r#"{{"errcode":0,"message":"","data":{{"token":"{token}","expires_at":1800000000,"user_id":"9"}}}}"#
         )
     }
 
