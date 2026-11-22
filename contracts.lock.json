@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "contract_revision": "publication-check-20261122.1",
+  "contract_revision": "publication-cover-20261122.2",
   "consumes": {
-    "cloud_agent_api": "v1@2026.11.22.1",
+    "cloud_agent_api": "v1@2026.11.22.2",
     "local_agent_api": "v1@2026.11.21.2",
     "local_event_schemas": "runtime-environment@2026.07.14.9",
     "local_status_enums": "status@2026.07.14.8"
