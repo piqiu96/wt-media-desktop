@@ -30,9 +30,8 @@ pub struct PublicConfig {
     /// it: every Local Agent call goes through a Rust command, and Vue reaching
     /// a loopback port directly is what `localAgentBoundary.test.js` forbids.
     pub local_agent_port: u16,
-    /// Which environment this launch is, **after** the build's floor is applied
-    /// — `DesktopConfig::environment`, not the file's own declaration. A release
-    /// binary is production even if the file it read says otherwise.
+    /// Pinned desktop identity. A release installer may be test or prod;
+    /// Cloud routing does not change the identity or its managed directories.
     pub environment: Environment,
 }
 

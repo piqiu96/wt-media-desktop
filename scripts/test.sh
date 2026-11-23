@@ -69,3 +69,6 @@ for suite in "$DESKTOP_DIR"/tests/*.test.sh; do
   echo "--- $(basename "$suite")"
   bash "$suite"
 done
+
+# Packaging regression is self-contained; no sibling checkout is required.
+python3 "$DESKTOP_DIR/scripts/test-desktop-environment.py"

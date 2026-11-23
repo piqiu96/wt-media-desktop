@@ -10,6 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$DESKTOP_DIR"
+export WT_MEDIA_DESKTOP_RELEASE_CHANNEL=stable
+export WT_MEDIA_DESKTOP_ENVIRONMENT="${WT_MEDIA_DESKTOP_ENVIRONMENT:-prod}"
 cargo tauri build --bundles app
 
 APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"

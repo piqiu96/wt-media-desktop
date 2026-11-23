@@ -1475,7 +1475,7 @@ mod tests {
         );
         assert_eq!(
             path(&development.data),
-            Path::new("/build/src-tauri/.local/data/settings.toml")
+            Path::new("/Users/operator/Library/Application Support/WTMedia/Dev/Desktop/settings.toml")
         );
         // And it is not one of the other three roots: a settings file under
         // `cache` would sit inside the one directory tree the cleanup command is

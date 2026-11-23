@@ -1,27 +1,6 @@
-//! Turning the configuration file into what a launch needs, and the one step
-//! that has to happen before Tauri builds anything.
-//!
-//! That step is the CSP, and where it may happen is narrower than it looks.
-//! Tauri reads `app.security.csp` out of the **`AppManager`'s own copy** of the
-//! config: `AppManager::with_handlers` moves `context.config` into the manager
-//! (`tauri/src/manager/mod.rs:39`), and `Manager::csp()` reads it from there when
-//! it serves an asset (`:369`). `App` exposes no `config_mut`, so once
-//! `Builder::build` has run that copy is unreachable — and `.setup()` runs even
-//! later than that, *after* Tauri has built every window declared in the config
-//! file (`tauri/src/app.rs:2524` then `:2531`). So the mutation happens on the
-//! `Context`, before `run()`, and the config has to be located without an
-//! `AppHandle`.
-//!
-//! Locating it without an `AppHandle` costs nothing, because the resource
-//! directory does not need one: `PathResolver::resource_dir` is a thin wrapper
-//! over `tauri::utils::platform::resource_dir(package_info, env)`
-//! (`tauri/src/path/desktop.rs`), and `Context::package_info()` is available
-//! before `build`. Calling that same function here means the directory resolved
-//! now and the one `app.path().resource_dir()` would return cannot drift.
-//!
-//! The environment comes from the **build**, never from the file: the file
-//! cannot be located until we know where to look, and a release binary is
-//! production with no way to be talked out of it.
+//! Native startup configuration. The compiled Desktop identity comes from
+//! build_identity.rs; Cloud routing and CSP are loaded independently.
+//! Corrupt resources retain the same compiled identity when falling back.
 
 use crate::config::{self, DesktopConfig, Environment};
 use crate::paths::{self, Source};
@@ -62,22 +41,12 @@ impl Startup {
     }
 }
 
-/// The environment a build fixes, as a pure function of "is this a debug build".
-///
-/// Split from [`build_environment`] so both directions are testable — the same
-/// shape as `python_fallback_allowed` in `main.rs`, and for the same reason: a
-/// rule that can only ever be observed one way is not tested.
-pub const fn build_environment_of(debug_build: bool) -> Environment {
-    if debug_build {
-        Environment::Development
-    } else {
-        Environment::Production
+/// The desktop identity embedded at build time, independent of Cloud routing.
+pub fn build_environment() -> Environment {
+    match env!("WT_MEDIA_DESKTOP_ENVIRONMENT") {
+        "dev" => Environment::Development, "test" => Environment::Test,
+        "prod" => Environment::Production, _ => panic!("invalid compiled desktop environment"),
     }
-}
-
-/// The environment this binary is.
-pub const fn build_environment() -> Environment {
-    build_environment_of(cfg!(debug_assertions))
 }
 
 /// Locate the config, parse it, and fall back to the compiled-in default if the
@@ -224,13 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_build_is_development_and_a_release_build_is_production() {
-        assert_eq!(build_environment_of(true), Environment::Development);
-        assert_eq!(build_environment_of(false), Environment::Production);
-        // And the wiring agrees with the rule in the profile this test runs in.
+    fn startup_uses_the_compiled_desktop_identity() {
         assert_eq!(
             build_environment(),
-            build_environment_of(cfg!(debug_assertions))
+            match env!("WT_MEDIA_DESKTOP_ENVIRONMENT") {
+        "dev" => Environment::Development, "test" => Environment::Test,
+        "prod" => Environment::Production, _ => panic!("invalid compiled desktop environment"),
+    }
         );
     }
 
@@ -401,7 +370,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
-            startup.config.agent.port, 8765,
+            startup.config.agent.port, 18765,
             "the fallback must be the shipped config"
         );
         assert_eq!(

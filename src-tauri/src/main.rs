@@ -11,6 +11,11 @@
 )]
 
 mod app_paths;
+#[cfg(test)]
+mod environment_isolation_tests;
+#[cfg(test)]
+#[path = "../build_identity.rs"]
+mod build_identity;
 mod bootstrap;
 mod cleanup;
 mod commands;
@@ -189,7 +194,7 @@ fn main() {
             *setup_migration
                 .lock()
                 .expect("Windows migration report lock poisoned") =
-                if migration_system.platform == system_paths::Platform::Windows {
+                if migration_system.platform == system_paths::Platform::Windows && bootstrap::build_environment() == config::Environment::Production {
                     let new_data = app_paths::resolve(
                         &migration_system,
                         bootstrap::build_environment(),
