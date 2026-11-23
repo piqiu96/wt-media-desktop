@@ -24,7 +24,8 @@ The Operations row is the one that moved: process start/stop and liveness live i
 ## Where a new script goes
 
 - A new **development** script → `scripts/dev/`.
-- A new **verification / acceptance** script → `scripts/verify/`.
+- A new **delivery artifact verification tool** → `scripts/verify/`.
+- A new **regression or acceptance test** → `tests/op/` or `tests/pack/`; see [`../tests/README.md`](../tests/README.md). Rust unit tests stay with their modules.
 - **Start/stop and health checks always go to [`bin/`](../bin/)**; do not add them
   under `scripts/`.
 - **Existing scripts do not move.** The flat files in this directory are the

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DESKTOP_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEMP_DIR="$(mktemp -d /private/tmp/wt-media-package-test.XXXXXX)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 

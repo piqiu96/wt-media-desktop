@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "desktop_environment", ROOT / "scripts/build-desktop-environment.py"
 )

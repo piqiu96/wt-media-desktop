@@ -8,11 +8,11 @@
 # where only this repository is checked out) and none of them can pass by reading
 # this machine's real versions.
 #
-# usage: tests/release-versions.test.sh
+# usage: tests/pack/release-versions.test.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DESKTOP_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRIPT="$DESKTOP_DIR/scripts/release-versions.sh"
 TEMP_ROOT="$(mktemp -d /private/tmp/wt-media-versions-test.XXXXXX)"
 trap 'rm -rf "$TEMP_ROOT"' EXIT

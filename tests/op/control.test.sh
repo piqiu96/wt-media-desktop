@@ -17,11 +17,11 @@
 # matrix: no options / `-u` / `-o pipefail` -> 126; `-e` / `-eu` -> 1. So no arm
 # here asserts a literal exit code for that case; they assert the property.
 #
-# usage: tests/control.test.sh
+# usage: tests/op/control.test.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DESKTOP_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONTROL="$DESKTOP_DIR/bin/control.sh"
 TEMP_ROOT="$(mktemp -d /private/tmp/wt-media-control-test.XXXXXX)"
 trap 'rm -rf "$TEMP_ROOT"' EXIT

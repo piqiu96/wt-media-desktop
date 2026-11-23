@@ -65,10 +65,13 @@ cargo test --workspace
 # The release-surface checks are shell scripts, not Rust tests: they exercise the
 # packaging scripts against trees they fabricate themselves, so they need no
 # sibling checkout and can run here.
-for suite in "$DESKTOP_DIR"/tests/*.test.sh; do
+for suite in "$DESKTOP_DIR"/tests/op/*.test.sh "$DESKTOP_DIR"/tests/pack/*.test.sh; do
   echo "--- $(basename "$suite")"
   bash "$suite"
 done
 
 # Packaging regression is self-contained; no sibling checkout is required.
-python3 "$DESKTOP_DIR/scripts/test-desktop-environment.py"
+python3 "$DESKTOP_DIR/tests/pack/desktop_environment_test.py"
+
+# Static Windows declaration check; does not install or start anything.
+python3 "$DESKTOP_DIR/tests/pack/windows_subsystem_test.py"

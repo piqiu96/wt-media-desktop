@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 
-SOURCE = Path(__file__).parent.parent / "src-tauri" / "src" / "main.rs"
+SOURCE = Path(__file__).resolve().parents[2] / "src-tauri" / "src" / "main.rs"
 EXPECTED = r"""#!\[cfg_attr\(
 \s*all\(target_os\s*=\s*"windows",\s*not\(debug_assertions\)\),
 \s*windows_subsystem\s*=\s*"windows"

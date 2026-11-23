@@ -71,9 +71,11 @@ scripts/test.sh
 bin/control.sh status
 ```
 
-`scripts/test.sh` runs `cargo test --workspace`, packaging identity regression, and the release suites under
-`tests/`, which is the whole test surface of this repository. `bin/control.sh
-status` answers the other question — whether the shell is up and the dev server
+`scripts/test.sh` runs `cargo test --workspace`, Shell regressions under
+`tests/op/` and `tests/pack/`, packaging identity regression, and the Windows
+subsystem static check. Windows process and real installer tests run separately
+in the Workspace Windows release job; see [`tests/README.md`](tests/README.md).
+`bin/control.sh status` answers the other question — whether the shell is up and the dev server
 is answering — and reports liveness and health as two separate readings.
 
 Cloud 目标环境由 `[cloud].cloud_env = "dev/test/pre/prod"` 显式配置，与应用构建模式分开。
