@@ -195,6 +195,11 @@ fn view(file: &Path, stored: &UserSettings) -> SettingsView {
     SettingsView {
         save_dir: display_of(stored.save_dir.as_ref()),
         file: file.display().to_string(),
+        known_save_dirs: stored
+            .search_dirs()
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect(),
     }
 }
 
@@ -299,6 +304,51 @@ pub fn local_settings_get() -> Result<SettingsView, String> {
 #[tauri::command]
 pub fn local_settings_set(save_dir: Option<String>) -> Result<SettingsView, String> {
     set_save_dir(save_dir.as_deref())
+}
+
+// 只取消查找登记；不访问目录内容，也不删除下载记录或文件。
+fn remove_search_dir(root: &Path, directory: &Path) -> Result<SettingsView, String> {
+    let file = file_of(root);
+    let mut stored = settings::load(&file).map_err(|error| format!("读取设置失败：{error}"))?;
+    if stored.save_dir.as_deref() == Some(directory) {
+        return Err("当前下载目录不能从历史查找中移除，请先更改下载目录".into());
+    }
+    if !stored.known_save_dirs.iter().any(|dir| dir == directory) {
+        return Err("该目录不在历史查找登记中，请刷新后重试".into());
+    }
+    stored.known_save_dirs.retain(|dir| dir != directory);
+    settings::save(&file, &stored).map_err(|error| format!("保存设置失败：{error}"))?;
+    read(root)
+}
+
+fn registered_directory(root: &Path, directory: &Path) -> Result<PathBuf, String> {
+    if !directory.is_absolute() || !places_of(root)?.search.iter().any(|dir| dir == directory) {
+        return Err("只能打开已登记的下载或历史查找目录，请刷新后重试".into());
+    }
+    settings::check_save_dir(directory).map_err(|problem| {
+        format!(
+            "目录 {} 无法打开：{}",
+            directory.display(),
+            problem.message()
+        )
+    })?;
+    Ok(directory.to_path_buf())
+}
+
+#[tauri::command]
+pub fn local_remove_search_directory(directory: String) -> Result<SettingsView, String> {
+    let (system, environment, manifest) = layout();
+    let root = read_root(&system, environment, manifest)?;
+    remove_search_dir(&root, Path::new(&directory))
+}
+
+#[tauri::command]
+pub fn local_open_save_directory(directory: String) -> Result<String, String> {
+    let (system, environment, manifest) = layout();
+    let root = read_root(&system, environment, manifest)?;
+    let directory = registered_directory(&root, Path::new(&directory))?;
+    super::reveal::open_directory(&directory)?;
+    Ok(directory.display().to_string())
 }
 
 #[cfg(test)]
@@ -959,5 +1009,42 @@ mod tests {
         assert_eq!(resolved, prepared, "the two must name the same directory");
         assert!(!created_by_read, "resolving must not create the root");
         assert!(created_by_write, "preparing must create the root");
+    }
+    #[test]
+    fn history_removal_persists_without_touching_files() {
+        let root = scratch("remove-history");
+        let (old, _) = pickable(&root);
+        let current = root.join("current");
+        std::fs::create_dir(&current).unwrap();
+        let material = old.join("material.mp4");
+        std::fs::write(&material, b"retained").unwrap();
+        write(&root, Some(old.to_str().unwrap())).unwrap();
+        write(&root, Some(current.to_str().unwrap())).unwrap();
+        let answer = remove_search_dir(&root, &old).unwrap();
+        assert_eq!(answer.known_save_dirs, vec![current.display().to_string()]);
+        assert_eq!(std::fs::read(&material).unwrap(), b"retained");
+        assert!(!places_of(&root).unwrap().search.contains(&old));
+        assert!(remove_search_dir(&root, &current).is_err());
+        assert!(registered_directory(&root, &old).is_err());
+        add_search_dir(&root, &old).unwrap();
+        assert_eq!(registered_directory(&root, &old).unwrap(), old);
+        assert_eq!(
+            read(&root).unwrap().save_dir,
+            Some(current.display().to_string())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_actions_reject_unregistered_and_keep_corrupt_settings() {
+        let root = scratch("directory-boundary");
+        let (folder, _) = pickable(&root);
+        assert!(registered_directory(&root, &folder).is_err());
+        assert!(remove_search_dir(&root, &folder).is_err());
+        let corrupt = "invalid settings";
+        std::fs::write(file_of(&root), corrupt).unwrap();
+        assert!(remove_search_dir(&root, &folder).is_err());
+        assert_eq!(std::fs::read_to_string(file_of(&root)).unwrap(), corrupt);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

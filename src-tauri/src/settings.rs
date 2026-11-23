@@ -234,8 +234,13 @@ impl UserSettings {
                 dropped: None,
             };
         }
-        let mut dirs = vec![dir];
-        dirs.extend(self.known_save_dirs.iter().cloned());
+        let mut dirs: Vec<PathBuf> = self.save_dir.iter().cloned().collect();
+        dirs.push(dir);
+        dirs.extend(
+            self.search_dirs()
+                .into_iter()
+                .filter(|old| Some(old) != self.save_dir.as_ref()),
+        );
         // At most one can fall out: the history never holds more than
         // `MAX_KNOWN_SAVE_DIRS`, and this call adds exactly one.
         let dropped = dirs.get(MAX_KNOWN_SAVE_DIRS).cloned();
@@ -819,8 +824,8 @@ mod tests {
         );
         assert_eq!(
             settings.known_save_dirs,
-            vec![PathBuf::from("/tmp/before"), PathBuf::from("/tmp/now")],
-            "and the history holds it, ahead of anything picked earlier"
+            vec![PathBuf::from("/tmp/now"), PathBuf::from("/tmp/before")],
+            "current directory stays first, then the most recently registered history"
         );
         assert_eq!(
             settings.search_dirs(),

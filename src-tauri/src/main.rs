@@ -282,6 +282,8 @@ fn main() {
             // manager. None of them takes a path from the page; the log viewer's
             // 「打开日志文件夹」 passes a place label, which is resolved here.
             commands::settings::local_settings_get,
+            commands::settings::local_remove_search_directory,
+            commands::settings::local_open_save_directory,
             commands::settings::local_settings_set,
             commands::reveal::local_open_place,
             // T-04's three, appended for the same reason as the eleven above.
