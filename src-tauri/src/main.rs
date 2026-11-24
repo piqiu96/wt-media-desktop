@@ -12,7 +12,7 @@
 
 mod app_paths;
 #[cfg(test)]
-mod environment_isolation_tests;
+mod environment_isolation_test;
 #[cfg(test)]
 #[path = "../build_identity.rs"]
 mod build_identity;

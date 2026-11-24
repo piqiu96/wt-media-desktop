@@ -1,7 +1,7 @@
 # Desktop Tests
 
 Rust unit tests stay with their modules under `src-tauri/`; longer test modules
-may use separate files behind `#[cfg(test)]`. Script regressions live here,
+may use separate files named `*_test.rs` behind `#[cfg(test)]`. Script regressions live here,
 grouped by responsibility rather than language or CHG.
 
 ## Layout
