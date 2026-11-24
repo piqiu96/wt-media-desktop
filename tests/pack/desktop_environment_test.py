@@ -29,7 +29,7 @@ class DesktopEnvironmentTests(unittest.TestCase):
                 self.assertEqual(overlay["identifier"], "com.wtmedia.desktop" + ("" if env == "prod" else "." + env))
                 resources = overlay["bundle"]["resources"]
                 self.assertIsNone(resources["resources/desktop.production.toml"])
-                runtime = next(Path(path) for path in resources if path != "resources/desktop.production.toml")
+                runtime = next(Path(path) for path in resources if resources[path] == "resources/desktop.production.toml")
                 config = module.tomllib.loads(runtime.read_text())
                 self.assertEqual(config["environment"], env)
                 self.assertEqual(config["cloud"]["cloud_env"], "prod")

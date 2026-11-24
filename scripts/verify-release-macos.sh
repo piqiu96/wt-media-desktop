@@ -13,10 +13,8 @@ case "$(uname -m)" in
   x86_64) artifact_arch="x64" ;;
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-version="$(cd "$DESKTOP_DIR" && node -p 'require("./src-tauri/tauri.conf.json").version')"
-# Both halves of the DMG's name come from tauri.conf.json, which is also what
-# build-release-macos.sh names it after: a rename must not turn into "Expected DMG
-# is missing" for a DMG that was just built.
+version="$(python3 "$SCRIPT_DIR/dev/desktop_version.py" --field desktop_version)"
+# Product version comes from the same release input passed to Tauri CLI.
 app_name="$(cd "$DESKTOP_DIR" && node -p 'require("./src-tauri/tauri.conf.json").productName')"
 dmg_path="$DESKTOP_DIR/target/release/bundle/dmg/${app_name}_${version}_${artifact_arch}.dmg"
 if [[ ! -f "$dmg_path" ]]; then
@@ -32,6 +30,7 @@ cleanup() {
 trap cleanup EXIT
 hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path" >/dev/null
 codesign --verify --deep --strict --verbose=2 "$mount_dir/$app_name.app"
+python3 "$SCRIPT_DIR/dev/desktop_version.py" --verify-macos "$mount_dir/$app_name.app"
 
 # The Agent's configuration, checked in the artifact rather than in the source
 # tree (ADR-0016 §6: `config_online/` reaches the product as `产物/config`, and

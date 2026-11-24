@@ -48,6 +48,18 @@ try {
     if (-not (Test-Path -LiteralPath $sidecar)) {
         throw "First install did not place the Agent executable at $sidecar."
     }
+    if ($env:WT_MEDIA_PRODUCT_TAG) {
+        $expectedVersion = $env:WT_MEDIA_PRODUCT_TAG.Substring(1)
+        $build = Get-Content -Raw -LiteralPath (Join-Path $installDir 'desktop-build.json') | ConvertFrom-Json
+        $native = (Get-Item -LiteralPath (Join-Path $installDir 'wt-media-desktop-shell.exe')).VersionInfo.ProductVersion
+        if ($registration.DisplayVersion -ne $expectedVersion -or $native -ne $expectedVersion -or
+            $build.desktop_version -ne $expectedVersion -or $build.product_tag -ne $env:WT_MEDIA_PRODUCT_TAG -or
+            $build.desktop_source_tag -ne $env:WT_MEDIA_DESKTOP_SOURCE_TAG -or
+            $build.desktop_source_commit -ne $env:WT_MEDIA_DESKTOP_SOURCE_COMMIT) {
+            throw "Installed Desktop native version, registration or provenance differs from the release input."
+        }
+        Write-Host "Verified installed product version: $expectedVersion"
+    }
     New-Item -ItemType Directory -Path (Split-Path $sentinel) -Force | Out-Null
     Set-Content -Path $sentinel -Value 'keep on reinstall'
 

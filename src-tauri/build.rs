@@ -14,6 +14,7 @@ fn main() {
         "WT_MEDIA_DESKTOP_ENVIRONMENT",
         "WT_MEDIA_DESKTOP_RELEASE_CHANNEL",
         "TAURI_CONFIG",
+        "WT_MEDIA_PRODUCT_TAG",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -78,8 +79,36 @@ fn main() {
             "test installer binary name required"
         );
     }
+    if let Ok(tag) = std::env::var("WT_MEDIA_PRODUCT_TAG") {
+        assert_eq!(
+            profile, "release",
+            "product releases require release profile"
+        );
+        assert_eq!(
+            environment, "prod",
+            "product releases require prod identity"
+        );
+        assert!(tag.starts_with('v'), "invalid product tag");
+        assert_eq!(
+            overlay.get("version").and_then(Value::as_str),
+            Some(&tag[1..]),
+            "product version must reach Tauri CLI through its configuration overlay"
+        );
+    } else {
+        assert!(
+            channel.as_deref() != Some("stable"),
+            "official release requires product tag"
+        );
+    }
     let base: Value =
         serde_json::from_str(&std::fs::read_to_string("tauri.conf.json").unwrap()).unwrap();
+    if profile == "release" {
+        assert!(overlay.get("version").and_then(Value::as_str).is_some(),
+            "Desktop packages require the version overlay: use build-desktop-environment.py or the release entry point");
+    } else if overlay.get("version").is_none() {
+        // Direct `cargo tauri dev` is an unpublished build as well.
+        overlay["version"] = json!(format!("{}-dev", base["version"].as_str().unwrap()));
+    }
     let mut windows = base["app"]["windows"].clone();
     windows[0]["title"] = json!(format!("{name} · 内容运营平台"));
     let icons = if environment == "prod" {

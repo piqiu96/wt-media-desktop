@@ -4,7 +4,7 @@ set -euo pipefail
 # The five version classes a WT Media release has to be able to answer for, and
 # the one place that answers them.
 #
-#   1. desktop_version        src-tauri/tauri.conf.json -- Tauri's `version`,
+#   1. desktop_version        product Tag overlay -- Tauri's effective `version`,
 #                             which is what the DMG and the release folder are
 #                             named after
 #   2. agent_version          target/sidecar-manifest.json, written by
@@ -302,6 +302,17 @@ resolve_classes() {
   if [[ "$DESKTOP_VERSION" == "missing" || "$DESKTOP_VERSION" == "unreadable" ]]; then
     refuse "cannot read the Desktop version out of $DESKTOP_DIR/src-tauri/tauri.conf.json (got '$DESKTOP_VERSION')"
   fi
+  local build_record=""
+  if [[ -n "$APP_PATH" && -f "$APP_PATH/Contents/Resources/desktop-build.json" ]]; then
+    build_record="$APP_PATH/Contents/Resources/desktop-build.json"
+    DESKTOP_VERSION="$(json_field "$build_record" '.desktop_version')"
+    python3 "$(dirname "$0")/dev/desktop_version.py" --verify-macos "$APP_PATH" >/dev/null
+  elif [[ -n "${WT_MEDIA_PRODUCT_TAG:-}" ]]; then
+    if [[ -n "$APP_PATH" ]]; then
+      refuse "official Desktop app is missing desktop-build.json"
+    fi
+    DESKTOP_VERSION="$(python3 "$(dirname "$0")/dev/desktop_version.py" --root "$DESKTOP_DIR" --field desktop_version)"
+  fi
   AGENT_VERSION="$(json_field "$MANIFEST_PATH" '.version')"
   FRONTEND_VERSION="$(frontend_version_string "$FRONTEND_DIR")"
   CONTRACTS="$(contract_versions)"
@@ -342,7 +353,7 @@ write_record() {
   local record="$APP_PATH/Contents/Resources/$RECORD_NAME"
   resource_manifest "$RESOURCES_DIR" "$RECORD_NAME" | node -e '
     const fs = require("fs");
-    const [path, desktop, agent, frontend, contracts, digest, files] = process.argv.slice(1);
+    const [path, desktop, agent, frontend, contracts, digest, files, buildPath] = process.argv.slice(1);
     const manifest = {};
     for (const line of fs.readFileSync(0, "utf8").split("\n")) {
       if (!line) continue;
@@ -357,6 +368,7 @@ write_record() {
     fs.writeFileSync(path, JSON.stringify({
       schema_version: 1,
       desktop_version: desktop,
+      desktop_build: fs.existsSync(buildPath) ? JSON.parse(fs.readFileSync(buildPath, "utf8")) : null,
       agent_version: agent,
       frontend_build_version: frontend,
       contract_versions: map,
@@ -364,13 +376,16 @@ write_record() {
       components_resources_files: Number(files),
       components_resources_manifest: manifest,
     }, null, 2) + "\n");
-  ' "$record" "$DESKTOP_VERSION" "$AGENT_VERSION" "$FRONTEND_VERSION" "$CONTRACT_LINE" "$RESOURCE_DIGEST" "$RESOURCE_COUNT"
+  ' "$record" "$DESKTOP_VERSION" "$AGENT_VERSION" "$FRONTEND_VERSION" "$CONTRACT_LINE" "$RESOURCE_DIGEST" "$RESOURCE_COUNT" "$APP_PATH/Contents/Resources/desktop-build.json"
 }
 
 verify_record() {
   local record="$APP_PATH/Contents/Resources/$RECORD_NAME"
   if [[ ! -f "$record" ]]; then
     refuse "$APP_PATH carries no $record: the artifact does not say which versions it was built from"
+  fi
+  if [[ -f "$APP_PATH/Contents/Resources/desktop-build.json" ]]; then
+    node -e 'const fs=require("fs"); const record=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const build=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); if(JSON.stringify(record.desktop_build)!==JSON.stringify(build)) process.exit(1)' "$record" "$APP_PATH/Contents/Resources/desktop-build.json" || refuse "desktop_build provenance differs from the embedded build record"
   fi
   local recorded expected
   recorded="$(json_field "$record" '.components_resources_version')"

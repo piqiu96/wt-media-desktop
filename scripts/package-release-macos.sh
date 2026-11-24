@@ -50,7 +50,8 @@ case "$(uname -m)" in
   *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-VERSION="$(node -p 'require(process.argv[1]).version' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
+export WT_MEDIA_DESKTOP_RELEASE_CHANNEL=stable
+VERSION="$(python3 "$SCRIPT_DIR/dev/desktop_version.py" --field desktop_version)"
 APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
 PACKAGE_NAME="${APP_NAME}_${VERSION}_macos-${ARTIFACT_ARCH}"
 PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
