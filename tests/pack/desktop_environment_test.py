@@ -34,6 +34,29 @@ class DesktopEnvironmentTests(unittest.TestCase):
                 self.assertEqual(config["environment"], env)
                 self.assertEqual(config["cloud"]["cloud_env"], "prod")
 
+    def test_packaging_files_are_utf8_under_a_legacy_windows_locale(self):
+        read_text, write_text = Path.read_text, Path.write_text
+
+        def legacy_read(path, *args, **kwargs):
+            kwargs.setdefault("encoding", "cp1252")
+            return read_text(path, *args, **kwargs)
+
+        def legacy_write(path, data, *args, **kwargs):
+            kwargs.setdefault("encoding", "cp1252")
+            return write_text(path, data, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src-tauri/resources").mkdir(parents=True)
+            for name in ["tauri.conf.json", "resources/desktop.production.toml"]:
+                (root / "src-tauri" / name).write_bytes((ROOT / "src-tauri" / name).read_bytes())
+            with mock.patch.object(Path, "read_text", legacy_read), mock.patch.object(Path, "write_text", legacy_write):
+                for env, name in [("dev", "起飞 Dev"), ("test", "起飞 Test"), ("prod", "起飞")]:
+                    overlay = module.prepare(root, env, "debug" if env == "dev" else "release")
+                    self.assertEqual(json.loads(overlay.read_bytes().decode("utf-8"))["productName"], name)
+                    config = module.tomllib.loads((overlay.parent / "desktop.production.toml").read_bytes().decode("utf-8"))
+                    self.assertEqual(config["environment"], env)
+
     def test_release_cannot_accidentally_package_development_identity(self):
         with self.assertRaises(ValueError):
             module.prepare(ROOT, "dev", "release")

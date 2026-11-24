@@ -19,15 +19,15 @@ def prepare(root, environment, profile):
     name = {'dev': '起飞 Dev', 'test': '起飞 Test', 'prod': '起飞'}[environment]
     suffix = '' if environment == 'prod' else '.' + environment
     icon = 'icons' if environment == 'prod' else 'icons/' + environment
-    base = json.loads((root / 'src-tauri/tauri.conf.json').read_text())
+    base = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding="utf-8"))
     windows = base['app']['windows']
     windows[0]['title'] = name + ' · 内容运营平台'
     folder = root / '.generated/environment' / environment
     folder.mkdir(parents=True, exist_ok=True)
-    source = (root / 'src-tauri/resources/desktop.production.toml').read_text()
+    source = (root / 'src-tauri/resources/desktop.production.toml').read_text(encoding="utf-8")
     config = source.replace('environment = "prod"', 'environment = "' + environment + '"', 1)
     runtime = folder / 'desktop.production.toml'
-    runtime.write_text(config)
+    runtime.write_text(config, encoding="utf-8")
     assert tomllib.loads(config)['environment'] == environment
     overlay = {
         'mainBinaryName': 'wt-media-desktop-shell' if environment == 'prod' else 'wt-media-desktop.' + environment,
@@ -43,7 +43,7 @@ def prepare(root, environment, profile):
         },
     }
     target = folder / 'tauri.conf.json'
-    target.write_text(json.dumps(overlay, ensure_ascii=False, indent=2) + '\n')
+    target.write_text(json.dumps(overlay, ensure_ascii=False, indent=2) + '\n', encoding="utf-8")
     return target
 
 
@@ -52,7 +52,7 @@ def finalize_macos(root, app):
     # order: repair the child signature, record its final bytes, seal the app.
     subprocess.run(['bash', str(root / 'scripts/repair-macos-signing.sh'), str(app)], check=True)
     sidecar = app / 'Contents/MacOS/wt-media-agent'
-    record = json.loads((app / 'Contents/Resources/sidecar-manifest.json').read_text())
+    record = json.loads((app / 'Contents/Resources/sidecar-manifest.json').read_text(encoding="utf-8"))
     if record.get('filename') != 'wt-media-agent' or record.get('sha256') != hashlib.sha256(sidecar.read_bytes()).hexdigest():
         raise ValueError('packaged Agent differs from its final runtime record')
 
@@ -74,7 +74,7 @@ def resolve_build_target(cargo_dir, env, explicit=None):
         config = legacy if legacy.is_file() else directory / 'config.toml'
         if not config.is_file():
             continue
-        settings = tomllib.loads(config.read_text())
+        settings = tomllib.loads(config.read_text(encoding="utf-8"))
         if settings.get('include'):
             raise ValueError('Cargo config includes require an explicit --target for Desktop packaging')
         value = settings.get('build', {}).get('target')
@@ -100,7 +100,7 @@ def build_output(metadata, profile, target=None):
 def package_macos_dmg(root, app, target_triple=None):
     # Create the disk image only from the finalized app. This also avoids the
     # Finder automation used by Tauri's default DMG aesthetic customization.
-    base = json.loads((root / 'src-tauri/tauri.conf.json').read_text())
+    base = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding="utf-8"))
     architecture = target_triple.split('-')[0] if target_triple else platform.machine()
     arch = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x64', 'universal': 'universal'}[architecture]
     target = app.parent.parent / 'dmg' / f'{app.stem}_{base["version"]}_{arch}.dmg'
@@ -166,7 +166,7 @@ def main():
         output = build_output(json.loads(metadata.stdout), args.profile, target_triple)
     subprocess.run(command, cwd=root, env=env, check=True)
     if macos_package:
-        name = json.loads(config.read_text())['productName']
+        name = json.loads(config.read_text(encoding="utf-8"))['productName']
         app = output / 'bundle/macos' / (name + '.app')
         finalize_macos(root, app)
         if create_dmg:
