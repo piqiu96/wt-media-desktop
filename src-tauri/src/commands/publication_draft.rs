@@ -1,4 +1,4 @@
-//! Narrow new-task input bridge. Page identity is only an expected-user check.
+//! Narrow unsubmitted task/batch input bridge. Page identity is only an expected-user check.
 use crate::dto::GuardRefusal;
 use crate::http::LocalAgentClient;
 use crate::state::AgentTokenState;
@@ -6,22 +6,42 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::State;
 
-const TASK_DRAFT_PATH: &str = "/api/v1/publication-draft/task";
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftType {
+    #[default]
+    Task,
+    Batch,
+}
+impl DraftType {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Task => "/api/v1/publication-draft/task",
+            Self::Batch => "/api/v1/publication-draft/batch",
+        }
+    }
+}
 const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct DraftReadArgs {
     pub user_id: String,
+    #[serde(default)]
+    pub draft_type: DraftType,
 }
 #[derive(Deserialize)]
 pub struct DraftSaveArgs {
     pub user_id: String,
+    #[serde(default)]
+    pub draft_type: DraftType,
     pub expected_revision: String,
     pub payload: Value,
 }
 #[derive(Deserialize)]
 pub struct DraftClearArgs {
     pub user_id: String,
+    #[serde(default)]
+    pub draft_type: DraftType,
     pub expected_revision: String,
 }
 
@@ -37,6 +57,7 @@ async fn request(
     client: &LocalAgentClient,
     tokens: &AgentTokenState,
     expected_user: &str,
+    draft_type: DraftType,
     method: &str,
     body: Option<Value>,
 ) -> Result<Value, GuardRefusal> {
@@ -44,9 +65,9 @@ async fn request(
         .publication_user(expected_user)
         .map_err(|message| refused("draft_identity_required", message))?;
     let request = match method {
-        "PUT" => client.put(TASK_DRAFT_PATH),
-        "DELETE" => client.delete(TASK_DRAFT_PATH),
-        _ => client.get(TASK_DRAFT_PATH),
+        "PUT" => client.put(draft_type.path()),
+        "DELETE" => client.delete(draft_type.path()),
+        _ => client.get(draft_type.path()),
     }
     .header("X-Publication-User-ID", user_id);
     let request = if let Some(body) = body {
@@ -78,7 +99,15 @@ pub async fn local_publication_draft_get(
     tokens: State<'_, AgentTokenState>,
     args: DraftReadArgs,
 ) -> Result<Value, GuardRefusal> {
-    request(&client, &tokens, &args.user_id, "GET", None).await
+    request(
+        &client,
+        &tokens,
+        &args.user_id,
+        args.draft_type,
+        "GET",
+        None,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -96,6 +125,7 @@ pub async fn local_publication_draft_save(
         &client,
         &tokens,
         &args.user_id,
+        args.draft_type,
         "PUT",
         Some(json!({"payload": args.payload, "expected_revision": args.expected_revision})),
     )
@@ -112,6 +142,7 @@ pub async fn local_publication_draft_clear(
         &client,
         &tokens,
         &args.user_id,
+        args.draft_type,
         "DELETE",
         Some(json!({"expected_revision": args.expected_revision})),
     )
@@ -131,6 +162,38 @@ mod tests {
     use crate::state::AgentToken;
     use crate::token::RuntimeToken;
     use std::collections::BTreeMap;
+
+    async fn request_batch(
+        client: &LocalAgentClient,
+        tokens: &AgentTokenState,
+        method: &str,
+        body: Option<Value>,
+    ) -> Result<Value, GuardRefusal> {
+        request(client, tokens, "9", DraftType::Batch, method, body).await
+    }
+
+    #[test]
+    fn omitted_type_still_reads_task_input() {
+        let args: DraftReadArgs = serde_json::from_value(json!({"user_id":"9"})).unwrap();
+        assert_eq!(args.draft_type.path(), "/api/v1/publication-draft/task");
+    }
+
+    #[test]
+    fn rejects_unknown_or_arbitrary_draft_paths() {
+        for kind in [
+            "plan",
+            "../task",
+            "batch/other",
+            "",
+            "https://example.invalid",
+        ] {
+            assert!(
+                serde_json::from_value::<DraftReadArgs>(json!({"user_id":"9", "draft_type":kind}))
+                    .is_err(),
+                "accepted {kind}"
+            );
+        }
+    }
 
     #[test]
     fn draft_bridge_uses_fixed_path_and_authenticated_owner() {
@@ -158,17 +221,42 @@ mod tests {
             "9".into(),
             generation,
         );
-        assert!(
-            tauri::async_runtime::block_on(request(&client, &tokens, "10", "GET", None)).is_err()
-        );
+        assert!(tauri::async_runtime::block_on(request(
+            &client,
+            &tokens,
+            "10",
+            DraftType::Task,
+            "GET",
+            None
+        ))
+        .is_err());
         assert!(requests(&seen).is_empty());
-        let value =
-            tauri::async_runtime::block_on(request(&client, &tokens, "9", "GET", None)).unwrap();
+        let value = tauri::async_runtime::block_on(request(
+            &client,
+            &tokens,
+            "9",
+            DraftType::Task,
+            "GET",
+            None,
+        ))
+        .unwrap();
         assert_eq!(value["revision"], "0");
         let request = requests(&seen).remove(0);
         assert!(request.starts_with("GET /api/v1/publication-draft/task "));
         assert!(request.to_lowercase().contains("x-publication-user-id: 9"));
         assert!(request.to_lowercase().contains("authorization: bearer "));
         assert!(!request.contains("cloud-secret"));
+        for method in ["GET", "PUT", "DELETE"] {
+            let body = if method == "GET" {
+                None
+            } else {
+                Some(json!({"expected_revision":"0", "payload":{"request_key":"original"}}))
+            };
+            tauri::async_runtime::block_on(request_batch(&client, &tokens, method, body)).unwrap();
+            let observed = requests(&seen).pop().unwrap();
+            assert!(observed.starts_with(&format!("{method} /api/v1/publication-draft/batch ")));
+            assert!(observed.to_lowercase().contains("x-publication-user-id: 9"));
+            assert!(!observed.contains("cloud-secret"));
+        }
     }
 }
