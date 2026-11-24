@@ -57,6 +57,41 @@ def finalize_macos(root, app):
         raise ValueError('packaged Agent differs from its final runtime record')
 
 
+def resolve_build_target(cargo_dir, env, explicit=None):
+    """Resolve one target using Cargo's directory, home and override precedence."""
+    if explicit or env.get('CARGO_BUILD_TARGET'):
+        return explicit or env['CARGO_BUILD_TARGET']
+    cargo_dir = cargo_dir.resolve()
+    cargo_home = Path(env.get('CARGO_HOME') or Path.home() / '.cargo').resolve()
+    directories = [cargo_home, *(parent / '.cargo' for parent in reversed(cargo_dir.parents)), cargo_dir / '.cargo']
+    target = None
+    seen = set()
+    for directory in directories:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        legacy = directory / 'config'
+        config = legacy if legacy.is_file() else directory / 'config.toml'
+        if not config.is_file():
+            continue
+        settings = tomllib.loads(config.read_text())
+        if settings.get('include'):
+            raise ValueError('Cargo config includes require an explicit --target for Desktop packaging')
+        value = settings.get('build', {}).get('target')
+        if value is not None:
+            if isinstance(value, list) and isinstance(target, list):
+                target = target + value
+            else:
+                target = value
+    if isinstance(target, list):
+        if len(target) != 1:
+            raise ValueError('Desktop packaging requires one Cargo target; pass --target explicitly')
+        target = target[0]
+    if target is not None and (not isinstance(target, str) or not target):
+        raise ValueError('Cargo build.target must specify a nonempty target')
+    return target
+
+
 def build_output(metadata, profile, target=None):
     directory = Path(metadata['target_directory'])
     return directory / target / profile if target else directory / profile
@@ -105,7 +140,10 @@ def main():
         env['WT_MEDIA_DESKTOP_RELEASE_CHANNEL'] = 'stable' if args.environment == 'prod' else 'test'
     else:
         env.pop('WT_MEDIA_DESKTOP_RELEASE_CHANNEL', None)
-    target_triple = args.target or env.get('CARGO_BUILD_TARGET')
+    # Tauri invokes Cargo inside src-tauri, so use that config hierarchy for
+    # both target resolution and metadata (including build.target-dir).
+    cargo_dir = root / 'src-tauri'
+    target_triple = resolve_build_target(cargo_dir, env, args.target)
     command = ['cargo', 'tauri', 'dev' if args.dev else 'build', '--config', str(config)]
     if target_triple:
         command.extend(['--target', target_triple])
@@ -124,7 +162,7 @@ def main():
         return
     output = None
     if macos_package:
-        metadata = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=root, env=env, check=True, capture_output=True, text=True)
+        metadata = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=cargo_dir, env=env, check=True, capture_output=True, text=True)
         output = build_output(json.loads(metadata.stdout), args.profile, target_triple)
     subprocess.run(command, cwd=root, env=env, check=True)
     if macos_package:

@@ -100,6 +100,8 @@ python3 scripts/build-desktop-environment.py --environment test --bundles app
 python3 scripts/build-desktop-environment.py --environment prod --bundles app
 ```
 
+构建目标按 `--target`、`CARGO_BUILD_TARGET`、Cargo 配置的优先级确定；配置从 `src-tauri/` 向上查找，并读取 Cargo 用户配置。构建、产物定位与 DMG 架构使用同一目标。多目标数组或使用 `include` 的 Cargo 配置需要显式传入一个 `--target`。
+
 Windows 将 `--bundles app` 改为 `--bundles nsis`。图标由既有 `src-tauri/icons/brand-mark.svg` 派生，开发与测试角标的矢量源在 `icons/dev/` 和 `icons/test/`；修改后运行 `node scripts/generate-environment-icons.mjs` 及 `cargo tauri icon <png> --output <目录>`，只保留桌面图标。
 
 macOS 管理目录：
