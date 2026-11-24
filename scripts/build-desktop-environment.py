@@ -9,6 +9,8 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'dev'))
+from desktop_version import prepare as prepare_version, verify_macos
 
 
 def prepare(root, environment, profile):
@@ -42,6 +44,10 @@ def prepare(root, environment, profile):
             },
         },
     }
+    version_env = dict(os.environ, WT_MEDIA_DESKTOP_ENVIRONMENT=environment)
+    version_config = json.loads(prepare_version(root, version_env).read_text(encoding='utf-8'))
+    overlay['version'] = version_config['version']
+    overlay['bundle']['resources'].update(version_config['bundle']['resources'])
     target = folder / 'tauri.conf.json'
     target.write_text(json.dumps(overlay, ensure_ascii=False, indent=2) + '\n', encoding="utf-8")
     return target
@@ -100,10 +106,10 @@ def build_output(metadata, profile, target=None):
 def package_macos_dmg(root, app, target_triple=None):
     # Create the disk image only from the finalized app. This also avoids the
     # Finder automation used by Tauri's default DMG aesthetic customization.
-    base = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding="utf-8"))
+    version = verify_macos(app)['desktop_version']
     architecture = target_triple.split('-')[0] if target_triple else platform.machine()
     arch = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x64', 'universal': 'universal'}[architecture]
-    target = app.parent.parent / 'dmg' / f'{app.stem}_{base["version"]}_{arch}.dmg'
+    target = app.parent.parent / 'dmg' / f'{app.stem}_{version}_{arch}.dmg'
     target.parent.mkdir(parents=True, exist_ok=True)
     # Verify a fresh image path before replacing an older output. macOS keeps
     # mounted images open, so overwriting an attached output in place would make
@@ -136,7 +142,7 @@ def main():
     config = prepare(root, args.environment, args.profile)
     env = os.environ.copy()
     env['WT_MEDIA_DESKTOP_ENVIRONMENT'] = args.environment
-    if args.profile == 'release':
+    if args.profile == 'release' and env.get('WT_MEDIA_PRODUCT_TAG'):
         env['WT_MEDIA_DESKTOP_RELEASE_CHANNEL'] = 'stable' if args.environment == 'prod' else 'test'
     else:
         env.pop('WT_MEDIA_DESKTOP_RELEASE_CHANNEL', None)

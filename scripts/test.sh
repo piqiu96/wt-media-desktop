@@ -72,6 +72,7 @@ done
 
 # Packaging regression is self-contained; no sibling checkout is required.
 python3 "$DESKTOP_DIR/tests/pack/desktop_environment_test.py"
+python3 "$DESKTOP_DIR/tests/pack/desktop_version_test.py"
 
 # Static Windows declaration check; does not install or start anything.
 python3 "$DESKTOP_DIR/tests/pack/windows_subsystem_test.py"

@@ -12,7 +12,8 @@ DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$DESKTOP_DIR"
 export WT_MEDIA_DESKTOP_RELEASE_CHANNEL=stable
 export WT_MEDIA_DESKTOP_ENVIRONMENT="${WT_MEDIA_DESKTOP_ENVIRONMENT:-prod}"
-cargo tauri build --bundles app
+VERSION_CONFIG="$(python3 "$SCRIPT_DIR/dev/desktop_version.py" --prepare)"
+cargo tauri build --config "$VERSION_CONFIG" --bundles app
 
 APP_NAME="$(node -p 'require(process.argv[1]).productName' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
 APP_PATH="$DESKTOP_DIR/target/release/bundle/macos/$APP_NAME.app"
@@ -33,16 +34,13 @@ fi
 # does not name -- scripts/release-versions.sh.)
 bash "$SCRIPT_DIR/release-versions.sh" --check
 
-VERSION="$(node -p 'require(process.argv[1]).version' "$DESKTOP_DIR/src-tauri/tauri.conf.json")"
+VERSION="$(python3 "$SCRIPT_DIR/dev/desktop_version.py" --field desktop_version)"
 case "$(uname -m)" in
   arm64|aarch64) DMG_SUFFIX="aarch64" ;;
   x86_64) DMG_SUFFIX="x64" ;;
   *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-# The DMG is named after the product name and version in tauri.conf.json, the same
-# way verify-release-macos.sh and package-release-macos.sh compute both. Hardcoding
-# them here meant a version bump or a rename would build a DMG that verification
-# then reported as missing.
+# Product version comes from the same release input passed to Tauri CLI.
 DMG_PATH="$DESKTOP_DIR/target/release/bundle/dmg/${APP_NAME}_${VERSION}_${DMG_SUFFIX}.dmg"
 bash "$SCRIPT_DIR/stage-release-config.sh" "$APP_PATH"
 bash "$SCRIPT_DIR/repair-macos-signing.sh" "$APP_PATH"

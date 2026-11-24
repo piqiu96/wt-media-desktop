@@ -33,7 +33,7 @@ The Operations row is the one that moved: process start/stop and liveness live i
   written from here on — they are not a target shape to migrate the current files
   into.
 
-Both subdirectories currently hold a single `.gitkeep` each.
+`dev/desktop_version.py` derives the Tauri version overlay and embedded build provenance from release inputs. Formal builds require a product Tag and a verified Desktop source Tag; local builds use a development, test or local suffix. This tool does not query Workspace or a remote release.
 
 ## What this file does not own
 
