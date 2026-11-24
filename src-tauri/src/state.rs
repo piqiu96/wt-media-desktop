@@ -91,17 +91,77 @@ pub struct AgentToken {
 /// 没有清除方法：Desktop 被替换后，旧 Token 在过期前仍要用于上报在途任务，
 /// 清掉会让结果无法收敛。换新 Token 直接覆盖；sidecar 重启后从这里重推。
 #[derive(Default)]
-pub struct AgentTokenState(pub Mutex<Option<AgentToken>>);
+struct AgentTokenContext {
+    token: Option<AgentToken>,
+    draft_user_id: Option<String>,
+    generation: u64,
+}
+
+#[derive(Default)]
+pub struct AgentTokenState {
+    context: Mutex<AgentTokenContext>,
+    pub configuration: tokio::sync::Mutex<()>,
+}
 
 impl AgentTokenState {
     pub fn get(&self) -> Option<AgentToken> {
-        self.0.lock().ok().and_then(|slot| slot.clone())
+        self.context.lock().ok().and_then(|slot| slot.token.clone())
     }
 
     pub fn set(&self, token: AgentToken) {
-        if let Ok(mut slot) = self.0.lock() {
-            *slot = Some(token);
+        if let Ok(mut slot) = self.context.lock() {
+            slot.token = Some(token);
+            slot.draft_user_id = None;
+            slot.generation += 1;
         }
+    }
+
+    pub fn begin_configuration(&self) -> Result<u64, String> {
+        let mut slot = self.context.lock().map_err(|_| "本机身份暂不可用")?;
+        slot.generation += 1;
+        slot.draft_user_id = None;
+        Ok(slot.generation)
+    }
+
+    pub fn set_for_user(&self, token: AgentToken, user_id: String, generation: u64) -> bool {
+        let Ok(mut slot) = self.context.lock() else {
+            return false;
+        };
+        if slot.generation != generation {
+            return false;
+        }
+        slot.token = Some(token);
+        slot.draft_user_id = Some(user_id);
+        true
+    }
+
+    pub fn clear_publication_user(&self) {
+        if let Ok(mut slot) = self.context.lock() {
+            slot.draft_user_id = None;
+            slot.generation += 1;
+        }
+    }
+
+    pub fn publication_user(&self, expected: &str) -> Result<String, String> {
+        let slot = self.context.lock().map_err(|_| "本机身份暂不可用")?;
+        let user = slot
+            .draft_user_id
+            .as_deref()
+            .filter(|user| *user == expected && !user.is_empty())
+            .ok_or("登录身份已变化，请重新登录后处理发布内容")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "本机时间无效")?
+            .as_secs() as i64;
+        if slot
+            .token
+            .as_ref()
+            .and_then(|token| token.expires_at)
+            .is_none_or(|expiry| expiry <= now)
+        {
+            return Err("登录已过期，请重新登录后处理发布内容".into());
+        }
+        Ok(user.to_owned())
     }
 }
 
@@ -129,6 +189,61 @@ mod tests {
             expires_at: None,
         });
         assert_eq!(state.get().expect("replaced").token, "v1.second");
+    }
+
+    #[test]
+    fn draft_identity_is_authenticated_scoped_and_can_end_without_losing_reports() {
+        let state = AgentTokenState::default();
+        state.set(AgentToken {
+            token: "opaque.unverified".into(),
+            expires_at: Some(4_000_000_000),
+        });
+        assert!(
+            state.publication_user("9").is_err(),
+            "opaque token has no trusted draft identity"
+        );
+        let generation = state.begin_configuration().unwrap();
+        assert!(state.set_for_user(
+            AgentToken {
+                token: "issued".into(),
+                expires_at: Some(4_000_000_000)
+            },
+            "9".into(),
+            generation
+        ));
+        assert_eq!(state.publication_user("9").unwrap(), "9");
+        assert!(
+            state.publication_user("10").is_err(),
+            "page cannot select another owner"
+        );
+        state.clear_publication_user();
+        assert!(state.publication_user("9").is_err());
+        assert_eq!(
+            state.get().unwrap().token,
+            "issued",
+            "in-flight result token remains held"
+        );
+        assert!(
+            !state.set_for_user(
+                AgentToken {
+                    token: "late".into(),
+                    expires_at: Some(4_000_000_000)
+                },
+                "9".into(),
+                generation
+            ),
+            "logout fences an in-flight exchange"
+        );
+        let generation = state.begin_configuration().unwrap();
+        state.set_for_user(
+            AgentToken {
+                token: "expired".into(),
+                expires_at: Some(1),
+            },
+            "9".into(),
+            generation,
+        );
+        assert!(state.publication_user("9").is_err());
     }
 
     /// Nothing is supervised until a start says so.

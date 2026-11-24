@@ -12,7 +12,9 @@
 
 use crate::config::DesktopConfig;
 use crate::state::SidecarLog;
-use crate::system_paths::{Platform, SystemPaths};
+use crate::system_paths::SystemPaths;
+#[cfg(test)]
+use crate::system_paths::Platform;
 use crate::token::RuntimeToken;
 #[cfg(unix)]
 use rustix::io::Errno;
@@ -73,22 +75,9 @@ pub fn environment(
     // An explicit configuration is the operator's decision on every platform.
     // On Windows only, an unset value is completed from the same per-user system
     // root Desktop uses for itself; macOS and Unix keep the Agent's own default.
-    let data_dir = match (&config.agent.data_dir, system.platform) {
-        (Some(data_dir), _) => Some(data_dir.clone()),
-        (None, Platform::Windows) => Some(
-            system
-                .agent_default_data_dir()
-                .map_err(|error| format!("无法确定 Windows Agent 数据目录: {error}"))?
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (None, Platform::Darwin | Platform::Unix) => None,
-    };
-    // Omitted rather than sent empty — see the test below for why the difference
-    // matters to the Agent.
-    if let Some(data_dir) = data_dir {
-        vars.push(("WT_MEDIA_AGENT_DATA_DIR".to_string(), data_dir));
-    }
+    let (data, logs) = crate::app_paths::agent_directories(config, system)?;
+    vars.push(("WT_MEDIA_AGENT_DATA_DIR".into(), data.display().to_string()));
+    vars.push(("WT_MEDIA_LOG_FILE".into(), logs.join("agent.log").display().to_string()));
     Ok(vars)
 }
 
@@ -448,7 +437,7 @@ mod tests {
             Some(token.expose())
         );
         assert_eq!(vars.get("WT_MEDIA_ENV").map(String::as_str), Some("prod"));
-        assert_eq!(vars.len(), 7, "nothing else is sent: {vars:?}");
+        assert_eq!(vars.len(), 9, "nothing else is sent: {vars:?}");
     }
 
     /// An unset data directory is **omitted**, not sent empty.
@@ -464,7 +453,7 @@ mod tests {
         let unset = config_with("127.0.0.1", 8765, None);
         let paths = system(SystemPaths::current_platform(), None);
         assert!(
-            !as_map(&environment(&unset, &token, &paths).expect("environment"))
+            as_map(&environment(&unset, &token, &paths).expect("environment"))
                 .contains_key("WT_MEDIA_AGENT_DATA_DIR")
         );
 

@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:TEMP ("wt-media-agent-stop-" + [guid]::NewGuid().ToString('N'))
 $first = Join-Path $root 'installed app'
 $second = Join-Path $root 'other app'
-$script = Join-Path $PSScriptRoot '..\src-tauri\windows\stop-installed-agent.ps1'
+$script = Join-Path $PSScriptRoot '..\..\src-tauri\windows\stop-installed-agent.ps1'
 
 try {
     New-Item -ItemType Directory -Path $first, $second -Force | Out-Null

@@ -28,6 +28,19 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; PRODUCTNAME is defined after the hook include, before macro expansion.
+; Managed data roots follow the package identity, never Cloud routing.
+!if "${PRODUCTNAME}" == "起飞 Dev"
+  !define WT_MEDIA_DATA_ROOT "WTMedia\Dev"
+!else if "${PRODUCTNAME}" == "起飞 Test"
+  !define WT_MEDIA_DATA_ROOT "WTMedia\Test"
+!else if "${PRODUCTNAME}" == "起飞"
+  !define WT_MEDIA_DATA_ROOT "WTMedia"
+!else
+  !error "Unknown Desktop identity: refusing unscoped data cleanup"
+!endif
+
+
   ${If} ${FileExists} "$INSTDIR\wt-media-agent.exe"
     SetErrorLevel 1
     Abort "Agent 程序仍在安装目录，卸载未完成；请检查文件占用与权限。"
@@ -38,28 +51,28 @@
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode != 1
     SetShellVarContext current
-    RMDir /r "$LOCALAPPDATA\WTMedia\Desktop"
-    RMDir /r "$LOCALAPPDATA\WTMedia\Agent"
+    RMDir /r "$LOCALAPPDATA\${WT_MEDIA_DATA_ROOT}\Desktop"
+    RMDir /r "$LOCALAPPDATA\${WT_MEDIA_DATA_ROOT}\Agent"
     RMDir "$LOCALAPPDATA\WTMedia"
 
     ; Before RC15, installed Windows builds could use the macOS-shaped
     ; per-user paths. Remove only the two WTMedia component subtrees.
-    RMDir /r "$PROFILE\Library\Application Support\WTMedia\Desktop"
-    RMDir /r "$PROFILE\Library\Application Support\WTMedia\Agent"
+    RMDir /r "$PROFILE\Library\Application Support\${WT_MEDIA_DATA_ROOT}\Desktop"
+    RMDir /r "$PROFILE\Library\Application Support\${WT_MEDIA_DATA_ROOT}\Agent"
     RMDir "$PROFILE\Library\Application Support\WTMedia"
-    RMDir /r "$PROFILE\Library\Logs\WTMedia\Desktop"
-    RMDir /r "$PROFILE\Library\Logs\WTMedia\Agent"
+    RMDir /r "$PROFILE\Library\Logs\${WT_MEDIA_DATA_ROOT}\Desktop"
+    RMDir /r "$PROFILE\Library\Logs\${WT_MEDIA_DATA_ROOT}\Agent"
     RMDir "$PROFILE\Library\Logs\WTMedia"
-    RMDir /r "$PROFILE\Library\Caches\WTMedia\Desktop"
+    RMDir /r "$PROFILE\Library\Caches\${WT_MEDIA_DATA_ROOT}\Desktop"
     RMDir "$PROFILE\Library\Caches\WTMedia"
 
-    ${If} ${FileExists} "$LOCALAPPDATA\WTMedia\Desktop"
-    ${OrIf} ${FileExists} "$LOCALAPPDATA\WTMedia\Agent"
-    ${OrIf} ${FileExists} "$PROFILE\Library\Application Support\WTMedia\Desktop"
-    ${OrIf} ${FileExists} "$PROFILE\Library\Application Support\WTMedia\Agent"
-    ${OrIf} ${FileExists} "$PROFILE\Library\Logs\WTMedia\Desktop"
-    ${OrIf} ${FileExists} "$PROFILE\Library\Logs\WTMedia\Agent"
-    ${OrIf} ${FileExists} "$PROFILE\Library\Caches\WTMedia\Desktop"
+    ${If} ${FileExists} "$LOCALAPPDATA\${WT_MEDIA_DATA_ROOT}\Desktop"
+    ${OrIf} ${FileExists} "$LOCALAPPDATA\${WT_MEDIA_DATA_ROOT}\Agent"
+    ${OrIf} ${FileExists} "$PROFILE\Library\Application Support\${WT_MEDIA_DATA_ROOT}\Desktop"
+    ${OrIf} ${FileExists} "$PROFILE\Library\Application Support\${WT_MEDIA_DATA_ROOT}\Agent"
+    ${OrIf} ${FileExists} "$PROFILE\Library\Logs\${WT_MEDIA_DATA_ROOT}\Desktop"
+    ${OrIf} ${FileExists} "$PROFILE\Library\Logs\${WT_MEDIA_DATA_ROOT}\Agent"
+    ${OrIf} ${FileExists} "$PROFILE\Library\Caches\${WT_MEDIA_DATA_ROOT}\Desktop"
       SetErrorLevel 1
       Abort "应用数据或日志未能完全清理，请检查文件占用与权限。"
     ${EndIf}

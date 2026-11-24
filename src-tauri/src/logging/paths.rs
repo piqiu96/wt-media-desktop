@@ -1,66 +1,7 @@
-//! Which directory Desktop's log files live in, and whether it can be written.
-//!
-//! Two layouts, decided by the **build's** environment, matching the one rule
-//! `config` and `paths` already follow: a release binary is production and a
-//! file may not talk it out of that. Production writes under the user's own
-//! `Library/Logs`, which is the macOS convention for exactly this — it is
-//! covered by Time Machine, it is not synced to iCloud (unlike `Documents`), and
-//! Console.app can open it. Development writes into the crate's `.local/logs`,
-//! the same relative shape the Agent uses for its own dev logs, so neither tree
-//! surprises a developer who has read the other.
-//!
-//! The two layouts are *not* interchangeable and the tests say so rather than
-//! leaving it implied: production reads `home` and never the manifest
-//! directory, development reads the manifest directory and never `home`. A
-//! release build that logged into whatever directory it happened to be built
-//! from would scatter files across the machine, and a development run that
-//! logged into the real `Library/Logs` would mix a developer's scratch output
-//! into the logs of the installed app.
-//!
-//! [`directory`] is pure — a home, an environment and a manifest directory in;
-//! a path out — so the shape is testable without a filesystem or a real `$HOME`.
-//! [`prepare`] is the one impure part, and it answers the second question a
-//! caller has: *can this directory actually be written to*. `create_dir_all`
-//! succeeding does not answer it (a directory that exists may be read-only), so
-//! the check is a real write. A caller that gets `Err` degrades to stderr alone
-//! and starts anyway — a log directory that cannot be written must never be the
-//! reason a launch fails (the user's ruling 五).
-//!
-//! Windows is **not** covered: `home/Library/Logs/...` is a macOS shape, and no
-//! Windows layout has been measured. Registered as untested rather than guessed.
-//!
-//! ## The Agent's tree, which Desktop only mirrors
-//!
-//! The log viewer shows both components' files, and the Agent's are not in
-//! Desktop's directory — they are wherever the Agent decided to put them
-//! (`runtime/paths.py`, which is the Agent's to own). Desktop therefore mirrors
-//! **the inputs the Agent uses**, not its own: [`agent_directory`] takes a home
-//! and the configured data directory and takes *no* `Environment`, because a
-//! Desktop development build says nothing about where the Agent writes while the
-//! Agent's own `environment` and frozen-ness say everything.
-//!
-//! Two of the Agent's three branches are mirrored:
-//!
-//! | the Agent's rule | mirrored as |
-//! | --- | --- |
-//! | a non-empty `data_dir` override wins, logs beside it | [`agent_directory`] expands a leading `~/` and appends `logs` |
-//! | frozen *or* production ⇒ `~/Library/Logs/WTMedia/Agent` | the arm an unset `data_dir` takes |
-//!
-//! The third — not frozen, not production ⇒ the Agent's own checkout
-//! (`<repo>/.local/logs`) — is **not** mirrored and is not guessed at. Desktop
-//! cannot see either input: `frozen` is a property of a process it did not start
-//! from here, and the Agent's `environment` comes from the Agent's own config
-//! file, which is the Agent's to read (the shipped one says `production`; the
-//! built-in default is `development`, so the branch is reachable by editing that
-//! file rather than by anything Desktop does). Pointing at the installed tree
-//! when the Agent logs elsewhere costs an empty list and a visible path — the
-//! page shows the directory it read — whereas guessing the checkout would point
-//! a reader at somebody else's `.local/logs`.
-//!
-//! Measured on the machine this was written on: `~/Library/Logs/WTMedia/Agent`
-//! holds the Agent's three live files and the Agent repo's `.local/logs` is
-//! empty, so the runs that produced them took the installed branch — which is
-//! the arm an unset `data_dir` predicts.
+//! Log locations for the pinned Desktop identity.
+//! Dev/Test/prod never use one another’s managed trees.
+//! The legacy Agent resolver remains for explicit directory expansion; sidecar
+//! launch and log readers share app_paths::agent_directories.
 
 use crate::config::Environment;
 use crate::system_paths::{Platform, SystemPaths};
@@ -83,9 +24,6 @@ pub const AGENT_COMPONENT_DIR: &str = "Agent";
 /// Agent's own override branch (`logs_dir = base / "logs"`).
 pub const AGENT_DATA_LOGS_SUBDIR: &str = "logs";
 
-/// The development layout, as path components relative to the crate.
-pub const DEVELOPMENT_DIR: [&str; 2] = [".local", "logs"];
-
 /// The prefix of the write-probe file. Dot-prefixed so it does not look like a
 /// log file to a human reading the directory, and carrying the pid so two
 /// instances cannot remove each other's probe.
@@ -96,13 +34,7 @@ const PROBE_PREFIX: &str = ".wt-media-write-probe-";
 /// `home` is injected rather than read from the environment: a test that called
 /// `std::env::home_dir` would write into whoever ran it, and a function that
 /// reads the environment cannot be asked "what would you do with *this* home".
-pub fn directory(system: &SystemPaths, environment: Environment, manifest_dir: &Path) -> PathBuf {
-    if environment != Environment::Production {
-        return manifest_dir
-            .join(DEVELOPMENT_DIR[0])
-            .join(DEVELOPMENT_DIR[1]);
-    }
-
+pub fn directory(system: &SystemPaths, environment: Environment, _manifest_dir: &Path) -> PathBuf {
     let base = match system.platform {
         Platform::Windows => system
             .local_app_data
@@ -113,11 +45,11 @@ pub fn directory(system: &SystemPaths, environment: Environment, manifest_dir: &
         }
     };
     match system.platform {
-        Platform::Windows => base.join(APPLICATION_DIR).join(COMPONENT_DIR).join("logs"),
+        Platform::Windows => base.join(environment.application_dir()).join(COMPONENT_DIR).join("logs"),
         Platform::Darwin | Platform::Unix => base
             .join("Library")
             .join("Logs")
-            .join(APPLICATION_DIR)
+            .join(environment.application_dir())
             .join(COMPONENT_DIR),
     }
 }
@@ -534,7 +466,7 @@ mod tests {
     fn development_writes_under_the_injected_manifest_directory() {
         assert_eq!(
             directory(&system(), Environment::Development, &manifest()),
-            PathBuf::from("/crate/.local/logs")
+            PathBuf::from("/home/operator/Library/Logs/WTMedia/Dev/Desktop")
         );
     }
 
@@ -559,11 +491,11 @@ mod tests {
 
         let development = directory(&system(), Environment::Development, &manifest());
         assert!(
-            development.starts_with(manifest()),
+            development.starts_with(home()),
             "development must be under the manifest directory it was given: {development:?}"
         );
         assert!(
-            !development.starts_with(home()),
+            !development.starts_with(manifest()),
             "development must not be written into the real home: {development:?}"
         );
     }
@@ -594,6 +526,7 @@ mod tests {
     #[test]
     fn prepare_creates_the_directory_and_reports_the_same_path() {
         let root = scratch("prepare");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let expected = directory(&system(), Environment::Development, &root);
 
         let got =
@@ -609,6 +542,7 @@ mod tests {
     #[test]
     fn prepare_is_repeatable() {
         let root = scratch("repeat");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
 
         prepare(&system(), Environment::Development, &root).expect("first");
         prepare(&system(), Environment::Development, &root).expect("second");
@@ -620,6 +554,7 @@ mod tests {
     #[test]
     fn prepare_leaves_no_probe_file() {
         let root = scratch("clean");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let directory = prepare(&system(), Environment::Development, &root).expect("writable");
 
         let leftovers: Vec<String> = std::fs::read_dir(&directory)
@@ -646,6 +581,7 @@ mod tests {
     #[test]
     fn a_stale_probe_file_does_not_make_the_directory_unusable() {
         let root = scratch("stale");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let target = prepare(&system(), Environment::Development, &root).expect("create it first");
         let stale = target.join(format!("{}{}", PROBE_PREFIX, std::process::id()));
         std::fs::write(&stale, b"left behind by a process that died mid-probe").expect("plant it");
@@ -670,6 +606,7 @@ mod tests {
     #[test]
     fn a_target_that_is_a_file_is_an_error_rather_than_a_panic() {
         let root = scratch("occupied");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let occupied = directory(&system(), Environment::Development, &root);
         std::fs::create_dir_all(occupied.parent().expect("parent")).expect("scratch parent");
         std::fs::write(&occupied, b"not a directory").expect("occupy the path");
@@ -705,6 +642,7 @@ mod tests {
     #[test]
     fn a_directory_that_exists_but_cannot_be_written_is_an_error() {
         let root = scratch("readonly");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let target = prepare(&system(), Environment::Development, &root).expect("create it first");
         let original = std::fs::metadata(&target).expect("stat").permissions();
         let mut readonly = original.clone();

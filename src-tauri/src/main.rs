@@ -11,6 +11,11 @@
 )]
 
 mod app_paths;
+#[cfg(test)]
+mod environment_isolation_test;
+#[cfg(test)]
+#[path = "../build_identity.rs"]
+mod build_identity;
 mod bootstrap;
 mod cleanup;
 mod commands;
@@ -189,7 +194,7 @@ fn main() {
             *setup_migration
                 .lock()
                 .expect("Windows migration report lock poisoned") =
-                if migration_system.platform == system_paths::Platform::Windows {
+                if migration_system.platform == system_paths::Platform::Windows && bootstrap::build_environment() == config::Environment::Production {
                     let new_data = app_paths::resolve(
                         &migration_system,
                         bootstrap::build_environment(),
@@ -243,6 +248,12 @@ fn main() {
             commands::agent::local_agent_stop,
             commands::agent_token::local_agent_configure_token,
             commands::agent_token::local_agent_token_facts,
+            commands::publication_run::local_publication_scene,
+            commands::publication_run::local_publication_resume,
+            commands::publication_draft::local_publication_draft_get,
+            commands::publication_draft::local_publication_draft_save,
+            commands::publication_draft::local_publication_draft_clear,
+            commands::publication_draft::local_publication_draft_deactivate,
             commands::bit_account::local_agent_bit_account_bind,
             commands::account::local_agent_account_check,
             commands::account::local_agent_account_cookie,
@@ -276,6 +287,8 @@ fn main() {
             // manager. None of them takes a path from the page; the log viewer's
             // 「打开日志文件夹」 passes a place label, which is resolved here.
             commands::settings::local_settings_get,
+            commands::settings::local_remove_search_directory,
+            commands::settings::local_open_save_directory,
             commands::settings::local_settings_set,
             commands::reveal::local_open_place,
             // T-04's three, appended for the same reason as the eleven above.

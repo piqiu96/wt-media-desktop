@@ -1,30 +1,4 @@
-//! What the 本机设置 page reads back about the operator's own settings.
-//!
-//! One shape for both directions — the read and the write answer the same
-//! question, so a page that just saved does not have to ask again to find out
-//! what it saved, and the two can never describe different states.
-//!
-//! `SearchDirectoryView` is the second shape, and it is separate rather than a
-//! wider `SettingsView` because it answers a question the read does not: adding a
-//! directory to the search space can evict one, and 「这次挤掉了谁」 is a fact about
-//! *that call* which nothing stored can be asked afterwards.
-//!
-//! Two fields, and each is one a person acts on. `save_dir` is the choice
-//! itself, `None` when nothing has been chosen; the page says 「未设置」for that
-//! rather than inventing a default, because the default is the *task's* decision
-//! (`settings::UserSettings::save_dir`) and not something this component can
-//! truthfully state. `file` is where the choice is kept, and it is on the wire
-//! for the one case that needs it: a settings file this build cannot read is left
-//! exactly as it is, so the person reading the error is the one who has to find
-//! it.
-//!
-//! The path is a path this process resolved, never one a caller supplied, and it
-//! carries no user content — a settings *value* is the one thing this module
-//! could have echoed back and does not.
-//!
-//! Field names are load-bearing: the Vue layer reads them by name, and
-//! `SettingsView`'s key set is pinned by the test at the bottom rather than left
-//! to be discovered by a page that silently shows `undefined`.
+//! 桌面设置读写回执及目录登记结果。路径来自本机设置，不接受页面指定配置文件。
 
 use serde::Serialize;
 
@@ -37,6 +11,8 @@ pub struct SettingsView {
     pub save_dir: Option<String>,
     /// The settings file, absolute — `settings::path` under the data root.
     pub file: String,
+    /// 当前目录优先，其余按最近登记排序；读取不会扫描目录内容。
+    pub known_save_dirs: Vec<String>,
 }
 
 /// What adding a directory to the search space did.
@@ -75,6 +51,7 @@ mod tests {
     #[test]
     fn the_wire_key_sets_are_pinned() {
         let view = SettingsView {
+            known_save_dirs: vec![],
             save_dir: Some("/Users/operator/Movies".to_string()),
             file: "/Users/operator/Library/Application Support/WTMedia/Desktop/settings.toml"
                 .to_string(),
@@ -87,7 +64,7 @@ mod tests {
                 .expect("an object")
                 .keys()
                 .collect::<Vec<_>>(),
-            vec!["file", "save_dir"]
+            vec!["file", "known_save_dirs", "save_dir"]
         );
         assert_eq!(value["save_dir"], "/Users/operator/Movies");
     }
@@ -129,6 +106,7 @@ mod tests {
     #[test]
     fn an_unchosen_directory_arrives_as_null() {
         let view = SettingsView {
+            known_save_dirs: vec![],
             save_dir: None,
             file: "/tmp/settings.toml".to_string(),
         };

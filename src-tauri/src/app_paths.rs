@@ -1,69 +1,6 @@
-//! The four directories this app owns, and whether each can be written.
-//!
-//! This is a second module rather than an extension of `paths` because the two
-//! have opposite failure contracts. `paths` locates *a config file* and promises
-//! there is always an answer — a locator that could return "nothing" would be a
-//! launch with no CSP and no Cloud address. Here, "where does your data live"
-//! has to be a fact: a root that cannot be resolved is an error, and a root that
-//! cannot be written is an error, because every caller of this module is about
-//! to either write something a user cares about or delete something.
-//!
-//! ## The four roots
-//!
-//! - [`Root::Data`] holds what an upgrade must not lose. Today that is
-//!   `settings.toml`; §6.8 of the architecture baseline lists the rest.
-//! - [`Root::Versions`] lives *inside* the data root, which is the shape
-//!   `RuntimePaths` gives it on the Agent side (`versions_dir = data_dir /
-//!   "versions"`). One definition of where versions go, not two.
-//! - [`Root::Logs`] is a root this module names but does not define: the log
-//!   tree already has an owner in `logging::paths`, and a second rule computing
-//!   the same path would be two rules nothing makes agree.
-//! - [`Root::Cache`] is disposable by definition, and that is why it is **not**
-//!   inside the data directory. The cleanup command's whole job is to delete
-//!   files, and the milestone forbids "升级或清理删除业务数据". A cache root
-//!   sharing a parent with `settings.toml` makes that prohibition depend on a
-//!   whitelist staying right forever; a cache root in a different tree makes
-//!   deleting a user's data require a wrong *path* rather than a wrong *list*.
-//!   macOS agrees for its own reason: `~/Library/Caches` is excluded from Time
-//!   Machine and may be purged by the system, which is what "regenerable" means.
-//!
-//! ## The layouts mirror the Agent's
-//!
-//! Installed: `~/Library/Application Support/WTMedia/Desktop`,
-//! `~/Library/Logs/WTMedia/Desktop`, `~/Library/Caches/WTMedia/Desktop` — the
-//! same `WTMedia/<Component>` shape `runtime/paths.py` uses with `Agent`.
-//! Development: `<crate>/.local/{data,logs,cache}`, with `versions` under `data`.
-//! A developer who has read one repository should not be surprised by the other.
-//!
-//! One asymmetry is inherited deliberately: installed, the data root *is* the
-//! component directory, while in a checkout it is one level down (`.local/data`).
-//! That is what `RuntimePaths` does, and matching it matters more here than a
-//! tidier rule would.
-//!
-//! ## Which environment decides
-//!
-//! The **build's**, not `config.environment` — the same rule `logging::paths`
-//! states and its tests pin. A release binary is production unconditionally, so
-//! no config file can talk it into writing into a checkout; a development run
-//! cannot reach the installed directories either.
-//!
-//! ## Pure, then impure
-//!
-//! [`directory`] is pure — a root, a home, an environment and a manifest
-//! directory in; a path out — so the layout is testable without a filesystem or
-//! a real `$HOME`. [`resolve`] is the caller-facing question ("all four, for
-//! this process") and holds the one genuine failure: production without a
-//! `HOME`. [`prepare`] is the only part that touches the filesystem, and it
-//! answers a second question: *can this root actually be written to*.
-//!
-//! **Readers use [`directory`], writers use [`prepare`].** Creating a directory
-//! is a side effect, and "show me how much cache is used" must not be the reason
-//! a cache directory starts existing. The split is here so that distinction is
-//! visible at every call site rather than remembered.
-//!
-//! Windows is **not** covered, following `logging::paths`: `~/Library/...` is a
-//! macOS shape, no Windows layout has been measured, and a guess would be worse
-//! than a registered gap.
+//! System roots scoped by Desktop identity, independent of Cloud routing.
+//! Dev and Test use WTMedia/Dev and WTMedia/Test; prod preserves WTMedia.
+//! Readers resolve only; writers prepare and probe their specific root.
 
 use crate::config::Environment;
 use crate::system_paths::{Platform, SystemPathError, SystemPaths};
@@ -76,13 +13,6 @@ pub const APPLICATION_DIR: &str = "WTMedia";
 /// is why a component level exists at all: one shared directory where a cleanup
 /// in one component could reach the other's files is the failure this prevents.
 pub const COMPONENT_DIR: &str = "Desktop";
-
-/// The development layout's first component, spelled as `logging::paths` does.
-pub const DEVELOPMENT_DIR: &str = ".local";
-
-/// The development data component. Installed, the data root is the component
-/// directory itself; in a checkout it is one level down.
-const DEVELOPMENT_DATA_DIR: &str = "data";
 
 /// The prefix of the write-probe file. Dot-prefixed so it does not look like a
 /// file a user owns, and carrying the pid so two processes cannot remove each
@@ -108,11 +38,7 @@ pub enum Root {
 }
 
 impl Root {
-    /// The name a root goes by: its last component installed, and its component
-    /// under `.local/` in a checkout.
-    ///
-    /// `Data`'s two names differ (`Desktop` installed, `data` here) because the
-    /// layouts differ; the other three are spelled once for both.
+    /// The component name used within the platform-specific layout.
     pub const fn name(self) -> &'static str {
         match self {
             Root::Data => "data",
@@ -126,34 +52,20 @@ impl Root {
 /// Where one root is, for a given system and build. Pure: creates nothing,
 /// reads nothing, and does not consult the environment.
 ///
-/// `SystemPaths` is injected rather than re-read per caller. A development
-/// layout ignores it entirely; production reads only the platform's approved
-/// system root, never `HOME`, `LOCALAPPDATA`, the executable directory, or cwd.
+/// `SystemPaths` is injected rather than re-read per caller. Every identity
+/// uses the platform's approved system root, with its own environment namespace.
 pub fn directory(
     root: Root,
     system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> PathBuf {
-    if environment != Environment::Production {
-        return match root {
-            Root::Logs => crate::logging::paths::directory(system, environment, manifest_dir),
-            Root::Versions => {
-                directory(Root::Data, system, environment, manifest_dir).join(Root::Versions.name())
-            }
-            Root::Data => manifest_dir
-                .join(DEVELOPMENT_DIR)
-                .join(DEVELOPMENT_DATA_DIR),
-            Root::Cache => manifest_dir.join(DEVELOPMENT_DIR).join(Root::Cache.name()),
-        };
-    }
-
     let installed = match system.platform {
         Platform::Windows => system
             .local_app_data
             .as_deref()
             .unwrap_or_else(|| Path::new(""))
-            .join(APPLICATION_DIR)
+            .join(environment.application_dir())
             .join(COMPONENT_DIR),
         Platform::Darwin | Platform::Unix => {
             let home = system.home.as_deref().unwrap_or_else(|| Path::new(""));
@@ -169,14 +81,14 @@ pub fn directory(
                     return home
                         .join("Library")
                         .join("Application Support")
-                        .join(APPLICATION_DIR)
+                        .join(environment.application_dir())
                         .join(COMPONENT_DIR)
                 }
                 Root::Cache => {
                     return home
                         .join("Library")
                         .join("Caches")
-                        .join(APPLICATION_DIR)
+                        .join(environment.application_dir())
                         .join(COMPONENT_DIR)
                 }
             }
@@ -196,13 +108,13 @@ pub fn directory(
 /// Why a set of roots could not be resolved.
 #[derive(Debug)]
 pub enum ResolveError {
-    /// Production with no `HOME`. The installed layout is built *from* the home
+    /// Any Desktop identity with no `HOME`. The installed layout is built *from* the home
     /// directory and there is nothing to substitute for it. A placeholder would
     /// produce a relative path — `Library/Logs/...` under whatever directory the
     /// process happens to be in — which is a silently wrong answer, and this
     /// module's contract is that the answer is either right or refused.
     NoHome,
-    /// Windows production cannot invent the per-user tree without Local AppData.
+    /// Windows cannot invent the per-user tree without Local AppData.
     NoLocalAppData,
 }
 
@@ -242,15 +154,14 @@ pub struct AppPaths {
 
 /// Resolve all four roots. Does not touch the filesystem.
 ///
-/// `home` is `None` when the process has no `HOME`, which only matters for the
-/// installed layout: the development layout is built from the manifest directory
-/// and never reads it, so a checkout still resolves with no `HOME` at all.
+/// Every identity requires a system user root. Missing roots are refused
+/// before any directory can be created under a relative or shared location.
 pub fn resolve(
     system: &SystemPaths,
     environment: Environment,
     manifest_dir: &Path,
 ) -> Result<AppPaths, ResolveError> {
-    if environment == Environment::Production {
+    {
         system.production_base().map_err(|error| match error {
             SystemPathError::NoHome => ResolveError::NoHome,
             SystemPathError::NoLocalAppData => ResolveError::NoLocalAppData,
@@ -389,38 +300,13 @@ mod tests {
         );
     }
 
-    /// A development run writes under its own crate and names every root by its
-    /// last component, so the four are recognisable in a directory listing.
+    /// Each non-production identity owns a separate system namespace.
     #[test]
-    fn the_development_layout_is_under_the_crates_local_directory() {
-        for environment in [Environment::Development, Environment::Test, Environment::Pre] {
-            let local = manifest().join(DEVELOPMENT_DIR);
-            assert_eq!(
-                directory(Root::Data, &system(), environment, &manifest()),
-                local.join("data")
-            );
-            assert_eq!(
-                directory(
-                    Root::Versions,
-                    &system(),
-                    environment,
-                    &manifest()
-                ),
-                local.join("data").join("versions")
-            );
-            assert_eq!(
-                directory(Root::Logs, &system(), environment, &manifest()),
-                local.join("logs")
-            );
-            assert_eq!(
-                directory(
-                    Root::Cache,
-                    &system(),
-                    environment,
-                    &manifest()
-                ),
-                local.join("cache")
-            );
+    fn non_production_layouts_have_distinct_system_namespaces() {
+        for (env, folder) in [(Environment::Development,"Dev"),(Environment::Test,"Test"),(Environment::Pre,"Pre")] {
+            assert_eq!(directory(Root::Data,&system(),env,&manifest()),home().join("Library/Application Support/WTMedia").join(folder).join("Desktop"));
+            assert_eq!(directory(Root::Versions,&system(),env,&manifest()),home().join("Library/Application Support/WTMedia").join(folder).join("Desktop/versions"));
+            assert_eq!(directory(Root::Cache,&system(),env,&manifest()),home().join("Library/Caches/WTMedia").join(folder).join("Desktop"));
         }
     }
 
@@ -528,11 +414,11 @@ mod tests {
 
             let local = directory(root, &system(), Environment::Development, &manifest());
             assert!(
-                local.starts_with(manifest()),
+                local.starts_with(home()),
                 "development {root:?} must be under the manifest directory: {local:?}"
             );
             assert!(
-                !local.starts_with(home()),
+                !local.starts_with(manifest()),
                 "development {root:?} must not be written into the real home: {local:?}"
             );
         }
@@ -596,14 +482,14 @@ mod tests {
         );
     }
 
-    /// A checkout needs no `HOME` at all, and this is the arm that must not
-    /// inherit the refusal above.
     #[test]
-    fn a_development_layout_resolves_without_a_home() {
-        assert_eq!(
-            resolve(&system(), Environment::Development, &manifest()).expect("no home needed"),
-            resolve(&system(), Environment::Development, &manifest()).expect("the same")
-        );
+    fn non_production_layouts_refuse_a_missing_home() {
+        for environment in [Environment::Development, Environment::Test] {
+            assert!(matches!(
+                resolve(&no_home_system(), environment, &manifest()),
+                Err(ResolveError::NoHome)
+            ));
+        }
     }
 
     /// A scratch directory of this test's own, named after the test binary's pid
@@ -627,6 +513,7 @@ mod tests {
     #[test]
     fn prepare_creates_the_root_and_reports_the_same_path() {
         let root = scratch("prepare");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         for kind in [Root::Data, Root::Versions, Root::Logs, Root::Cache] {
             let expected = directory(kind, &system(), Environment::Development, &root);
             let got = prepare(kind, &system(), Environment::Development, &root)
@@ -649,6 +536,7 @@ mod tests {
     #[test]
     fn preparing_one_root_does_not_create_the_others() {
         let root = scratch("lazy");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         prepare(Root::Data, &system(), Environment::Development, &root).expect("data");
 
         for kind in [Root::Versions, Root::Logs, Root::Cache] {
@@ -666,6 +554,7 @@ mod tests {
     #[test]
     fn prepare_is_repeatable() {
         let root = scratch("repeat");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         prepare(Root::Data, &system(), Environment::Development, &root).expect("first");
         prepare(Root::Data, &system(), Environment::Development, &root).expect("second");
         std::fs::remove_dir_all(&root).ok();
@@ -675,6 +564,7 @@ mod tests {
     #[test]
     fn prepare_leaves_no_probe_file() {
         let root = scratch("clean");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let directory = prepare(Root::Data, &system(), Environment::Development, &root)
             .expect("a writable scratch root");
 
@@ -702,6 +592,7 @@ mod tests {
     #[test]
     fn a_stale_probe_file_does_not_make_the_root_unusable() {
         let root = scratch("stale");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let target = prepare(Root::Data, &system(), Environment::Development, &root)
             .expect("create it first");
         let stale = target.join(format!("{}{}", PROBE_PREFIX, std::process::id()));
@@ -733,6 +624,7 @@ mod tests {
     #[test]
     fn a_root_occupied_by_a_file_is_an_error_rather_than_a_panic() {
         let root = scratch("occupied");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let occupied = directory(Root::Cache, &system(), Environment::Development, &root);
         std::fs::create_dir_all(occupied.parent().expect("parent")).expect("scratch parent");
         std::fs::write(&occupied, b"not a directory").expect("occupy the path");
@@ -764,6 +656,7 @@ mod tests {
     #[test]
     fn a_root_that_exists_but_cannot_be_written_is_an_error() {
         let root = scratch("readonly");
+        let system = || SystemPaths::from_parts(Platform::Darwin, Some(root.clone()), None, root.clone());
         let target = prepare(Root::Data, &system(), Environment::Development, &root)
             .expect("create it first");
         let original = std::fs::metadata(&target).expect("stat").permissions();
@@ -889,4 +782,30 @@ mod tests {
             PathBuf::from("/home/operator/Library/Caches/WTMedia/Desktop")
         );
     }
+}
+
+/// Resolve sidecar state explicitly; no frozen/default path can merge identities.
+pub fn agent_directories(config: &crate::config::DesktopConfig, system: &SystemPaths) -> Result<(PathBuf, PathBuf), String> {
+    if let Some(raw) = config.agent.data_dir.as_deref().filter(|raw| !raw.trim().is_empty()) {
+        let old_logs = crate::logging::paths::agent_directory(system, Some(raw)).map_err(|e| e.to_string())?;
+        let base = old_logs.parent().ok_or("invalid Agent data directory")?;
+        let data = match config.environment {
+            Environment::Production => base.to_path_buf(),
+            env => base.join(env.code()),
+        };
+        return Ok((data.clone(), data.join("logs")));
+    }
+    let root = system.production_base().map_err(|e| e.to_string())?;
+    if !root.is_absolute() { return Err("Agent system root must be absolute".into()); }
+    let (data, logs) = match system.platform {
+        Platform::Windows => {
+            let data = root.join(config.environment.application_dir()).join("Agent");
+            (data.clone(), data.join("logs"))
+        },
+        Platform::Darwin | Platform::Unix => (
+            root.join("Library/Application Support").join(config.environment.application_dir()).join("Agent"),
+            root.join("Library/Logs").join(config.environment.application_dir()).join("Agent"),
+        ),
+    };
+    Ok((data, logs))
 }

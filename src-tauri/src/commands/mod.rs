@@ -13,6 +13,8 @@ pub mod diagnostic;
 pub mod downloads;
 pub mod profile;
 pub mod public_config;
+pub mod publication_draft;
+pub mod publication_run;
 pub mod reveal;
 pub mod saved_files;
 pub mod settings;

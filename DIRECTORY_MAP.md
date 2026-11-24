@@ -35,7 +35,8 @@ Cloud 仓的 `web/src/apps/desktop/` 与 `web/src/modules/` 维护 Desktop Vue �
 
 ## 工具
 
-- `scripts/`：开发、验证、打包和发布脚本。
+- `scripts/`：开发、交付产物校验、打包和发布脚本；`scripts/test.sh` 为常规测试入口。
+- `tests/op/`：运维入口回归；`tests/pack/`：打包、发布门禁和安装验收，运行条件见 `tests/README.md`。
 - `bin/`：本地进程控制及运行辅助。
 
 ## 默认跳过

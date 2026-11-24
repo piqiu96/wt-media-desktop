@@ -386,7 +386,7 @@ mod tests {
             .expect("a checkout needs no home");
         let [settings_file, versions] = desktop_write_sites(&paths);
 
-        assert!(settings_file.starts_with(manifest().join(".local").join("data")));
+        assert!(settings_file.starts_with(home().join("Library/Application Support/WTMedia/Dev/Desktop")));
         assert!(refuse(&settings_file, &paths, &agent()).is_ok());
         assert!(refuse(&versions.join("0.2.2"), &paths, &agent()).is_ok());
 

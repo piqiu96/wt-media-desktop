@@ -8,16 +8,11 @@
 //! whole reason `plan` exists next to it — the decisions are made where a test
 //! can ask about them, and `install` is left with nothing to decide.
 //!
-//! **Which environment.** The directory and the default level follow the
-//! **build**, not the environment the config file declares. The two are not the
-//! same value: the shipped file says `production` and `load_with` takes the
-//! stricter of it and the build (`config.rs`), so a debug build running the
-//! shipped file has an effective environment of *production*. Keying the log
-//! destination off that value would put a developer's records in
-//! `~/Library/Logs/WTMedia/Desktop` — and would make the development layout in
-//! `paths` unreachable on every ordinary launch. The CHG registers the
-//! consequence: a process can now have two "environments", so the launch
-//! summary names both.
+//! **Which environment.** Log directories and default levels follow the
+//! compiled Desktop identity. The config loader pins the same identity even
+//! when Cloud routing or the resource file declares a different environment.
+//! This resolver takes the compiled identity explicitly so logs remain in the
+//! correct namespace even when it is used independently of startup loading.
 //!
 //! **When.** Before anything else can want to say something. The launch summary
 //! is the first record in the file, and a subscriber installed one line later
@@ -250,21 +245,18 @@ pub fn limits_of(config: &DesktopConfig) -> Limits {
 
 /// The log directory for this build, created and proved writable.
 ///
-/// The environment is the **build's**; see this module's header for why it is
-/// not `config.environment`. `home` is `None` when the process has no `HOME`,
-/// which only matters for the installed layout — the development layout is
-/// built from the manifest directory and never reads it.
+/// Every environment uses its system namespace. If no system user root is
+/// available, the diagnostic fallback is also scoped by Desktop identity.
 fn resolve_directory(
     build_environment: Environment,
     system: &crate::system_paths::SystemPaths,
     manifest_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let prepared = if build_environment != Environment::Production {
-        paths::prepare(system, build_environment, manifest_dir)
-    } else if system.production_base().is_ok() {
+    let prepared = if system.production_base().is_ok() {
         paths::prepare(system, build_environment, manifest_dir)
     } else {
-        paths::prepare_at(&system.log_fallback())
+        let fallback = match build_environment { Environment::Production => system.log_fallback(), env => system.log_fallback().join(env.code()) };
+        paths::prepare_at(&fallback)
     };
     prepared.map_err(|error| error.to_string())
 }
@@ -363,23 +355,15 @@ mod tests {
         }
     }
 
-    /// The destination and the level follow the **build**, even though the
-    /// config file makes the two environments disagree on every ordinary launch.
-    ///
-    /// The premise is half the test: the shipped file declares production and
-    /// `load_with` takes the stricter of file and build, so a debug build's
-    /// effective environment is production. If the plan were resolved from that
-    /// value, the development layout would be unreachable and a developer's
-    /// records would land in the installed location — which is why the build is
-    /// what gets passed in, and why this test asks `plan` rather than the
-    /// helpers it delegates to.
+    /// Even an independently supplied config cannot redirect the compiled
+    /// identity's logs into another Desktop namespace.
     #[test]
-    fn the_plan_follows_the_build_not_the_effective_environment() {
+    fn the_plan_keeps_the_compiled_identity_when_given_a_different_config() {
         let mut config = shipped();
         assert_eq!(
             config.environment,
             Environment::Production,
-            "the premise: the shipped file under a debug build is effectively production"
+            "the supplied config is production"
         );
 
         let manifest = scratch("plan");
@@ -393,17 +377,17 @@ mod tests {
         let development = plan(
             &config,
             Environment::Development,
-            &system(Some(&home())),
+            &system(Some(&installed_home)),
             &manifest,
         );
         let directory = development
             .directory
             .as_ref()
             .expect("the development layout must be usable in a writable tree");
-        assert_eq!(directory, &manifest.join(".local").join("logs"));
+        assert_eq!(directory, &installed_home.join("Library/Logs/WTMedia/Dev/Desktop"));
         assert!(
             !directory.starts_with(home()),
-            "the development layout must not read the home: {directory:?}"
+            "the development layout must use only the injected home: {directory:?}"
         );
         assert_eq!(
             development.levels.default,
@@ -478,21 +462,11 @@ mod tests {
     #[test]
     fn an_unusable_directory_is_a_reason_and_not_a_failure() {
         let manifest = scratch("unusable");
-        std::fs::create_dir_all(&manifest).expect("scratch");
-
-        // A file where the tree would go — the same shape the occupied-directory
-        // arm of the real launch uses.
-        std::fs::write(manifest.join(".local"), b"occupied").expect("the blocker");
-        let problem = plan(
-            &shipped(),
-            Environment::Development,
-            &system(Some(&home())),
-            &manifest,
-        )
-        .directory
-        .expect_err("a file where the directory would go must be reported");
-        assert!(problem.contains(".local"), "{problem}");
-        std::fs::remove_dir_all(&manifest).ok();
+        std::fs::create_dir_all(&manifest).unwrap();
+        std::fs::write(manifest.join("Library"),b"occupied").unwrap();
+        let problem = plan(&shipped(),Environment::Development,&system(Some(&manifest)),&manifest).directory.expect_err("a file blocks the system directory");
+        assert!(problem.contains("Library"),"{problem}");
+        std::fs::remove_dir_all(manifest).unwrap();
     }
 
     /// The mapping itself, against hand-written pairs.

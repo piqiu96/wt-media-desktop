@@ -1,30 +1,6 @@
-//! Where the desktop configuration file comes from.
-//!
-//! Two layouts, one descending order each. A packaged app looks beside its own
-//! resources first so an operator can replace the file without touching the
-//! bundle; a development tree looks in the crate's `resources/`, because
-//! `CARGO_MANIFEST_DIR` is the only location that is the same in every dev
-//! checkout.
-//!
-//! Both orders end at [`crate::config::PRODUCTION_TOML`], which is compiled in.
-//! That last step is the point of the module: a bundle whose resource file is
-//! missing, truncated or corrupt still starts with a known-good config rather
-//! than with no CSP and no Cloud address. A locator that could return "nothing"
-//! would make that failure mode possible.
-//!
-//! Which layout applies is decided by the **build's** environment, not by the
-//! file's — the file cannot be located until we know where to look for it. A
-//! release binary is production unconditionally, so that is one fact, not two:
-//! `Environment::Production` means both "look in the bundle" and "honour no
-//! `WT_MEDIA_DESKTOP_*` variable", and passing them as separate arguments would
-//! only create a way for them to disagree.
-//!
-//! `locate` is pure — the "does this path exist" question is a parameter — so
-//! the descending order is testable without a filesystem or a real environment.
-//! Reading the chosen file is [`file_text`], the only impure part.
-//!
-//! The caller is `bootstrap::resolve`, which supplies the two directories from
-//! the running process and hands the text to `config::load_with`.
+//! Configuration resource lookup. Development may use a checkout override;
+//! packaged test/prod identities read bundled resources. The compiled fallback
+//! retains the desktop identity selected at build time.
 
 use crate::config::{Environment, PRODUCTION_TOML};
 use std::collections::BTreeMap;
@@ -94,7 +70,7 @@ pub fn candidates(
 ) -> Vec<(PathBuf, Source)> {
     let mut out = Vec::new();
 
-    if environment != Environment::Production {
+    if environment == Environment::Development {
         if let Some(raw) = env.get(CONFIG_ENV) {
             let raw = raw.trim();
             if !raw.is_empty() {
@@ -103,7 +79,7 @@ pub fn candidates(
         }
     }
 
-    if environment == Environment::Production {
+    if environment != Environment::Development {
         if let Some(dir) = resource_dir {
             out.push((dir.join(RESOURCE_NAME), Source::BundledResource));
         }

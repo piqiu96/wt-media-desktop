@@ -1,20 +1,6 @@
-//! Desktop's configuration: one schema, one parse path, and two overlay rules
-//! that can only ever move in the stricter direction.
-//!
-//! 1. `Environment::Production` ignores the **whole** `WT_MEDIA_DESKTOP_*`
-//!    namespace. A blocklist of "address-shaped" keys would have to grow with
-//!    every key ever added, and `WT_MEDIA_DESKTOP_CONFIG` — the file locator —
-//!    sits outside such a list by construction.
-//! 2. A release build is always `Production`, and a file may not talk its way
-//!    out of it. `Environment` derives `Ord` with `Development < Production`
-//!    precisely so "the stricter of the build and the file wins" is expressed
-//!    as `max` rather than as a hand-written branch that a later edit can get
-//!    wrong.
-//!
-//! `load_with` is pure — env map, file text, environment in; config out — so
-//! both rules are testable without touching the real environment or the
-//! filesystem. Reading the file from the right place on disk (dev vs bundled)
-//! is a separate, impure concern that belongs to the loader, not here.
+//! Desktop identity is pinned by the build configuration (dev/test/prod).
+//! Cloud routing is independent. Release identity is enforced by build_identity.rs.
+//! Runtime resource files cannot change an installed application identity.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,6 +36,10 @@ pub enum Environment {
 }
 
 impl Environment {
+    pub const fn application_dir(self) -> &'static str {
+        match self { Self::Development => "WTMedia/Dev", Self::Test => "WTMedia/Test", Self::Pre => "WTMedia/Pre", Self::Production => "WTMedia" }
+    }
+
     /// The same lowercase word, as a `&str`.
     ///
     /// `PublicConfig` puts the enum itself on the wire and serde writes this
@@ -193,12 +183,16 @@ pub fn load_with(
     environment: Environment,
 ) -> Result<DesktopConfig, ConfigError> {
     let mut config: DesktopConfig = toml::from_str(file_text).map_err(parse_error)?;
-    config.environment = config.environment.max(environment);
+    // Desktop identity is pinned at build time; Cloud target remains independent.
+    config.environment = environment;
+    if config.agent.port == 8765 {
+        config.agent.port = match environment { Environment::Development => 18765, Environment::Test => 28765, Environment::Pre => 38765, Environment::Production => 8765 };
+    }
 
     // Rule 1. Production consults no environment variable at all — including
     // ones added later, and including the file locator, which the caller
     // resolves before ever getting here.
-    if config.environment != Environment::Production {
+    if config.environment == Environment::Development {
         // Rule for the one key that is allowed to differ: presence overrides
         // the file, absence leaves it alone. The accepted value is `1`, matching
         // the variable this key replaces.
@@ -298,7 +292,7 @@ impl DesktopConfig {
         }) {
             return Err(ConfigError::Invalid("browser.media_origins must contain exact http(s) origins".to_string()));
         }
-        if self.environment == Environment::Production {
+        if self.environment != Environment::Development {
             if parse_http_url(&self.cloud.base_url).is_none() {
                 return Err(ConfigError::Invalid(
                     "cloud.base_url must be an http(s) URL".to_string(),
@@ -401,7 +395,8 @@ mod tests {
                 if line.starts_with("environment =") { format!("environment = \"{}\"", name) }
                 else { line.to_string() }
             }).collect::<Vec<_>>().join("\n");
-            let config = load_with(&BTreeMap::new(), &text, Environment::Development).expect(name);
+            let identity = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            let config = load_with(&BTreeMap::new(), &text, identity).expect(name);
             assert_eq!(config.environment.code(), name);
             assert_eq!(serde_json::to_value(config.environment).unwrap(), name);
             assert_eq!(config.cloud.cloud_env, "prod");
@@ -619,8 +614,8 @@ mod tests {
             Environment::Development,
         )
         .expect("a production file under a development build must still load");
-        assert_eq!(declared.environment, Environment::Production);
-        assert!(!declared.development.python_fallback);
+        assert_eq!(declared.environment, Environment::Development);
+        assert!(declared.development.python_fallback);
     }
 
     /// Both directions of the host rule in one place, because a rule that only

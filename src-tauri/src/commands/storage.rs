@@ -31,7 +31,7 @@
 //!
 //! The Agent's tree is different in kind: Desktop does not own it, it mirrors the
 //! Agent's own rule from the setting the Agent was given
-//! (`logging::paths::agent_directory`). When that rule cannot be applied, the
+//! (`app_paths::agent_directories`). When that rule cannot be applied, the
 //! command fails rather than answering with a directory the Agent is not using —
 //! a wrong directory presented as the Agent's logs is worse than a refusal.
 //!
@@ -58,9 +58,10 @@ use crate::dto::{
     LogEntryFact, LogFileFact, LogListing, LogTailResult, LogTreeFiles, LogTreeUsage, StorageUsage,
 };
 use crate::logging::{
-    paths as log_paths,
     reader::{self, LogFile, Source, TAIL_LINES},
 };
+#[cfg(test)]
+use crate::logging::paths as log_paths;
 use crate::storage;
 use crate::system_paths::SystemPaths;
 use std::path::{Path, PathBuf};
@@ -133,7 +134,7 @@ pub(crate) fn resolve(config: &DesktopConfig) -> Result<Resolved, String> {
         }
     }
 
-    let agent_logs = log_paths::agent_directory(&system, config.agent.data_dir.as_deref())
+    let agent_logs = app_paths::agent_directories(config, &system).map(|(_, logs)| logs)
         .map_err(|error| format!("无法确定 Agent 日志目录: {error}"))?;
 
     Ok(Resolved { paths, agent_logs })
