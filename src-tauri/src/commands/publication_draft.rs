@@ -1,4 +1,4 @@
-//! Narrow unsubmitted task/batch input bridge. Page identity is only an expected-user check.
+//! Narrow unsubmitted task/batch/plan input bridge. Page identity is only an expected-user check.
 use crate::dto::GuardRefusal;
 use crate::http::LocalAgentClient;
 use crate::state::AgentTokenState;
@@ -12,12 +12,14 @@ pub enum DraftType {
     #[default]
     Task,
     Batch,
+    Plan,
 }
 impl DraftType {
     fn path(self) -> &'static str {
         match self {
             Self::Task => "/api/v1/publication-draft/task",
             Self::Batch => "/api/v1/publication-draft/batch",
+            Self::Plan => "/api/v1/publication-draft/plan",
         }
     }
 }
@@ -163,15 +165,6 @@ mod tests {
     use crate::token::RuntimeToken;
     use std::collections::BTreeMap;
 
-    async fn request_batch(
-        client: &LocalAgentClient,
-        tokens: &AgentTokenState,
-        method: &str,
-        body: Option<Value>,
-    ) -> Result<Value, GuardRefusal> {
-        request(client, tokens, "9", DraftType::Batch, method, body).await
-    }
-
     #[test]
     fn omitted_type_still_reads_task_input() {
         let args: DraftReadArgs = serde_json::from_value(json!({"user_id":"9"})).unwrap();
@@ -179,9 +172,16 @@ mod tests {
     }
 
     #[test]
+    fn plan_type_uses_only_fixed_plan_input_path() {
+        let args: DraftReadArgs =
+            serde_json::from_value(json!({"user_id":"9", "draft_type":"plan"})).unwrap();
+        assert_eq!(args.draft_type.path(), "/api/v1/publication-draft/plan");
+    }
+
+    #[test]
     fn rejects_unknown_or_arbitrary_draft_paths() {
         for kind in [
-            "plan",
+            "unknown",
             "../task",
             "batch/other",
             "",
@@ -241,22 +241,31 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["revision"], "0");
-        let request = requests(&seen).remove(0);
-        assert!(request.starts_with("GET /api/v1/publication-draft/task "));
-        assert!(request.to_lowercase().contains("x-publication-user-id: 9"));
-        assert!(request.to_lowercase().contains("authorization: bearer "));
-        assert!(!request.contains("cloud-secret"));
-        for method in ["GET", "PUT", "DELETE"] {
-            let body = if method == "GET" {
-                None
-            } else {
-                Some(json!({"expected_revision":"0", "payload":{"request_key":"original"}}))
-            };
-            tauri::async_runtime::block_on(request_batch(&client, &tokens, method, body)).unwrap();
-            let observed = requests(&seen).pop().unwrap();
-            assert!(observed.starts_with(&format!("{method} /api/v1/publication-draft/batch ")));
-            assert!(observed.to_lowercase().contains("x-publication-user-id: 9"));
-            assert!(!observed.contains("cloud-secret"));
+        let observed_request = requests(&seen).remove(0);
+        assert!(observed_request.starts_with("GET /api/v1/publication-draft/task "));
+        assert!(observed_request
+            .to_lowercase()
+            .contains("x-publication-user-id: 9"));
+        assert!(observed_request
+            .to_lowercase()
+            .contains("authorization: bearer "));
+        assert!(!observed_request.contains("cloud-secret"));
+        for draft_type in [DraftType::Batch, DraftType::Plan] {
+            for method in ["GET", "PUT", "DELETE"] {
+                let body = if method == "GET" {
+                    None
+                } else {
+                    Some(json!({"expected_revision":"0", "payload":{"request_key":"original"}}))
+                };
+                tauri::async_runtime::block_on(request(
+                    &client, &tokens, "9", draft_type, method, body,
+                ))
+                .unwrap();
+                let observed = requests(&seen).pop().unwrap();
+                assert!(observed.starts_with(&format!("{method} {} ", draft_type.path())));
+                assert!(observed.to_lowercase().contains("x-publication-user-id: 9"));
+                assert!(!observed.contains("cloud-secret"));
+            }
         }
     }
 }
