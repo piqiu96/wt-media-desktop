@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "contract_revision": "publication-plan-20261125.1",
+  "contract_revision": "bilibili-publication-20261126.2",
   "consumes": {
-    "cloud_agent_api": "v1@2026.11.25.2",
+    "cloud_agent_api": "v1@2026.11.26.2",
     "local_agent_api": "v1@2026.11.25.2",
     "local_event_schemas": "runtime-environment@2026.07.14.9",
     "local_status_enums": "status@2026.07.14.8"
